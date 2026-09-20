@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OpenCode2Runtime, eventText } from "../src/client.mjs";
 
 test("runtime qualifies service with isolated roots and maps v2 calls", async () => {
@@ -82,4 +85,101 @@ test("native session actions map to v2 compact and revert APIs", async () => {
     ["clear", { sessionID: "ses_1" }],
   ]);
   await assert.rejects(runtime.nativeAction("ses_1", "undo"), /messageID is required/);
+});
+
+test("provider registry exposes native auth schema without credentials", async () => {
+  const calls = [];
+  const fake = {
+    provider: {
+      list: async (input) => { calls.push(["provider.list", input]); return { data: [{ id: "openai", name: "OpenAI", integrationID: "openai", activation: "enabled", package: "x", headers: { authorization: "sk-header-secret" }, settings: { apiKey: "sk-settings-secret" } }] }; },
+      get: async (input) => { calls.push(["provider.get", input]); return { data: { id: "openai", name: "OpenAI", integrationID: "openai", activation: "enabled", package: "x", headers: { authorization: "sk-header-secret" } } }; },
+    },
+    integration: {
+      list: async (input) => { calls.push(["integration.list", input]); return { data: [{ id: "openai", name: "OpenAI", methods: [{ type: "key", label: "API key", form: { fields: [{ key: "key", type: "text", secret: true }, { key: "apiKey", type: "text", default: "default-key-secret" }, { key: "publicURL", type: "text", default: "http://localhost" }] } }], connections: [{ type: "credential", id: "cred_1", label: "OpenAI" }] }] }; },
+      get: async (input) => { calls.push(["integration.get", input]); return { data: { id: "openai", name: "OpenAI", methods: [{ type: "key", label: "API key", form: { fields: [{ key: "key", type: "text", secret: true }, { key: "apiKey", type: "text", default: "default-key-secret" }, { key: "publicURL", type: "text", default: "http://localhost" }] } }], connections: [{ type: "credential", id: "cred_1", label: "OpenAI", token: "connection-token-secret" }] } }; },
+    },
+  };
+  const runtime = new OpenCode2Runtime({ client: fake, directory: "/workspace/shared" });
+  const registry = await runtime.providers();
+  assert.deepEqual(registry.providers[0], { id: "openai", integrationID: "openai", name: "OpenAI", activation: "enabled", package: "x" });
+  assert.equal(registry.integrations[0].connections[0].id, "cred_1");
+  assert.equal(JSON.stringify(registry).includes("sk-settings-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("sk-header-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("default-key-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("http://localhost"), true);
+  assert.ok(calls.every(([, input]) => input.location.directory === "/workspace/shared"));
+  const status = await runtime.providerStatus("openai");
+  assert.equal(status.integration.methods[0].type, "key");
+  assert.equal(JSON.stringify(status).includes("sk-header-secret"), false);
+});
+
+test("provider key configuration uses the native integration endpoint and never echoes the key", async () => {
+  const calls = [];
+  const runtime = new OpenCode2Runtime({ client: { integration: { connect: { key: async (input) => calls.push(input) } } } });
+  const result = await runtime.configureProvider({ integrationID: "openai", key: "sk-test-secret", label: "primary", directory: "/project" });
+  assert.deepEqual(result, { ok: true, integrationID: "openai" });
+  assert.deepEqual(calls, [{ integrationID: "openai", location: { directory: "/project" }, key: "sk-test-secret", label: "primary" }]);
+  assert.equal(JSON.stringify(result).includes("sk-test-secret"), false);
+  await assert.rejects(runtime.configureProvider({ integrationID: "openai", key: "" }), /key is required/);
+});
+
+test("provider connection failures do not propagate credential-bearing upstream errors", async () => {
+  const runtime = new OpenCode2Runtime({ client: { integration: { connect: { key: async () => { throw new Error("invalid key sk-upstream-secret"); } } } } });
+  await assert.rejects(runtime.configureProvider({ integrationID: "openai", key: "sk-request-secret" }), (error) => {
+    assert.equal(error.message, "OpenCode provider key connection failed");
+    assert.equal(error.message.includes("sk-request-secret"), false);
+    assert.equal(error.message.includes("sk-upstream-secret"), false);
+    return true;
+  });
+});
+
+test("provider OAuth methods preserve native attempt status while omitting secrets", async () => {
+  const calls = [];
+  const fake = { integration: { oauth: {
+    connect: async (input) => { calls.push(["connect", input]); return { location: {}, data: { attemptID: "attempt_1", url: "https://login.example", instructions: "Open the URL", mode: "code", time: { created: 1, expires: 2 }, token: "secret" } }; },
+    status: async (input) => { calls.push(["status", input]); return { data: { status: "pending", time: { created: 1, expires: 2 }, token: "secret" } }; },
+    complete: async (input) => { calls.push(["complete", input]); },
+    cancel: async (input) => { calls.push(["cancel", input]); },
+  } } };
+  const runtime = new OpenCode2Runtime({ client: fake, directory: "/project" });
+  const started = await runtime.providerOAuthStart({ integrationID: "xai", methodID: "oauth", answer: { region: "us" } });
+  assert.equal(started.attempt.attemptID, "attempt_1");
+  assert.equal(JSON.stringify(started).includes("secret"), false);
+  assert.deepEqual(await runtime.providerOAuthStatus({ integrationID: "xai", attemptID: "attempt_1" }), { status: { status: "pending", time: { created: 1, expires: 2 } } });
+  await runtime.providerOAuthComplete({ integrationID: "xai", attemptID: "attempt_1", code: "one-time-code" });
+  await runtime.providerOAuthCancel({ integrationID: "xai", attemptID: "attempt_1" });
+  assert.deepEqual(calls, [
+    ["connect", { integrationID: "xai", location: { directory: "/project" }, methodID: "oauth", answer: { region: "us" } }],
+    ["status", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" } }],
+    ["complete", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" }, code: "one-time-code" }],
+    ["cancel", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" } }],
+  ]);
+});
+
+test("custom provider writes the documented v2 config schema atomically and keeps key server-side", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-provider-"));
+  try {
+    const configDir = join(root, "config", "opencode");
+    await (await import("node:fs/promises")).mkdir(configDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(join(configDir, "opencode.json"), JSON.stringify({ mcp: { servers: { browser: { type: "remote", url: "http://browser" } } }, providers: { existing: { name: "Existing" } } }));
+    const runtime = new OpenCode2Runtime({ root, client: { server: { info: async () => ({}) } } });
+    const result = await runtime.configureCustomProvider({ providerID: "local-ai", name: "Local AI", baseURL: "http://127.0.0.1:9123/v1", modelIDs: ["chat", "chat"], apiKey: "custom-api-secret", restart: false });
+    assert.deepEqual(result, { ok: true, providerID: "local-ai", modelIDs: ["chat"], reloaded: false });
+    const configPath = join(configDir, "opencode.json");
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    assert.equal(config.mcp.servers.browser.url, "http://browser");
+    assert.equal(config.providers.existing.name, "Existing");
+    assert.deepEqual(config.providers["local-ai"], {
+      name: "Local AI",
+      package: "@opencode/ai/providers/openai-compatible",
+      settings: { apiKey: "custom-api-secret", baseURL: "http://127.0.0.1:9123/v1" },
+      models: { chat: { name: "chat" } },
+    });
+    assert.equal((await stat(configPath)).mode & 0o077, 0);
+    const status = await runtime.customProviderStatus("local-ai");
+    assert.deepEqual(status, { configured: true, providerID: "local-ai", name: "Local AI", packageName: "@opencode/ai/providers/openai-compatible", baseURL: "http://127.0.0.1:9123/v1", modelIDs: ["chat"], hasApiKey: true });
+    assert.equal(JSON.stringify(status).includes("custom-api-secret"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -47,6 +47,22 @@ then resume admission. Keep the previous image and pre-migration backup until
 the probe passes. `destroy` should stop compute and remove routing while
 retaining data; purging R2, keys, and backups is a separate deliberate action.
 
+## OpenCode provider setup
+
+Settings → OpenCode → Provider connections is the supported web path for the OpenCode provider
+catalog. It supports native key connections, OAuth start/status/complete or
+cancel flows, credential labels and activation/removal, and custom
+OpenAI-compatible providers with a base URL, model IDs, and an optional key.
+The Worker allowlists the provider operations before forwarding them to the
+runner. Provider keys are submitted for the connection operation and are not
+returned in catalog/status payloads, persisted in browser state, or copied into
+error messages. Deployment secrets in `.dev.vars` and Wrangler remain a
+separate operator-managed path.
+
+The isolated OpenCode CLI qualification also points 2.0.11 at a local fake
+OpenAI-compatible endpoint. It verifies model catalog discovery and completion
+continuation without reading user credentials or a real provider.
+
 ## Stable local previews
 
 `npm run preview:worker -- --var APP_TOKEN:local-preview-token --var RUNNER_TOKEN:local-runner-token`
@@ -55,9 +71,18 @@ Wrangler with that bundle. Vite can refresh the frontend without replacing the
 container's outbound gateway. Restart this command deliberately after backend
 changes. Checkpoint an idle computer before rebuilding its image.
 
-During qualification, direct source reloads left the Docker egress proxy pointing
-to a closed host port. Native model calls then retried with connection reset or
-certificate verification errors. A freshly started gateway successfully handled
-native Muse Spark requests. Do not turn off certificate validation to hide this
-failure. Check the local proxy log and restart the preview backend; restore the
+On SIGINT or SIGTERM, the wrapper first requests an authenticated idle
+checkpoint, writes a marker containing that checkpoint ID, stops only Docker
+containers whose names match this preview's project and Sandbox class, and
+then stops the Wrangler process group. The next invocation compares the marker
+with the committed checkpoint and current readiness: it restores only a
+matching checkpoint marked `restore_required` or `recovering`, clears a marker
+when the computer is already ready, and leaves uncertain cases for manual
+recovery.
+
+During qualification, a retained Docker egress proxy caused recurring native
+TLS/certificate failures after direct source reloads; the problem was not only
+a closed host port. A freshly started gateway successfully handled native Muse
+Spark requests. Do not turn off certificate validation to hide this failure.
+Check the proxy log, restart the preview backend cleanly, and restore the
 committed checkpoint if the container image changed.

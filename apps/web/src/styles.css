@@ -2955,3 +2955,272 @@ a:focus-visible {
 .computer-rail-open {
   overflow-y: auto;
 }
+
+.delegation-list {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0 24px 42px;
+}
+.delegation-card {
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+  border-radius: 4px;
+  background: var(--panel);
+  font-size: 12px;
+}
+.delegation-card summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+  color: var(--soft);
+}
+.delegation-card summary span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.delegation-card p {
+  line-height: 1.7;
+  margin: 16px 0;
+  white-space: pre-wrap;
+}
+.delegation-result {
+  white-space: pre-wrap;
+  line-height: 1.8;
+  border-top: 1px solid var(--line);
+  padding: 16px 0;
+}
+.delegate-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+.delegate-dialog > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 12px 0 24px;
+}
+.delegate-dialog .text-area {
+  width: 100%;
+}
+.delegate-dialog .field-label {
+  margin-top: 18px;
+}
+.delegate-dialog .settings-actions {
+  margin-top: 22px;
+}
+
+/* Provider setup shares the settings rhythm and keeps long catalogs bounded. */
+.provider-settings {
+  margin: 24px 0;
+  border-top: 1px solid var(--line);
+  padding-top: 24px;
+}
+.provider-header,
+.provider-actions,
+.provider-editor-title,
+.provider-method-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.provider-header {
+  align-items: flex-start;
+}
+.provider-header h4,
+.provider-editor h4,
+.provider-connections h4,
+.custom-provider h4 {
+  font: 500 15px var(--font-ui);
+  margin: 0 0 10px;
+}
+.provider-header p,
+.custom-provider p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 0 0 18px;
+}
+.provider-actions {
+  flex-wrap: wrap;
+  margin: 12px 0 20px;
+}
+.provider-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  border-radius: 4px;
+}
+.provider-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.provider-search input {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  min-width: 0;
+  width: 100%;
+  outline: 0;
+  font-size: 12px;
+}
+.provider-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  max-height: 176px;
+  overflow: auto;
+  margin: 10px 0 24px;
+  padding: 2px;
+}
+.provider-option {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  text-align: left;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--soft);
+  background: transparent;
+  font-size: 12px;
+}
+.provider-option span,
+.provider-option small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-option small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.provider-option:hover,
+.provider-option.selected {
+  background: #292624;
+  border-color: #4c4540;
+  color: #f2eded;
+}
+.provider-editor,
+.custom-provider {
+  padding: 20px;
+  background: #181614;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-top: 20px;
+}
+.provider-editor-title {
+  margin-bottom: 20px;
+}
+.provider-method {
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+.provider-method:last-child {
+  padding-bottom: 0;
+}
+.provider-method-title {
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+.provider-method-title > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.provider-method > .primary-btn {
+  margin-top: 14px;
+}
+.provider-instructions,
+.provider-fallback,
+.provider-progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.provider-instructions svg,
+.provider-fallback svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  width: 14px;
+}
+.provider-progress {
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border-radius: 3px;
+}
+.provider-instructions a {
+  color: var(--cream);
+  text-underline-offset: 3px;
+}
+.provider-connections {
+  margin-top: 28px;
+}
+.provider-connection {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.provider-connection > div:first-child {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.provider-connection small {
+  color: var(--muted);
+}
+.connection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dynamic-provider-field {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  margin: 16px 0;
+  min-width: 0;
+}
+.dynamic-provider-field small {
+  color: var(--muted);
+  line-height: 1.6;
+}
+.custom-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  margin: 18px 0;
+}
+.custom-provider-grid > label:nth-child(n + 3) {
+  grid-column: 1/-1;
+}
+.custom-provider textarea {
+  resize: vertical;
+  font-family: var(--font-code);
+}
+@media (max-width: 600px) {
+  .provider-picker,
+  .custom-provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .provider-editor,
+  .custom-provider {
+    padding: 14px;
+  }
+}

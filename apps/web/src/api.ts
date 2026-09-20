@@ -246,9 +246,9 @@ export const api = {
   updateBot: (
     id: string,
     payload: {
-      name: string;
-      instructions: string;
-      model: string;
+      name?: string;
+      instructions?: string;
+      model?: string;
       agent?: string;
       nodeId?: string;
     },

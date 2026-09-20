@@ -456,6 +456,9 @@ export class Workspace {
       `CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, thread_id TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, interval_minutes INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
     sql.exec(
+      `CREATE TABLE IF NOT EXISTS delegations (id TEXT PRIMARY KEY, source_bot_id TEXT NOT NULL, source_thread_id TEXT NOT NULL, target_bot_id TEXT NOT NULL, target_thread_id TEXT NOT NULL, target_run_id TEXT NOT NULL, prompt TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    );
+    sql.exec(
       `CREATE INDEX IF NOT EXISTS events_run_seq ON events(run_id, sequence)`,
     );
     sql.exec(
@@ -571,6 +574,11 @@ export class Workspace {
         return response(await this.computerCheckpoint());
       if (url.pathname === "/api/computer/restore" && request.method === "POST")
         return response(await this.computerRestore());
+      if (
+        url.pathname === "/api/providers" ||
+        url.pathname.startsWith("/api/providers/")
+      )
+        return await this.providerProxy(request, url);
       if (url.pathname === "/api/catalog" && request.method === "GET")
         return await this.catalog();
       if (url.pathname === "/api/computer/preview" && request.method === "GET")
@@ -622,6 +630,16 @@ export class Workspace {
         return response(this.threads());
       if (url.pathname === "/api/threads" && request.method === "POST")
         return response(this.createThread(await body(request)), 201);
+      const delegationRoute = url.pathname.match(
+        /^\/api\/threads\/([^/]+)\/delegations$/,
+      );
+      if (delegationRoute && request.method === "GET")
+        return response(this.delegations(delegationRoute[1]));
+      if (delegationRoute && request.method === "POST")
+        return response(
+          this.createDelegation(delegationRoute[1], await body(request)),
+          202,
+        );
       const renameThread = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
       if (renameThread && request.method === "PATCH") {
         const input = await body<any>(request);
@@ -1022,6 +1040,145 @@ export class Workspace {
         isoNow(),
       );
     return this.botSkills(botId);
+  }
+  private delegationView(row: any): any {
+    return {
+      id: row.id,
+      sourceBotId: row.source_bot_id,
+      sourceBotName: row.source_bot_name,
+      sourceThreadId: row.source_thread_id,
+      targetBotId: row.target_bot_id,
+      targetBotName: row.target_bot_name,
+      targetThreadId: row.target_thread_id,
+      targetThreadTitle: row.target_thread_title,
+      targetRunId: row.target_run_id,
+      prompt: row.prompt,
+      idempotencyKey: row.idempotency_key,
+      status: row.run_status,
+      ...(row.run_result !== null && row.run_result !== undefined
+        ? { result: row.run_result }
+        : {}),
+      ...(row.run_error ? { error: row.run_error } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+  private delegations(threadId: string): any[] {
+    if (!this.one("SELECT id FROM threads WHERE id=?", threadId))
+      throw new HttpError(404, "conversation not found");
+    return this.rows<any>(
+      `SELECT d.*, sb.name AS source_bot_name, tb.name AS target_bot_name,
+        tt.title AS target_thread_title, r.status AS run_status,
+        r.result AS run_result, r.error AS run_error, r.updated_at AS run_updated_at
+       FROM delegations d
+       JOIN bots sb ON sb.id=d.source_bot_id
+       JOIN bots tb ON tb.id=d.target_bot_id
+       JOIN threads tt ON tt.id=d.target_thread_id
+       JOIN runs r ON r.id=d.target_run_id
+       WHERE d.source_thread_id=? ORDER BY d.created_at DESC`,
+      threadId,
+    ).map((row) => this.delegationView(row));
+  }
+  private createDelegation(sourceThreadId: string, input: any): any {
+    const source = this.one<any>(
+      "SELECT t.*, b.name AS source_bot_name FROM threads t JOIN bots b ON b.id=t.bot_id WHERE t.id=?",
+      sourceThreadId,
+    );
+    if (!source) throw new HttpError(404, "source conversation not found");
+    const targetBotId =
+      typeof input.targetBotId === "string" ? input.targetBotId.trim() : "";
+    const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+    const idempotencyKey =
+      typeof input.idempotencyKey === "string"
+        ? input.idempotencyKey.trim()
+        : "";
+    if (!targetBotId) throw new HttpError(400, "targetBotId is required");
+    if (!prompt || prompt.length > 20_000)
+      throw new HttpError(400, "prompt must contain 1–20000 characters");
+    if (!idempotencyKey || idempotencyKey.length > 160)
+      throw new HttpError(400, "idempotencyKey must contain 1–160 characters");
+    if (targetBotId === source.bot_id)
+      throw new HttpError(400, "delegation target must be a different bot");
+    const target = this.one<any>("SELECT * FROM bots WHERE id=?", targetBotId);
+    if (!target) throw new HttpError(404, "target bot not found");
+    // Delegation is explicit, but an accidental A -> B -> A chain is still
+    // refused. Walk only the bounded durable ancestry; this never schedules
+    // another delegation on its own.
+    let ancestorThreadId = sourceThreadId;
+    for (let depth = 0; depth < 16; depth += 1) {
+      const ancestor = this.one<any>(
+        "SELECT source_bot_id,source_thread_id FROM delegations WHERE target_thread_id=? ORDER BY created_at DESC LIMIT 1",
+        ancestorThreadId,
+      );
+      if (!ancestor) break;
+      if (ancestor.source_bot_id === targetBotId)
+        throw new HttpError(400, "delegation would create a bot loop");
+      ancestorThreadId = ancestor.source_thread_id;
+    }
+    const existing = this.one<any>(
+      "SELECT * FROM delegations WHERE idempotency_key=?",
+      idempotencyKey,
+    );
+    if (existing) {
+      if (
+        existing.source_thread_id !== sourceThreadId ||
+        existing.target_bot_id !== targetBotId ||
+        existing.prompt !== prompt
+      )
+        throw new HttpError(
+          409,
+          "idempotency key conflicts with an existing delegation",
+        );
+      return this.delegationView(
+        this.one<any>(
+          `SELECT d.*, sb.name AS source_bot_name, tb.name AS target_bot_name, tt.title AS target_thread_title,
+          r.status AS run_status, r.result AS run_result, r.error AS run_error
+         FROM delegations d JOIN bots sb ON sb.id=d.source_bot_id JOIN bots tb ON tb.id=d.target_bot_id
+         JOIN threads tt ON tt.id=d.target_thread_id JOIN runs r ON r.id=d.target_run_id WHERE d.id=?`,
+          existing.id,
+        ),
+      );
+    }
+    if (this.one("SELECT id FROM runs WHERE idempotency_key=?", idempotencyKey))
+      throw new HttpError(
+        409,
+        "idempotency key is already used by another run",
+      );
+    const sourceLabel = `${source.source_bot_name} / ${source.title}`;
+    const targetThread = this.createThread({
+      botId: targetBotId,
+      title: `Delegation from ${sourceLabel}`,
+    });
+    const delegatedPrompt = `[Delegation from bot "${source.source_bot_name}" in conversation "${source.title}"]\n\n${prompt}`;
+    const targetRun = this.createRun({
+      threadId: targetThread.id,
+      prompt: delegatedPrompt,
+      idempotencyKey,
+    });
+    const delegationId = id("delegation");
+    const now = isoNow();
+    this.state.storage.sql.exec(
+      "INSERT INTO delegations (id,source_bot_id,source_thread_id,target_bot_id,target_thread_id,target_run_id,prompt,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      delegationId,
+      source.bot_id,
+      sourceThreadId,
+      targetBotId,
+      targetThread.id,
+      targetRun.id,
+      prompt,
+      idempotencyKey,
+      now,
+      now,
+    );
+    return this.delegationView(
+      this.one<any>(
+        `SELECT d.*, sb.name AS source_bot_name, tb.name AS target_bot_name, tt.title AS target_thread_title,
+        r.status AS run_status, r.result AS run_result, r.error AS run_error
+       FROM delegations d JOIN bots sb ON sb.id=d.source_bot_id JOIN bots tb ON tb.id=d.target_bot_id
+       JOIN threads tt ON tt.id=d.target_thread_id JOIN runs r ON r.id=d.target_run_id WHERE d.id=?`,
+        delegationId,
+      ),
+    );
   }
   private createThread(input: any): any {
     const bot = this.one<any>(
@@ -1771,6 +1928,18 @@ export class Workspace {
       "SELECT name FROM bots WHERE id=?",
       thread.bot_id,
     );
+    const completedDelegations = this.rows<any>(
+      `SELECT tb.name AS target_bot_name, d.prompt, r.status, r.result, r.error
+       FROM delegations d JOIN bots tb ON tb.id=d.target_bot_id JOIN runs r ON r.id=d.target_run_id
+       WHERE d.source_thread_id=? AND r.status IN ('succeeded','failed','cancelled','needs_review')
+       ORDER BY r.updated_at DESC LIMIT 8`,
+      thread.id,
+    )
+      .map((item) => {
+        const result = String(item.result ?? item.error ?? "").slice(0, 6000);
+        return `[Delegated to ${item.target_bot_name}; ${item.status}]\nRequest: ${String(item.prompt).slice(0, 1000)}\nResult: ${result}`;
+      })
+      .join("\n\n");
     return [
       identity
         ? `Your name is ${identity.name}. You are this user’s persistent bot, powered by OpenCode. Use your configured name when asked who you are.`
@@ -1779,6 +1948,9 @@ export class Workspace {
       memories ? `Relevant bot memory:\n${memories}` : "",
       selectedSkills
         ? `Assigned skills (workspace instruction bundles):\n${selectedSkills}`
+        : "",
+      completedDelegations
+        ? `Completed delegation results (use as context, do not repeat automatically):\n${completedDelegations}`
         : "",
     ]
       .filter(Boolean)
@@ -1871,6 +2043,37 @@ export class Workspace {
           : {}),
       },
     );
+    return new Response(result.body, {
+      status: result.status,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  }
+  private async providerProxy(request: Request, url: URL): Promise<Response> {
+    if (this.maintenance)
+      throw new HttpError(409, "computer maintenance is in progress");
+    const path = url.pathname.slice(4);
+    const allowed =
+      (request.method === "GET" && path === "/providers") ||
+      (request.method === "POST" &&
+        /^\/providers\/(key|custom|credentials\/(activate|label|remove)|oauth\/(start|status|complete|cancel)|command\/(start|status|cancel))$/.test(
+          path,
+        ));
+    if (!allowed) throw new HttpError(404, "Provider operation not found");
+    const input =
+      request.method === "POST" ? await body<any>(request) : undefined;
+    const transport = await this.transport();
+    const result = await transport.fetch(path, {
+      method: request.method,
+      ...(input
+        ? {
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(input),
+          }
+        : {}),
+    });
     return new Response(result.body, {
       status: result.status,
       headers: {

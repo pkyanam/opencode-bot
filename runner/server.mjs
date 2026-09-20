@@ -19,6 +19,7 @@ export class RunStore {
     this.stateDir = options.stateDir;
     this.instanceId = options.instanceId ?? (this.stateDir ? loadStableInstanceId(options.instanceIdFile ?? path.join(this.stateDir, '../../computer-instance-id')) : randomUUID());
     this.paused = false;
+    this.configuring = false;
     this.runtimeOps = 0;
     this.runtimeIdle = [];
     this.runs = new Map();
@@ -31,7 +32,7 @@ export class RunStore {
    * entered this gate by the time quiescing begins is rejected, so it cannot
    * restart OpenCode/Chromium while the workspace is being archived. */
   async withRuntime(fn) {
-    if (this.paused) throw httpError(409, "runner is quiesced");
+    if (this.paused || this.configuring) throw httpError(409, "computer settings or checkpoint are being updated");
     this.runtimeOps += 1;
     try { return await fn(); }
     finally {
@@ -42,13 +43,20 @@ export class RunStore {
     }
   }
 
+  async updateConfiguration(fn) {
+    if (this.paused || this.configuring || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
+    this.configuring = true;
+    try { await this.waitForRuntimeIdle(); return await fn(); }
+    finally { this.configuring = false; }
+  }
+
   async waitForRuntimeIdle() {
     if (this.runtimeOps === 0) return;
     await new Promise((resolve) => this.runtimeIdle.push(resolve));
   }
 
   async start(input) {
-    if (this.paused) throw httpError(409, "runner is quiesced");
+    if (this.paused || this.configuring) throw httpError(409, "computer settings or checkpoint are being updated");
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
     const commandPrompt = input?.command?.name ? `/${input.command.name} ${input.command.text ?? ""}`.trim() : "";
     const hasAction = Boolean(input?.sessionAction?.name);
@@ -110,14 +118,15 @@ export class RunStore {
         if (run.runtimeOutcome === 'session.execution.failed' || messages.some(message => message.error || message.finish === 'error')) throw new Error(messages.find(message => message.error)?.error?.message ?? messages.find(message => typeof message.error === 'string')?.error ?? 'OpenCode reported an execution error');
         if (!messages.length && !run.cancelRequested) throw new Error('Execution ended without an assistant result');
       } else await watcher;
+      if (run.transportFailure) throw new Error(run.transportFailure);
       if (!isTerminal(run.status)) {
         run.status = run.cancelRequested ? "cancelled" : "succeeded";
         this.emit(run, run.status, run.final ? { text: run.final } : {});
       }
     } catch (error) {
-      run.status = run.cancelRequested ? "cancelled" : (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
+      run.status = run.cancelRequested ? "cancelled" : (run.transportFailure || error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
       if (run.status === 'needs_review' && run.sessionId) await this.runtime.interrupt(run.sessionId).catch(() => {});
-      this.emit(run, "error", { message: error instanceof Error ? error.message : String(error) });
+      this.emit(run, "error", { message: run.transportFailure ?? (error instanceof Error ? error.message : String(error)) });
     } finally {
       controller.abort();
       run.finishedAt = new Date().toISOString();
@@ -137,6 +146,13 @@ export class RunStore {
           run.status = 'waiting_approval';
           this.emit(run, 'approval.requested', { ...eventData, requestId: eventData.id });
         } else this.emit(run, type, eventData);
+        if (type === 'session.retry.scheduled' && /UNKNOWN_CERTIFICATE_VERIFICATION_ERROR|CERTIFICATE_VERIFY_FAILED/.test(eventData.error?.message ?? '')) {
+          run.transportFailure = 'The computer could not establish a secure connection to the model provider. Provider retries were stopped. Check the computer’s network connection before retrying. (' + eventData.error.message + ')';
+          this.emit(run, 'connection.failed', { message: run.transportFailure });
+          await this.runtime.interrupt(run.sessionId);
+          if (!this.runtime.wait) run.status = 'needs_review';
+          break;
+        }
         if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(type)) {
           run.runtimeOutcome = type;
           if (!this.runtime.wait) run.status = type.endsWith('succeeded') ? 'succeeded' : type.endsWith('failed') ? 'failed' : 'cancelled';
@@ -177,6 +193,7 @@ export class RunStore {
   }
 
   async checkpoint() {
+    if (this.configuring || this.paused) throw httpError(409, "computer settings or checkpoint are being updated");
     this.paused = true;
     await this.waitForRuntimeIdle();
     if (this.terminalRegistry?.active()) { this.paused = false; throw httpError(409, "cannot checkpoint while terminal controller is active"); }
@@ -198,7 +215,7 @@ export class RunStore {
   }
 
   emit(run, type, data) { run.events.push({ seq: run.events.length + 1, type, data }); this.persist(run); }
-  public(run) { return { runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: run.status === 'failed' ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
+  public(run) { return { runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
   load() {
     fs.mkdirSync(this.stateDir, { recursive: true });
     for (const file of fs.readdirSync(this.stateDir).filter((name) => name.endsWith(".json"))) {
@@ -303,6 +320,39 @@ export function createServer({ store, authToken = token, workspace = process.env
           if (!res.destroyed) res.end();
         }
         return;
+      }
+      const providerPath = new URL(req.url,'http://runner').pathname;
+      if (providerPath === '/providers' || providerPath.startsWith('/providers/')) {
+        if (req.method === 'GET' && providerPath === '/providers') return json(res,200,await store.withRuntime(() => store.runtime.providers(workspace)));
+        const methods = {
+          '/providers/key':'configureProvider',
+          '/providers/custom':'configureCustomProvider',
+          '/providers/credentials/activate':'activateProviderCredential',
+          '/providers/credentials/label':'updateProviderCredential',
+          '/providers/credentials/remove':'removeProviderCredential',
+          '/providers/oauth/start':'providerOAuthStart',
+          '/providers/oauth/status':'providerOAuthStatus',
+          '/providers/oauth/complete':'providerOAuthComplete',
+          '/providers/oauth/cancel':'providerOAuthCancel',
+          '/providers/command/start':'providerCommandStart',
+          '/providers/command/status':'providerCommandStatus',
+          '/providers/command/cancel':'providerCommandCancel',
+        };
+        const method=methods[providerPath];
+        if (req.method !== 'POST' || !method) return json(res,404,{error:'Provider operation not found'});
+        if (!store.runtime[method]) return json(res,501,{error:'This OpenCode runtime does not expose that provider operation'});
+        if (!providerPath.endsWith('/status') && (store.terminalRegistry?.active() || [...store.runs.values()].some(run=>!isTerminal(run.status)))) return json(res,409,{error:'Finish the active request or close Native OpenCode before changing provider settings.'});
+        const input=await readJson(req);
+        try {
+          const invoke=() => store.runtime[method]({...input,directory:workspace});
+          const result=await (providerPath.endsWith("/status") ? store.withRuntime(invoke) : store.updateConfiguration(invoke));
+          return json(res,200,result);
+        } catch (error) {
+          if (error.statusCode === 409) return json(res,409,{error:"Finish active work before changing computer settings"});
+          // Native provider failures may include request bodies. Never return
+          // credential-bearing SDK errors or write these requests to run logs.
+          return json(res,400,{error:'OpenCode could not complete the provider operation. Check the required fields and credentials, then try again.'});
+        }
       }
       if (new URL(req.url, 'http://runner').pathname === "/catalog" && req.method === "GET") {
         if (!store.runtime.catalog) return json(res, 501, { error: "catalog is unavailable" });

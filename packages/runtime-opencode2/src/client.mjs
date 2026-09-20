@@ -1,6 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import * as ServiceModule from "@opencode/client/service";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createPlaywrightMcpServer } from "../../browser/src/index.ts";
 
 const Service = ServiceModule.Service ?? ServiceModule;
@@ -196,6 +196,260 @@ export class OpenCode2Runtime {
     };
   }
 
+  /**
+   * Return the native provider and integration registry for a location.
+   *
+   * OpenCode owns credential storage.  This method deliberately projects the
+   * response to connection metadata and auth form descriptions; provider
+   * settings, headers, and credentials are never returned to the caller.
+   */
+  async providers(directory = this.directory) {
+    await this.start();
+    const location = nativeLocation(directory);
+    const [providers, integrations] = await Promise.all([
+      this.client.provider.list(location),
+      this.client.integration?.list ? this.client.integration.list(location) : { data: [] },
+    ]);
+    return {
+      location: directory,
+      providers: (providers?.data ?? []).map(sanitizeProvider),
+      integrations: (integrations?.data ?? []).map(sanitizeIntegration),
+    };
+  }
+
+  /** Return one provider and its native integration/auth schema. */
+  async providerStatus(providerID, directory = this.directory) {
+    if (!providerID) throw new Error("providerID is required");
+    await this.start();
+    const location = nativeLocation(directory);
+    const provider = await this.client.provider.get({ providerID, ...location });
+    let integration;
+    const integrationID = provider?.data?.integrationID ?? provider?.data?.id;
+    if (integrationID && this.client.integration?.get) {
+      try {
+        integration = await this.client.integration.get({ integrationID, ...location });
+      } catch (error) {
+        // A provider does not necessarily have a first-party integration.
+        // Preserve the provider status while leaving the auth schema absent.
+        if (!isNotFound(error)) throw error;
+      }
+    }
+    return {
+      location: directory,
+      provider: sanitizeProvider(provider?.data),
+      ...(integration?.data ? { integration: sanitizeIntegration(integration.data) } : {}),
+    };
+  }
+
+  /**
+   * Connect a native key integration. The key is passed directly to the
+   * daemon and is intentionally absent from both the return value and errors.
+   */
+  async configureProvider({ integrationID, key, answer, label, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(key, "key");
+    await this.start();
+    if (!this.client.integration?.connect?.key) throw new Error("OpenCode provider key connection API is unavailable");
+    try {
+      await this.client.integration.connect.key({
+        integrationID,
+        ...nativeLocation(directory ?? this.directory),
+        key,
+        ...(answer === undefined ? {} : { answer }),
+        ...(label === undefined ? {} : { label }),
+      });
+    } catch {
+      // Do not propagate upstream error payloads: some providers include the
+      // submitted credential in validation errors.
+      throw new Error("OpenCode provider key connection failed");
+    }
+    return { ok: true, integrationID };
+  }
+
+  /**
+   * Add or update a v2 custom provider in the runtime-owned opencode.json.
+   * ConfigV2's HTTP update endpoint only edits `shell`; provider definitions
+   * are therefore written through the authored `providers.<id>` config shape
+   * (`package`, `settings`, and `models`). The file is private to this
+   * runtime and written atomically with mode 0600.
+   */
+  async configureCustomProvider({ providerID, name, baseURL, modelIDs, models, apiKey, packageName = "@opencode/ai/providers/openai-compatible", settings, headers, body, restart = true } = {}) {
+    requireProviderID(providerID);
+    requireNonEmpty(baseURL, "baseURL");
+    const modelNames = normalizeModelIDs(modelIDs, models);
+    if (modelNames.length === 0) throw new Error("at least one modelID is required");
+    try { new URL(baseURL); } catch { throw new Error("baseURL must be a valid URL"); }
+    requireNonEmpty(packageName, "packageName");
+    const configPath = `${this.root}/config/opencode/opencode.json`;
+    await mkdir(`${this.root}/config/opencode`, { recursive: true });
+    const config = await readConfig(configPath);
+    const priorConfig = JSON.parse(JSON.stringify(config));
+    config.providers ??= {};
+    const previous = config.providers[providerID] && typeof config.providers[providerID] === "object" ? config.providers[providerID] : {};
+    const previousSettings = previous.settings && typeof previous.settings === "object" ? previous.settings : {};
+    const nextSettings = { ...previousSettings, ...(settings ?? {}) };
+    if (apiKey === null) delete nextSettings.apiKey;
+    else if (apiKey !== undefined) {
+      requireNonEmpty(apiKey, "apiKey");
+      nextSettings.apiKey = apiKey;
+    }
+    const nextModels = models && typeof models === "object" && !Array.isArray(models)
+      ? { ...models }
+      : Object.fromEntries(modelNames.map((id) => [id, { name: id }]));
+    const nextProvider = {
+      ...previous,
+      ...(name === undefined ? {} : { name: String(name) }),
+      package: packageName,
+      settings: { ...nextSettings, baseURL, ...(headers ? { headers } : {}), ...(body ? { body } : {}) },
+      models: nextModels,
+    };
+    // `providers` is the authored v2 config shape. The daemon normalizes it
+    // to ProviderV2.Info internally; do not write the normalized `api` shape
+    // back to disk because it loses the configured SDK package on reload.
+    delete nextProvider.api;
+    config.providers[providerID] = nextProvider;
+    await writePrivateConfig(configPath, config);
+    const reload = Boolean(restart && this.endpoint);
+    if (reload) {
+      let previousError;
+      await this.stop();
+      try {
+        // A fresh daemon is required: the v2 config catalog is bootstrapped
+        // at location startup and has no provider-config reload endpoint.
+        await this.start();
+      } catch (error) {
+        previousError = error;
+        await writePrivateConfig(configPath, priorConfig);
+        try { await this.stop(); } catch {}
+        try { await this.start(); } catch {}
+      }
+      if (previousError) throw new Error("custom provider configuration could not be loaded");
+    }
+    return { ok: true, providerID, modelIDs: modelNames, reloaded: reload };
+  }
+
+  /** Return a safe view of one runtime-owned custom provider config. */
+  async customProviderStatus(providerID) {
+    requireProviderID(providerID);
+    const config = await readConfig(`${this.root}/config/opencode/opencode.json`);
+    const provider = config.providers?.[providerID];
+    if (!provider || typeof provider !== "object") return { configured: false, providerID };
+    const api = provider.api && typeof provider.api === "object" ? provider.api : {};
+    const packageName = provider.package ?? api.package;
+    const settings = provider.settings && typeof provider.settings === "object" ? provider.settings : (api.settings ?? {});
+    const modelMap = provider.models && typeof provider.models === "object" ? provider.models : {};
+    return {
+      configured: true,
+      providerID,
+      ...(provider.name ? { name: provider.name } : {}),
+      packageName,
+      ...(settings.baseURL || api.url ? { baseURL: redactUrl(settings.baseURL ?? api.url) } : {}),
+      modelIDs: Object.keys(modelMap),
+      hasApiKey: typeof settings.apiKey === "string" && settings.apiKey.length > 0,
+    };
+  }
+
+  /** Native credential lifecycle operations, with no credential material returned. */
+  async updateProviderCredential({ credentialID, label } = {}) {
+    requireNonEmpty(credentialID, "credentialID");
+    requireNonEmpty(label, "label");
+    await this.start();
+    if (!this.client.credential?.update) throw new Error("OpenCode credential update API is unavailable");
+    await this.client.credential.update({ credentialID, label });
+    return { ok: true, credentialID };
+  }
+
+  async activateProviderCredential({ credentialID } = {}) {
+    requireNonEmpty(credentialID, "credentialID");
+    await this.start();
+    if (!this.client.credential?.activate) throw new Error("OpenCode credential activation API is unavailable");
+    await this.client.credential.activate({ credentialID });
+    return { ok: true, credentialID };
+  }
+
+  async removeProviderCredential({ credentialID } = {}) {
+    requireNonEmpty(credentialID, "credentialID");
+    await this.start();
+    if (!this.client.credential?.remove) throw new Error("OpenCode credential removal API is unavailable");
+    await this.client.credential.remove({ credentialID });
+    return { ok: true, credentialID };
+  }
+
+  async providerOAuthStart({ integrationID, methodID, answer, label, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(methodID, "methodID");
+    await this.start();
+    if (!this.client.integration?.oauth?.connect) throw new Error("OpenCode provider OAuth API is unavailable");
+    let result;
+    try {
+      result = await this.client.integration.oauth.connect({
+        integrationID,
+        ...nativeLocation(directory ?? this.directory),
+        methodID,
+        ...(answer === undefined ? {} : { answer }),
+        ...(label === undefined ? {} : { label }),
+      });
+    } catch {
+      throw new Error("OpenCode provider OAuth connection failed");
+    }
+    return sanitizeAttemptResult(result);
+  }
+
+  async providerOAuthStatus({ integrationID, attemptID, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(attemptID, "attemptID");
+    await this.start();
+    if (!this.client.integration?.oauth?.status) throw new Error("OpenCode provider OAuth API is unavailable");
+    return sanitizeStatusResult(await this.client.integration.oauth.status({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) }));
+  }
+
+  async providerOAuthComplete({ integrationID, attemptID, code, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(attemptID, "attemptID");
+    await this.start();
+    if (!this.client.integration?.oauth?.complete) throw new Error("OpenCode provider OAuth API is unavailable");
+    try {
+      await this.client.integration.oauth.complete({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory), ...(code === undefined ? {} : { code }) });
+    } catch {
+      throw new Error("OpenCode provider OAuth completion failed");
+    }
+    return { ok: true, integrationID, attemptID };
+  }
+
+  async providerOAuthCancel({ integrationID, attemptID, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(attemptID, "attemptID");
+    await this.start();
+    if (!this.client.integration?.oauth?.cancel) throw new Error("OpenCode provider OAuth API is unavailable");
+    await this.client.integration.oauth.cancel({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, integrationID, attemptID };
+  }
+
+  async providerCommandStart({ integrationID, methodID, label, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(methodID, "methodID");
+    await this.start();
+    if (!this.client.integration?.command?.connect) throw new Error("OpenCode provider command connection API is unavailable");
+    return sanitizeAttemptResult(await this.client.integration.command.connect({ integrationID, methodID, ...nativeLocation(directory ?? this.directory), ...(label === undefined ? {} : { label }) }));
+  }
+
+  async providerCommandStatus({ integrationID, attemptID, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(attemptID, "attemptID");
+    await this.start();
+    if (!this.client.integration?.command?.status) throw new Error("OpenCode provider command connection API is unavailable");
+    return sanitizeStatusResult(await this.client.integration.command.status({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) }));
+  }
+
+  async providerCommandCancel({ integrationID, attemptID, directory } = {}) {
+    requireNonEmpty(integrationID, "integrationID");
+    requireNonEmpty(attemptID, "attemptID");
+    await this.start();
+    if (!this.client.integration?.command?.cancel) throw new Error("OpenCode provider command connection API is unavailable");
+    await this.client.integration.command.cancel({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, integrationID, attemptID };
+  }
+
   async compact(sessionID, options = {}) {
     await this.start();
     if (!this.client.session.compact) throw new Error("OpenCode 2 session compact API is unavailable");
@@ -232,7 +486,6 @@ export class OpenCode2Runtime {
       case "redo":
       case "revert-clear": return this.revertClear(sessionID);
       case "revert-commit": return this.revertCommit(sessionID);
-      case "revert-clear": return this.revertClear(sessionID);
       case "interrupt": return this.interrupt(sessionID);
       case "wait": return this.wait(sessionID, payload.signal);
       case "model":
@@ -289,6 +542,129 @@ function normalizeModel(value) {
   const [reference,variant] = String(value).split('#');
   const [providerID, ...rest] = reference.split("/");
   return { providerID, id: rest.join("/") || providerID, ...(variant?{variant}:{}) };
+}
+
+function nativeLocation(directory) {
+  return { location: { directory } };
+}
+
+function requireNonEmpty(value, name) {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${name} is required`);
+}
+
+function requireProviderID(value) {
+  requireNonEmpty(value, "providerID");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error("providerID contains unsupported characters");
+}
+
+function normalizeModelIDs(modelIDs, models) {
+  const fromMap = models && typeof models === "object" && !Array.isArray(models) ? Object.keys(models) : [];
+  const input = Array.isArray(modelIDs) ? modelIDs : fromMap;
+  return [...new Set(input.map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean))];
+}
+
+async function writePrivateConfig(filename, config) {
+  const temporary = `${filename}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await writeFile(temporary, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    await chmod(temporary, 0o600);
+    await rename(temporary, filename);
+    await chmod(filename, 0o600);
+  } catch (error) {
+    try { await rm(temporary, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    for (const key of [...url.searchParams.keys()]) if (isSecretKey(key) || /^(key|auth|sig)$/i.test(key)) url.searchParams.delete(key);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "[invalid-url]";
+  }
+}
+
+function isNotFound(error) {
+  return error?.status === 404 || error?.statusCode === 404 || error?.response?.status === 404 || /not found/i.test(String(error?.message ?? ""));
+}
+
+// Provider and integration responses are upstream objects. Keep an explicit
+// allowlist for credential-bearing records instead of trying to redact an
+// arbitrary object after it has reached an HTTP response or log statement.
+function sanitizeProvider(value) {
+  if (!value || typeof value !== "object") return value;
+  return pick(value, ["id", "canonical", "integrationID", "name", "activation", "package"]);
+}
+
+function sanitizeIntegration(value) {
+  if (!value || typeof value !== "object") return value;
+  return {
+    id: value.id,
+    name: value.name,
+    methods: Array.isArray(value.methods) ? value.methods.map(sanitizeMethod) : [],
+    connections: Array.isArray(value.connections) ? value.connections.map(sanitizeConnection) : [],
+  };
+}
+
+function sanitizeMethod(value) {
+  if (!value || typeof value !== "object") return value;
+  const out = pick(value, ["id", "type", "label", "command"]);
+  // Forms describe the native API's fields and choices. Redact any default
+  // values or metadata that an upstream integration may mark as sensitive.
+  if (value.form && typeof value.form === "object") out.form = sanitizeObject(value.form);
+  return out;
+}
+
+function sanitizeConnection(value) {
+  if (!value || typeof value !== "object") return value;
+  return pick(value, ["type", "id", "label", "name"]);
+}
+
+function sanitizeAttemptResult(value) {
+  const data = value?.data ?? value;
+  if (!data || typeof data !== "object") return {};
+  return {
+    ...(value?.location ? { location: value.location } : {}),
+    attempt: pick(data, ["attemptID", "url", "instructions", "mode", "time"]),
+  };
+}
+
+function sanitizeStatusResult(value) {
+  const data = value?.data ?? value;
+  if (!data || typeof data !== "object") return {};
+  return {
+    ...(value?.location ? { location: value.location } : {}),
+    status: pick(data, ["status", "message", "time"]),
+  };
+}
+
+function pick(value, keys) {
+  const out = {};
+  for (const key of keys) if (value[key] !== undefined) out[key] = value[key];
+  return out;
+}
+
+function sanitizeObject(value) {
+  if (Array.isArray(value)) return value.map(sanitizeObject);
+  if (!value || typeof value !== "object") return value;
+  const secretField = typeof value.key === "string" && isSecretKey(value.key);
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (secretField && (key === "default" || key === "value")) continue;
+    if (isSecretKey(key) && !(key === "secret" && typeof child === "boolean")) continue;
+    out[key] = sanitizeObject(child);
+  }
+  return out;
+}
+
+function isSecretKey(key) {
+  return /(^|_|-)(api[-_]?key|secret|token|password|credential|authorization|private[-_]?key|access[-_]?key)(\b|_|-)/i.test(key)
+    || /^(apiKey|accessToken|refreshToken|clientSecret|authorization)$/i.test(key);
 }
 
 export function eventText(event) {

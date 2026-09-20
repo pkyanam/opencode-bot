@@ -24,6 +24,7 @@ import {
   DialogDescription,
 } from "./ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
+import { OpenCodeProviders } from "./opencode-providers";
 
 type Node = {
   id: string;
@@ -580,10 +581,11 @@ export function SettingsModal({
                 </button>
               </div>
               <p>
-                The active computer supplies its models, agents, commands, and
-                MCP tools. Provider authentication is available in Native
-                OpenCode.
+                The shared computer supplies its models, agents, commands, and
+                MCP tools. Configure provider connections for this shared
+                OpenCode runtime below.
               </p>
+              <OpenCodeProviders onSaved={() => { onSaved(); void action(async () => setCatalog(await api.catalog())); }} />
               {catalog && (
                 <>
                   <div className="setting-fact">

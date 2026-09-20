@@ -293,6 +293,36 @@ it('surfaces owned-node approval progress and forwards the decision as a priorit
   expect(remote.submitted).toHaveLength(0);
 });
 
+it('creates explicit cross-bot delegations with durable idempotency and feeds completed results back to the source', async () => {
+  const f = fixture();
+  const sourceBot = await f.request('/api/bots', 'POST', { name: 'Scout', instructions: 'Scout context.', model: 'test/model' });
+  const targetBot = await f.request('/api/bots', 'POST', { name: 'Llama', instructions: 'Solve the delegated task.', model: 'test/model' });
+  const sourceThread = await f.request('/api/threads', 'POST', { botId: sourceBot.body.id, title: 'Main investigation' });
+  const input = { targetBotId: targetBot.body.id, prompt: 'Inspect the failing behavior and report the smallest fix.', idempotencyKey: 'delegation-scout-1' };
+  const created = await f.request(`/api/threads/${sourceThread.body.id}/delegations`, 'POST', input);
+  expect(created.status).toBe(202);
+  expect(created.body).toMatchObject({ sourceBotId: sourceBot.body.id, sourceThreadId: sourceThread.body.id, targetBotId: targetBot.body.id, prompt: input.prompt, status: 'queued' });
+  expect(created.body.targetThreadId).not.toBe(sourceThread.body.id);
+  expect((await f.request(`/api/threads/${sourceThread.body.id}/delegations`)).body).toHaveLength(1);
+  const duplicate = await f.request(`/api/threads/${sourceThread.body.id}/delegations`, 'POST', input);
+  expect(duplicate.body.id).toBe(created.body.id);
+  expect((await f.request(`/api/threads/${sourceThread.body.id}/delegations`, 'POST', { ...input, prompt: 'different' })).status).toBe(409);
+  expect((await f.request(`/api/threads/${sourceThread.body.id}/delegations`, 'POST', { ...input, idempotencyKey: 'delegation-same-bot', targetBotId: sourceBot.body.id })).status).toBe(400);
+  expect((await f.request(`/api/threads/${sourceThread.body.id}/delegations`, 'POST', { ...input, idempotencyKey: 'delegation-unknown', targetBotId: 'bot_missing' })).status).toBe(404);
+  expect((await f.request(`/api/threads/${created.body.targetThreadId}/delegations`, 'POST', { targetBotId: sourceBot.body.id, prompt: 'Loop back', idempotencyKey: 'delegation-loop' })).status).toBe(400);
+  await f.alarm();
+  const targetRun = remote.submitted.find((item) => item.threadId === created.body.targetThreadId);
+  expect(targetRun).toMatchObject({ threadId: created.body.targetThreadId, model: 'test/model', systemPrompt: expect.stringContaining('Solve the delegated task.') });
+  const remoteTarget = remote.runs.get(created.body.targetRunId);
+  remoteTarget.status = 'succeeded'; remoteTarget.final = 'The smallest fix is to guard the empty input.';
+  await f.alarm();
+  expect((await f.request(`/api/threads/${sourceThread.body.id}/delegations`)).body[0]).toMatchObject({ status: 'succeeded', result: 'The smallest fix is to guard the empty input.' });
+  await f.request('/api/runs', 'POST', { threadId: sourceThread.body.id, prompt: 'Continue with the investigation.', idempotencyKey: 'source-after-delegation' });
+  await f.alarm();
+  expect(remote.submitted.at(-1).systemPrompt).toContain('Completed delegation results');
+  expect(remote.submitted.at(-1).systemPrompt).toContain('The smallest fix is to guard the empty input.');
+});
+
 it('Telegram /new preserves bot configuration and binds subsequent messages to the new thread', async () => {
   const f=fixture(); const {bot,thread}=await f.create();
   const original=globalThis.fetch;

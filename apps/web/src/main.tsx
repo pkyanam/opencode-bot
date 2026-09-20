@@ -1,8 +1,10 @@
+import { Delegations } from "./components/delegations";
 import { SettingsModal } from "./components/settings";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertCircle,
+  ArrowUpRight,
   Bot as BotIcon,
   CalendarClock,
   ChevronDown,
@@ -130,6 +132,10 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showBot, setShowBot] = useState(false);
+  const [showDelegation, setShowDelegation] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const sendInFlight = useRef(false);
+  const [editingBot, setEditingBot] = useState<Bot>();
   const [showMemory, setShowMemory] = useState(false);
   const [showRoutines, setShowRoutines] = useState(false);
   const [showComputer, setShowComputer] = useState(false);
@@ -272,87 +278,98 @@ function App() {
         ]
       : [];
   const working = latest && isActive(latest.status);
-  const composerLocked = terminalOpen || working;
+  const composerLocked = terminalOpen || working || submitting;
   const terminalSessionId =
     threadSessionId ?? thread?.sessionId ?? thread?.runnerSessionId;
 
   const syncComposerModel = async () => {
     if (!bot || composerModel === (bot.model ?? "")) return;
-    await api.updateBot(bot.id, {
-      name: bot.name,
-      instructions: bot.instructions ?? "",
-      model: composerModel,
-    });
+    await api.updateBot(bot.id, { model: composerModel });
   };
   const submit = async () => {
     const text = prompt.trim();
-    if (!text || !thread || composerLocked) return;
-    const slash = text.match(/^\/([\w.:-]+)(?:\s+([\s\S]*))?$/);
-    if (slash) {
-      const native = catalog.commands?.find(
-        (command) => command.name === slash[1],
-      );
-      if (native) {
-        setPrompt("");
-        try {
-          await syncComposerModel();
-          await api.run({
-            threadId: thread.id,
-            prompt: text,
-            idempotencyKey: key(),
-            commandName: native.name,
-            commandText: slash[2] ?? "",
-          });
-          await refresh(true);
-        } catch (error) {
-          setError(error instanceof Error ? error.message : "Command failed");
-          setPrompt(text);
-        }
-        return;
-      }
-      const action = catalog.actions?.find(
-        (action) => action.name === slash[1],
-      );
-      if (action) {
-        setPrompt("");
-        if (action.requires?.includes("messageID")) setPaletteOpen(true);
-        else await submitNativeAction(action);
-        return;
-      }
-      if (
-        [
-          "models",
-          "agents",
-          "new",
-          "sessions",
-          "skills",
-          "files",
-          "computer",
-          "terminal",
-          "help",
-        ].includes(slash[1])
-      ) {
-        setPrompt("");
-        performWebAction(slash[1]);
-        return;
-      }
-      setError(
-        `/${slash[1]} is not in this workspace’s command catalog. Open Native OpenCode for terminal commands.`,
-      );
-      return;
-    }
-    setPrompt("");
+    if (!text || !bot || composerLocked || sendInFlight.current) return;
+    sendInFlight.current = true;
+    setSubmitting(true);
     try {
-      await syncComposerModel();
-      await api.run({
-        threadId: thread.id,
-        prompt: text,
-        idempotencyKey: key(),
-      });
-      await refresh(true);
+      const targetThread =
+        thread ??
+        (await api.thread({ botId: bot.id, title: "New conversation" }));
+      if (!thread) setSelectedThread(targetThread.id);
+      const slash = text.match(/^\/([\w.:-]+)(?:\s+([\s\S]*))?$/);
+      if (slash) {
+        const native = catalog.commands?.find(
+          (command) => command.name === slash[1],
+        );
+        if (native) {
+          setPrompt("");
+          try {
+            await syncComposerModel();
+            await api.run({
+              threadId: targetThread.id,
+              prompt: text,
+              idempotencyKey: key(),
+              commandName: native.name,
+              commandText: slash[2] ?? "",
+            });
+            await refresh(true);
+          } catch (error) {
+            setError(error instanceof Error ? error.message : "Command failed");
+            setPrompt(text);
+          }
+          return;
+        }
+        const action = catalog.actions?.find(
+          (action) => action.name === slash[1],
+        );
+        if (action) {
+          setPrompt("");
+          if (action.requires?.includes("messageID")) setPaletteOpen(true);
+          else await submitNativeAction(action);
+          return;
+        }
+        if (
+          [
+            "models",
+            "agents",
+            "new",
+            "sessions",
+            "skills",
+            "files",
+            "computer",
+            "terminal",
+            "help",
+          ].includes(slash[1])
+        ) {
+          setPrompt("");
+          performWebAction(slash[1]);
+          return;
+        }
+        setError(
+          `/${slash[1]} is not in this workspace’s command catalog. Open Native OpenCode for terminal commands.`,
+        );
+        return;
+      }
+      setPrompt("");
+      try {
+        await syncComposerModel();
+        await api.run({
+          threadId: targetThread.id,
+          prompt: text,
+          idempotencyKey: key(),
+        });
+        await refresh(true);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not start run");
+        setPrompt(text);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start run");
-      setPrompt(text);
+      setError(
+        e instanceof Error ? e.message : "Could not create a conversation",
+      );
+    } finally {
+      sendInFlight.current = false;
+      setSubmitting(false);
     }
   };
   const submitNativeCommand = async (name: string) => {
@@ -379,8 +396,12 @@ function App() {
       setError(e instanceof Error ? e.message : "Could not run native action");
     }
   };
+  const openBotEditor = (target?: Bot) => {
+    setEditingBot(target);
+    setShowBot(true);
+  };
   const performWebAction = (name: string) => {
-    if (name === "models" || name === "agents") setShowBot(true);
+    if (name === "models" || name === "agents") openBotEditor(bot);
     else if (name === "new") createThread();
     else if (name === "sessions") setSurface("chat");
     else if (name === "skills") setSurface("skills");
@@ -394,7 +415,7 @@ function App() {
   };
   const createThread = async () => {
     if (!bot) {
-      setShowBot(true);
+      openBotEditor();
       return;
     }
     try {
@@ -501,7 +522,7 @@ function App() {
             <button
               className="tiny-btn"
               aria-label="Create bot"
-              onClick={() => setShowBot(true)}
+              onClick={() => openBotEditor()}
             >
               <Plus size={15} />
             </button>
@@ -661,8 +682,19 @@ function App() {
                 >
                   <Command size={15} /> Commands <kbd>/</kbd>
                 </button>
+                {thread && bot && state.bots.length > 1 && (
+                  <button
+                    className="soft-btn"
+                    onClick={() => setShowDelegation(true)}
+                  >
+                    <ArrowUpRight size={15} /> Delegate
+                  </button>
+                )}
                 {bot && (
-                  <button className="soft-btn" onClick={() => setShowBot(true)}>
+                  <button
+                    className="soft-btn"
+                    onClick={() => openBotEditor(bot)}
+                  >
                     <BotIcon size={15} /> Bot settings
                   </button>
                 )}
@@ -706,7 +738,7 @@ function App() {
                       {!bot && (
                         <button
                           className="primary-btn"
-                          onClick={() => setShowBot(true)}
+                          onClick={() => openBotEditor()}
                         >
                           <Plus size={15} /> Create bot
                         </button>
@@ -724,6 +756,20 @@ function App() {
                       )}
                     />
                   ) : null}
+                  {thread && bot && (
+                    <Delegations
+                      key={thread.id}
+                      threadId={thread.id}
+                      botId={bot.id}
+                      bots={state.bots}
+                      open={showDelegation}
+                      onClose={() => setShowDelegation(false)}
+                      onNavigate={(botId, threadId) => {
+                        setSelectedBot(botId);
+                        setSelectedThread(threadId);
+                      }}
+                    />
+                  )}
                   {pendingApproval(latest) && (
                     <ApprovalCard
                       request={pendingApproval(latest)!}
@@ -757,7 +803,7 @@ function App() {
                       }
                     }}
                     placeholder={`Message ${bot.name}…`}
-                    disabled={!thread || Boolean(composerLocked)}
+                    disabled={!bot || Boolean(composerLocked)}
                   />
                   <div className="composer-foot">
                     <div className="composer-hints">
@@ -772,7 +818,7 @@ function App() {
                       className="send-btn"
                       onClick={submit}
                       disabled={
-                        !prompt.trim() || !thread || Boolean(composerLocked)
+                        !prompt.trim() || !bot || Boolean(composerLocked)
                       }
                       aria-label="Send message"
                     >
@@ -863,7 +909,7 @@ function App() {
       )}
       {showBot && (
         <BotModal
-          bot={bot}
+          bot={editingBot}
           models={catalog.models ?? []}
           agents={catalog.agents ?? []}
           onMemory={() => {
@@ -871,8 +917,10 @@ function App() {
             setShowMemory(true);
           }}
           onClose={() => setShowBot(false)}
-          onSaved={async () => {
+          onSaved={async (saved) => {
             setShowBot(false);
+            setSelectedBot(saved.id);
+            if (!editingBot) setSelectedThread(undefined);
             await refresh();
           }}
         />
@@ -2419,7 +2467,7 @@ function BotModal({
   agents: CatalogAgent[];
   onClose: () => void;
   onMemory: () => void;
-  onSaved: () => void;
+  onSaved: (bot: Bot) => void;
 }) {
   const [name, setName] = useState(bot?.name ?? "");
   const [instructions, setInstructions] = useState(bot?.instructions ?? "");
@@ -2454,9 +2502,10 @@ function BotModal({
         agent: agent.trim(),
         nodeId,
       };
-      if (bot) await api.updateBot(bot.id, payload);
-      else await api.bot(payload);
-      await onSaved();
+      const saved = bot
+        ? await api.updateBot(bot.id, payload)
+        : await api.bot(payload);
+      await onSaved(saved);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save bot");
     } finally {

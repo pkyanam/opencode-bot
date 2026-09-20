@@ -94,6 +94,13 @@ hot reloads. Restart `preview:worker` after backend changes. For ordinary
 backend development, `dev:worker` watches source directly; local container
 egress may need a restart after a Worker reload.
 
+The stable preview wrapper treats a planned stop as a computer lifecycle
+operation: it requests an authenticated idle checkpoint, writes a restart
+marker, stops only containers owned by this preview task, and then stops the
+Worker process. On the next start it restores only when the marker matches the
+committed checkpoint and the computer reports that restore is required. A
+missing, mismatched, or uncertain marker requires manual recovery.
+
 Open <http://localhost:5173> and enter `local-preview-token` in Connection
 under Settings → Connection. The Worker listens on port **8789**. The first computer request starts
 a local Sandbox container; Docker builds target Linux amd64, including on Apple
@@ -137,6 +144,10 @@ The current vertical slice includes:
 - authenticated artifact upload/download and a headed Playwright MCP browser visible in a live desktop pane;
 - native OpenCode terminal with responsive sizing and the full native command UI;
 - searchable live model catalog, named conversations, chronological transcripts, and provider error details;
+- Settings → OpenCode → Provider connections key, OAuth, credential label/activation/removal, and
+  custom OpenAI-compatible endpoint configuration;
+- explicit Bot-to-Bot delegation that creates a recipient thread/run and
+  returns its completed result as context for the source Bot's next request;
 - Telegram configuration, expiring QR deep links, account pairing/revocation,
   and durable text reply receipts; live text delivery has been qualified with a
   user-created BotFather bot;
@@ -147,9 +158,11 @@ The current vertical slice includes:
   journal.
 
 The initial computer is a trusted personal environment shared by all bots. It is
-not a multi-user security boundary. Credential brokering, per-action external
-write receipts, enforced egress, multi-user isolation, human browser takeover,
-additional connectors, and remote terminal/desktop relay remain planned work.
+not a multi-user security boundary. Per-action external write receipts, enforced
+egress, multi-user isolation, human browser takeover, additional connectors,
+and remote terminal/desktop relay remain planned work. Provider credentials are
+handled through the OpenCode provider flows and are not included in catalog
+responses, persisted browser state, or error messages.
 
 Sandbox working disk is ephemeral. Use **Computer → Checkpoint** while idle to
 preserve workspace, runtime state, and browser profile. Only committed archives
@@ -169,10 +182,13 @@ selection; those are design targets, not shipped features.
 
 ## Qualification and model access
 
-The tests include real SQLite coordination, provider contracts, artifact paths,
-owned-node routing/receipts, setup simulation, and an [OpenCode CLI
-qualification harness](tests/qualification/README.md) using a local
-deterministic model. A Cloudflare-local wrapped app run completed from
+The current local suite reports **93 passing tests** covering real SQLite
+coordination, provider contracts, artifact paths, owned-node routing/receipts,
+setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
+That harness runs isolated OpenCode CLI 2.0.11 against a local fake
+OpenAI-compatible endpoint, verifies catalog discovery, and completes a
+continuing session without reading the user's credentials or provider. A
+Cloudflare-local wrapped app run completed from
 `2026-09-20T23:13:41.264Z` to `2026-09-20T23:13:50.872Z` with native OpenCode
 CLI 2.0.11 and `opencode/muse-spark-1.3-contributor-free`, returning `My name
 is Scout.` at zero reported cost; see the [qualification record](tests/qualification/free-model.md).
@@ -187,7 +203,10 @@ run. This qualifies text delivery and tool-backed completion for that run; live
 command handling such as `/new` still needs its own qualification. Automated
 Telegram tests continue to use a mocked Bot API.
 
-The qualification record also retains an isolated Big Pickle request that
+Bot-to-Bot delegation is explicitly qualified as a one-way request: the
+delegation header creates a recipient thread and run, and the completed result
+is supplied as context to the source Bot's next request. It does not create an
+autonomous Bot-to-Bot messaging loop. The qualification record also retains an isolated Big Pickle request that
 received `403 FreeTierError` from the direct Zen path without an account
 credential. That is a scoped observation about that model/request path, not a
 blanket statement that every free model is unavailable.

@@ -11,7 +11,7 @@
     "dev:worker": "wrangler dev --port 8789",
     "build": "vite build --config apps/web/vite.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run && node --test runner/test/*.test.mjs packages/runtime-opencode2/test/*.test.mjs",
+    "test": "vitest run && node --test runner/test/*.test.mjs packages/runtime-opencode2/test/*.test.mjs scripts/*.test.mjs",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --doctor",
     "deploy": "npm run build && wrangler deploy",

@@ -126,3 +126,30 @@ test('provider failures retain their explanation instead of an empty success', a
   assert.equal(store.public(store.get('certificate')).status,'failed');
   assert.equal(store.public(store.get('certificate')).error,'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR');
 });
+
+test('certificate failures stop provider retries and require an explicit retry', async () => {
+  const runtime=new FakeRuntime();
+  runtime.events=async function* () { yield {type:'session.retry.scheduled',properties:{sessionID:'ses_1',attempt:1,error:{type:'provider.transport',message:'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR'}}}; };
+  const store=new RunStore(runtime);
+  await store.start({runId:'bad-network',prompt:'Hello'});
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const run=store.public(store.get('bad-network'));
+  assert.equal(run.status,'needs_review');
+  assert.match(run.error,/secure connection/);
+  assert.ok(runtime.interrupts.includes('ses_1'));
+  assert.equal(runtime.createCalls.length,1);
+});
+
+test('provider settings use native auth, reject unauthenticated access, and never echo failed secrets', async () => {
+  const runtime=new FakeRuntime(); runtime.providers=async()=>({integrations:[{id:'test',name:'Test',methods:[{type:'key'}],connections:[]}],providers:[]});
+  runtime.configureProvider=async input=>{assert.equal(input.key,'private-test-key');throw Error('server echoed private-test-key');};
+  const server=createServer({store:new RunStore(runtime),authToken:'secret'}); await new Promise(resolve=>server.listen(0,resolve));
+  try {
+    const base=`http://127.0.0.1:${server.address().port}`;
+    assert.equal((await fetch(`${base}/providers`)).status,401);
+    const headers={authorization:'Bearer secret','content-type':'application/json'};
+    const list=await fetch(`${base}/providers`,{headers}).then(r=>r.json());assert.equal(list.integrations[0].id,'test');
+    const failed=await fetch(`${base}/providers/key`,{method:'POST',headers,body:JSON.stringify({integrationID:'test',key:'private-test-key'})});
+    assert.equal(failed.status,400);assert.doesNotMatch(await failed.text(),/private-test-key/);
+  } finally {server.close();}
+});
