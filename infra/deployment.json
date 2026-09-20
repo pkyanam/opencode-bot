@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "ocbot-personal",
+  "opencodeVersion": "2.0.11",
+  "sandboxPackage": "@cloudflare/sandbox@0.12.9",
+  "bucketName": "ocbot-personal-artifacts",
+  "instanceType": "standard-2",
+  "maxConcurrentRuns": 2
+}

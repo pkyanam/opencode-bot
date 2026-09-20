@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.opencode-bot/
+*.log
+coverage/
+.tmp/
+*.tsbuildinfo
+!.dev.vars.example

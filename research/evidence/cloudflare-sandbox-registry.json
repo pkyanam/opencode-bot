@@ -1,0 +1,37 @@
+{
+  "name": "@cloudflare/sandbox",
+  "version": "0.12.9",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./xterm": {
+      "types": "./dist/xterm/index.d.ts",
+      "import": "./dist/xterm/index.js",
+      "require": "./dist/xterm/index.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js",
+      "require": "./dist/bridge/index.js"
+    },
+    "./openai": {
+      "types": "./dist/openai/index.d.ts",
+      "import": "./dist/openai/index.js",
+      "require": "./dist/openai/index.js"
+    },
+    "./opencode": {
+      "types": "./dist/opencode/index.d.ts",
+      "import": "./dist/opencode/index.js",
+      "require": "./dist/opencode/index.js"
+    }
+  },
+  "engines": null,
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@cloudflare/sandbox/-/sandbox-0.12.9.tgz",
+    "integrity": "sha512-JlCQ8adVaHT3TrZO13X6US2LJTyQ4YvoEZpfh5EewRqcxPfMHZNJPB/1dsRdiFqmtzpz+lMxGazSUa2H/g2IKg=="
+  }
+}

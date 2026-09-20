@@ -1,0 +1,9 @@
+{
+  "name": "@opencode-bot/coordinator-cloudflare",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@opencode-bot/computer-cloudflare": "file:../computer-cloudflare"
+  }
+}

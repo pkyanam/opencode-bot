@@ -1,0 +1,122 @@
+{
+  "date": "2026-09-20",
+  "commit": "d870e22c70f27103016dcd479edcfebf86136d93",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/cli/src/commands/commands.ts",
+      "file": "research/evidence/opencode-packages__cli__src__commands__commands.ts",
+      "bytes": 2245
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/cli/src/commands/handlers/serve.ts",
+      "file": "research/evidence/opencode-packages__cli__src__commands__handlers__serve.ts",
+      "bytes": 2064
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/api.ts",
+      "file": "research/evidence/opencode-packages__server__src__api.ts",
+      "bytes": 319
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/auth.ts",
+      "file": "research/evidence/opencode-packages__server__src__auth.ts",
+      "bytes": 1851
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/routes.ts",
+      "file": "research/evidence/opencode-packages__server__src__routes.ts",
+      "bytes": 2769
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/handlers/session.ts",
+      "file": "research/evidence/opencode-packages__server__src__handlers__session.ts",
+      "bytes": 13200
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/handlers/message.ts",
+      "file": "research/evidence/opencode-packages__server__src__handlers__message.ts",
+      "bytes": 3216
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/handlers/event.ts",
+      "file": "research/evidence/opencode-packages__server__src__handlers__event.ts",
+      "bytes": 1895
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/server/src/handlers/permission.ts",
+      "file": "research/evidence/opencode-packages__server__src__handlers__permission.ts",
+      "bytes": 3710
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/cli/package.json",
+      "file": "research/evidence/opencode-packages__cli__package.json",
+      "bytes": 916
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/protocol/src/groups/session.ts",
+      "file": "research/evidence/opencode-packages__protocol__src__groups__session.ts",
+      "bytes": 14888
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/protocol/src/groups/event.ts",
+      "file": "research/evidence/opencode-packages__protocol__src__groups__event.ts",
+      "bytes": 2260
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/protocol/src/groups/message.ts",
+      "file": "research/evidence/opencode-packages__protocol__src__groups__message.ts",
+      "bytes": 2217
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/protocol/src/groups/permission.ts",
+      "file": "research/evidence/opencode-packages__protocol__src__groups__permission.ts",
+      "bytes": 5840
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/protocol/src/api.ts",
+      "file": "research/evidence/opencode-packages__protocol__src__api.ts",
+      "bytes": 3966
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/client/package.json",
+      "file": "research/evidence/opencode-packages__client__package.json",
+      "bytes": 1057
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/cli/src/services/daemon.ts",
+      "file": "research/evidence/opencode-packages__cli__src__services__daemon.ts",
+      "bytes": 8480
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/core/src/database/path.ts",
+      "file": "research/evidence/opencode-packages__core__src__database__path.ts",
+      "bytes": 2135
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/core/src/config/provider.ts",
+      "file": "research/evidence/opencode-packages__core__src__config__provider.ts",
+      "bytes": 2322
+    },
+    {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/d870e22c70f27103016dcd479edcfebf86136d93/packages/core/src/config/agent.ts",
+      "file": "research/evidence/opencode-packages__core__src__config__agent.ts",
+      "bytes": 1050
+    },
+    {
+      "url": "https://developers.cloudflare.com/containers/platform/pricing/index.md",
+      "error": "HTTP Error 403: Forbidden"
+    },
+    {
+      "url": "https://developers.cloudflare.com/containers/platform/limits/index.md",
+      "error": "HTTP Error 403: Forbidden"
+    },
+    {
+      "url": "https://developers.cloudflare.com/sandbox/next/index.md",
+      "error": "HTTP Error 403: Forbidden"
+    },
+    {
+      "url": "https://developers.cloudflare.com/browser-rendering/limits/index.md",
+      "error": "HTTP Error 403: Forbidden"
+    }
+  ]
+}

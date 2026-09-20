@@ -1,0 +1,11 @@
+{
+  "name": "@opencode/cli",
+  "version": "2.0.11",
+  "license": "MIT",
+  "exports": null,
+  "engines": null,
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@opencode/cli/-/cli-2.0.11.tgz",
+    "integrity": "sha512-7hnjVw7+zlcjt34hXFQ+aWuLiG20iq/nKq3O9SRwq2Dahch5RNI+Q3mbj5X3db5l1Cn1U6WcvEF2u7kQFo7JLw=="
+  }
+}

@@ -1,0 +1,13 @@
+Calculated with /Users/preetham/.local/bin/agentcalc on 2026-09-20.
+Source: https://developers.cloudflare.com/containers/platform/pricing/
+All estimates exclude included allowances and non-container charges.
+
+standard2_hour_idle = 6*3600*0.0000025 + 12*3600*0.00000007
+result: 0.057024
+standard2_hour_quarter_cpu = standard2_hour_idle + 0.25*3600*0.000020
+result: 0.075024
+60 awake hours: 4.50144
+240 awake hours: 18.00576
+720 awake hours: 54.01728
+standard3_hour_half_cpu = 8*3600*0.0000025 + 16*3600*0.00000007 + 0.5*3600*0.000020
+result: 0.112032

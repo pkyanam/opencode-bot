@@ -1,0 +1,22 @@
+{
+  "name": "@opencode-bot/computer-cloudflare",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.12.9"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260920.1",
+    "typescript": "^5.9.2",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "vitest": "^5.0.0"
+  }
+}

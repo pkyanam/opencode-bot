@@ -1,0 +1,10 @@
+{
+  "name": "@opencode-bot/browser",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@playwright/mcp": "0.0.82"
+  }
+}

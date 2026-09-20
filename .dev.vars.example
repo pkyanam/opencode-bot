@@ -1,0 +1,7 @@
+# Copy to .dev.vars with mode 0600 for local Wrangler development.
+# Never commit real tokens or provider keys.
+APP_TOKEN=generate-a-local-token
+RUNNER_TOKEN=generate-a-local-token
+# Optional provider credentials, depending on the selected OpenCode model.
+# OPENAI_API_KEY=
+# XAI_API_KEY=

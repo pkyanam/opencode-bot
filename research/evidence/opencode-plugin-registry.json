@@ -1,0 +1,32 @@
+{
+  "name": "@opencode/plugin",
+  "version": "2.0.11",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/promise/index.d.ts",
+      "import": "./dist/promise/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    },
+    "./tui": {
+      "types": "./dist/tui/index.d.ts",
+      "import": "./dist/tui/index.js"
+    },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "import": "./dist/host.js"
+    },
+    "./effect": {
+      "types": "./dist/effect/index.d.ts",
+      "import": "./dist/effect/index.js"
+    }
+  },
+  "engines": null,
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@opencode/plugin/-/plugin-2.0.11.tgz",
+    "integrity": "sha512-LqagVqieE/HWW71fCKrXbeyi5xe4DW4xwW45VNRcc5zLVVmjqjFp102Jd6n0BMXr5f8f2NsR+gLNhdOvM9xM2w=="
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@opencode/sdk",
+  "version": "2.0.11",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./effect": {
+      "types": "./dist/effect/index.d.ts",
+      "import": "./dist/effect/index.js"
+    },
+    "./workerd": {
+      "types": "./dist/workerd.d.ts",
+      "import": "./dist/workerd.js"
+    },
+    "./workerd/effect": {
+      "types": "./dist/effect/workerd.d.ts",
+      "import": "./dist/effect/workerd.js"
+    }
+  },
+  "engines": null,
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@opencode/sdk/-/sdk-2.0.11.tgz",
+    "integrity": "sha512-HaYZqrUe9fWnoovXu8KaClBalbz0y4+wBFLzg7rU77Mx9xMFDBUmHRj+idGeOI/gvnRuiNX7Keje/PwR6VUhXQ=="
+  }
+}
