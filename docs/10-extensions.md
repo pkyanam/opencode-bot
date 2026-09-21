@@ -152,56 +152,16 @@ must not be sent as slash commands. The adapter's `runtime.experimentalApi`
 flag and `2.0.11` version should remain visible anywhere native capability is
 shown.
 
-The existing web Skills surface is the application's durable bot-skill store
-(`GET/POST /api/skills`, assignment via `/api/bots/:id/skills`); it is not yet a
-native OpenCode skill registry or installer. Keep that distinction visible in
-the UI. A future native bridge can read `ctx.skill.list()` through a deliberate
-runtime endpoint, but should not infer installed plugins from the local bot
-database.
+The web Skills library stores durable bot instructions (`GET/POST /api/skills`,
+assignment via `/api/bots/:id/skills`). These are included in a bot's runs.
+**Discover** manages native on-demand skills separately: installing a skill
+copies its directory into the computer's `.agents/skills` path, where OpenCode
+finds it. It does not create a duplicate entry in the bot-instructions library.
 
-## Recommended Discover experience
-
-Add a modest **Discover** section inside Skills rather than a general plugin
-store. It should show:
-
-1. Local and assigned skills from the existing workspace store.
-2. A small set of explicitly trusted external skill catalogs, each labeled with
-   its source URL, version, and last refresh time. Treat catalog entries as
-   untrusted Markdown until the user chooses to import them.
-3. Links to the official OpenCode skill and plugin documentation, plus a
-   “copy command” affordance for `opencode plugin add`, `list`, `check`, and
-   `remove`.
-
-For skills, a preview should show the exact `SKILL.md` metadata, all files that
-will be copied, source URL, license, version, and ID collision behavior. Import
-should be explicit, preserve provenance, validate with the Agent Skills rules,
-and allow removal. Do not silently modify `opencode.json`, global config, or
-the native daemon from a card click.
-
-For plugins, display the package/Git spec and an “Open Native OpenCode” or
-copyable CLI command. If a later implementation adds an install action, it
-must call the native CLI (`opencode plugin add`) through an explicit terminal
-flow, show the exact target and resulting config diff, and require a user
-confirmation immediately before execution. Do not download, execute, or
-pretend to verify third-party plugin code in the web process. Do not fabricate
-ratings, signatures, compatibility, or an OpenCode-maintained marketplace.
-
-The first implementation can therefore be read-only discovery plus native
-commands. It remains useful, matches the APIs that are actually shipped, and
-keeps executable plugin installation behind the native trust boundary.
-
-
-## Implemented discovery
-
-The Skills header has a single **Discover** action. Its dialog separates Skills
-and Plugins, links to skills.sh, Anthropic's source examples, the OpenCode
-ecosystem list, and current native documentation. A GitHub repository URL can
-be turned into an editable review request for the selected bot. This reviews
-source, licensing, dependencies, and runtime compatibility before installation;
-opening the dialog does not install code. The existing app library remains
-explicitly identified as instructions included in every run, distinct from
-native on-demand skill discovery.
-
+Discover also manages native plugins through the pinned CLI. The app reads the
+computer's native plugin configuration; it does not infer installed packages
+from the bot database. Public repository entries and plugin names are sources
+to inspect, not an OpenCode endorsement or compatibility guarantee.
 
 ## App installation flow
 
@@ -217,3 +177,10 @@ configuration environment. Plugins execute code in OpenCode; inspect their
 source and version compatibility before installing. This is not a curated
 OpenCode marketplace. Native plugin config remains available for local paths
 and advanced options.
+
+Repository listings use GitHub's API, with a bounded public archive fallback
+when shared cloud egress hits GitHub's anonymous rate limit. Previews show the
+instructions and supporting files before installation. Skill installation
+rejects traversal and links, preserves binary files, and does not execute the
+skill's scripts. Native skill removal currently uses the computer's filesystem;
+the Discover dialog does not yet offer an uninstall action.
