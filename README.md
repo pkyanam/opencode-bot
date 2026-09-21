@@ -42,6 +42,21 @@ it boots. The default checkout is `~/.local/share/opencode-bot`. Rerun the comma
 to resume installation. Hosting and models are billed by their providers.
 [Setup details and troubleshooting →](docs/getting-started.md)
 
+### Uninstall
+
+From your installation checkout:
+
+```bash
+npm run setup -- uninstall          # preview the exact resources
+npm run setup -- uninstall --yes    # delete this installation
+```
+
+Removes the Worker, bot/conversation data, container, and R2 bucket. Add
+`--keep-artifacts` to retain R2 files and checkpoints (conversations still get
+deleted). Cleanup uses your existing Wrangler login, verifies ownership, and
+can resume after a failure. Local source, credentials, and the deployment
+journal remain on your computer.
+
 ### Or hand it to your agent
 
 ```text
@@ -57,10 +72,13 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 - **Talk to the right bot.** Bots can ask peers for help and bring their replies
   back into your conversation, and create new persistent bots on request.
 - **OpenCode underneath.** Model and provider setup, API keys, native commands,
-  and a built-in terminal. Browse skills and plugin resources under Skills.
+  and a built-in terminal. Browse GitHub skill repositories, inspect and install
+  skills with their supporting files, or manage pinned npm plugins under Skills.
 - **Take it to Telegram.** Connect a BotFather bot, scan the pairing link, and
   receive formatted replies and progress. Local mode uses polling; Cloudflare
   uses HTTPS webhooks.
+- **Keep talking.** Messages sent during a turn enter OpenCode’s native steering
+  inbox; work for a busy computer stays queued. Stop works while awaiting approval.
 - **Update from Settings.** Connect deployment access once, then update the app
   and computer together with a saved checkpoint.
 - **Bring another computer.** An outbound node agent can pair your Mac, Linux,

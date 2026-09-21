@@ -3675,6 +3675,32 @@ a:focus-visible {
 .extension-discovery .ui-tabs-list { display: flex; gap: 16px; border-bottom: 1px solid var(--line); }
 .extension-discovery .ui-tab-trigger { padding: 10px 4px; color: var(--muted); font-size: 13px; border: 0; background: transparent; border-bottom: 2px solid transparent; cursor: pointer; }
 .extension-discovery .ui-tab-trigger[data-state="active"] { color: var(--cream); border-bottom-color: var(--cream); }
+.extension-repository-list { display: grid; gap: 8px; }
+.extension-repository { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.extension-repository > div { min-width: 0; display: grid; gap: 4px; }
+.extension-repository strong { font-size: 13px; }
+.extension-repository small, .extension-repository code { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.extension-add-repository { display: grid; gap: 8px; border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
+.extension-add-repository label, .extension-review label { font-size: 12px; font-weight: 600; }
+.extension-add-row { display: flex; gap: 8px; align-items: center; }
+.extension-add-row .text-input { min-width: 0; flex: 1; }
+.extension-results { display: grid; gap: 8px; margin-top: 18px; }
+.extension-results-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.extension-skill { display: flex; justify-content: space-between; gap: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.extension-skill h3 { margin: 0 0 4px; font-size: 13px; }
+.extension-skill p { margin: 0 0 5px; color: var(--muted); font-size: 12px; }
+.extension-skill small { color: var(--muted); font-family: var(--font-code); font-size: 10px; }
+.extension-skill-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.extension-success { color: #9fc6a5; font-size: 12px; }
+.extension-note { display: flex; align-items: center; gap: 6px; margin: 14px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.extension-spin { animation: extension-spin 1s linear infinite; }
+@keyframes extension-spin { to { transform: rotate(360deg); } }
+.extension-detail { width: min(760px, calc(100vw - 32px)); }
+.extension-file-list { display: grid; gap: 5px; margin-top: 16px; }
+.extension-file-list strong { font-size: 12px; }
+.extension-file-list code { color: var(--muted); font-size: 11px; }
+.extension-skill-text { max-height: 45vh; overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--cream); font: 12px/1.6 var(--font-code); white-space: pre-wrap; }
+.extension-sources a { align-items: flex-start; }
 .conversation-action-menu { min-width: 160px; padding: 5px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 10px 30px #0006; z-index: 120; }
 .conversation-action-menu [role="menuitem"] { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-size: 13px; outline: 0; border-radius: 3px; cursor: pointer; }
 .conversation-action-menu [data-highlighted] { background: #ffffff0c; }

@@ -1,6 +1,6 @@
 {
   "name": "opencode-bot",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "engines": {
@@ -38,7 +38,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.7.0",
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.3",
+    "yaml": "2.8.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260920.1",

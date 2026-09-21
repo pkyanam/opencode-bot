@@ -82,7 +82,7 @@ export function mergeActivityMessages(messages: Message[], runs: import('../api'
   const settledMessages = messages.map(message=>({...message, parts:message.parts?.map(part=>{
     if(part.type !== 'tool' || !['running','queued'].includes(part.status)) return part;
     const started = part.startedAt ?? message.createdAt;
-    const owner = started ? orderedRuns.filter(run=>run.createdAt && run.createdAt <= started).at(-1) : undefined;
+    const owner = started ? orderedRuns.filter(run=>!['queued','waiting_dependency'].includes(run.status) && (run.startedAt??run.createdAt) && (run.startedAt??run.createdAt)! <= started).at(-1) : undefined;
     if(!owner || !['failed','cancelled','succeeded','needs_review'].includes(owner.status)) return part;
     return {...part, status:'interrupted' as const, error:part.error ?? 'This task ended before the tool reported a result.'};
   })}));

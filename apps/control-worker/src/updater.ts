@@ -190,13 +190,15 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
       if (!app) fail("container application disappeared");
       const application = app!;
       const configuration = { ...(application.configuration ?? {}), image: bundle.computerImage.reference };
-      const modified = await options.api.modifyContainerApplication(application.id, { configuration });
-      const rollout = await options.api.createContainerRollout(application.id, { description: `opencode-bot ${bundle.version} (${job.id})`, strategy: "rolling", target_configuration: modified.configuration ?? configuration, step_percentage: 100, kind: "full_auto" });
+      await options.api.modifyContainerApplication(application.id, { configuration });
+      const rollout = await options.api.createContainerRollout(application.id, { description: `opencode-bot ${bundle.version} (${job.id})`, strategy: "rolling", target_configuration: configuration, step_percentage: 100, kind: "full_auto" });
       job = transition(job, "waiting_container", now, { containerRolloutId: rollout.id }); await options.store.write(job); return job;
     }
     if (job.phase === "waiting_container") {
       if (!job.previous?.containerApplicationId || !job.containerRolloutId) fail("container rollout is missing");
       const rollout = await options.api.getContainerRollout(job.previous!.containerApplicationId!, job.containerRolloutId!);
+      const target = rollout.target_configuration as { image?: string } | undefined;
+      if (target?.image && target.image !== bundle.computerImage.reference) fail("container rollout targets a different release image");
       const status = typeof rollout.status === "string" ? rollout.status.trim().toLowerCase() : "";
       if (["failed", "error", "cancelled", "canceled", "rejected", "reverted", "replaced"].includes(status)) fail(`container rollout ${status}`);
       if (!["complete", "completed", "succeeded"].includes(status)) {

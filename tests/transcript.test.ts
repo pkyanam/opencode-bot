@@ -62,3 +62,13 @@ it('interrupts tools owned by a terminal run without interrupting a newer run', 
     expect.objectContaining({id:'new-tool',status:'running'}),
   ]));
 });
+
+it('does not let a queued request claim the preceding run’s tool activity', async () => {
+  const {mergeActivityMessages}=await import('../apps/web/src/lib/transcript');
+  const messages=normalizeNativeMessages([{id:'m',type:'assistant',time:{created:Date.parse('2026-09-21T00:00:05Z')},content:[{type:'tool',id:'tool',name:'shell',state:{status:'running'},time:{created:Date.parse('2026-09-21T00:00:06Z')}}]}]);
+  const result=mergeActivityMessages(messages,[
+    {id:'active',threadId:'t',status:'succeeded',createdAt:'2026-09-21T00:00:00Z'},
+    {id:'queued',threadId:'t',status:'queued',createdAt:'2026-09-21T00:00:04Z'},
+  ]);
+  expect(result.flatMap(m=>m.parts??[])).toContainEqual(expect.objectContaining({id:'tool',status:'interrupted'}));
+});

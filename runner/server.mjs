@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,8 @@ import { OpenCode2Runtime, eventText, eventType } from "../packages/runtime-open
 import { dispatchArtifactRequest } from './artifacts.mjs';
 import { DesktopController } from './desktop.mjs';
 import { createTerminalRoutes } from './terminal-routes.mjs';
+import { createPluginRoutes } from "./plugin-routes.mjs";
+import { createExtensionRoutes } from './extension-routes.mjs';
 import { defaultCliCommand } from './terminal.mjs';
 
 const port = Number(process.env.RUNNER_PORT ?? process.env.PORT ?? 8787);
@@ -26,6 +28,7 @@ export class RunStore {
     this.runtimeIdle = [];
     this.ownershipUncertain = false;
     this.runs = new Map();
+    this.recoverySessions = new Set();
     if (this.stateDir) this.load();
   }
 
@@ -34,7 +37,31 @@ export class RunStore {
   /** Serialize runtime users with checkpoint teardown. A request that has not
    * entered this gate by the time quiescing begins is rejected, so it cannot
    * restart OpenCode/Chromium while the workspace is being archived. */
+  async recoverNativeOwnership() {
+    if (!this.recoverySessions.size) return;
+    if (this.recoveringOwnership) return this.recoveringOwnership;
+    this.recoveringOwnership = (async () => {
+      try {
+        for (const sessionId of this.recoverySessions) {
+          let timer;
+          try { await Promise.race([this.runtime.interrupt(sessionId), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("native interruption timed out")), 15000); })]); }
+          finally { clearTimeout(timer); }
+        }
+      } catch (error) {
+        if (!this.runtime.stop) { this.ownershipUncertain = true; throw error; }
+        try { await this.runtime.stop(); } catch (stopError) { this.ownershipUncertain = true; throw stopError; }
+      }
+      for (const run of this.runs.values()) {
+        if (this.recoverySessions.has(run.sessionId)) { run.ownershipStopped = true; run.ownershipUncertain = false; this.persist(run); }
+      }
+      this.recoverySessions.clear();
+      this.ownershipUncertain = false;
+    })();
+    try { await this.recoveringOwnership; } finally { this.recoveringOwnership = undefined; }
+  }
+
   async withRuntime(fn) {
+    await this.recoverNativeOwnership();
     if (this.paused || this.configuring) throw httpError(409, "computer settings or checkpoint are being updated");
     this.runtimeOps += 1;
     try { return await fn(); }
@@ -47,6 +74,7 @@ export class RunStore {
   }
 
   async updateConfiguration(fn) {
+    await this.recoverNativeOwnership();
     if (this.paused || this.configuring || this.ownershipUncertain || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
     this.configuring = true;
     try { await this.waitForRuntimeIdle(); return await fn(); }
@@ -71,6 +99,7 @@ export class RunStore {
   }
 
   async start(input) {
+    await this.recoverNativeOwnership();
     if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
     const commandPrompt = input?.command?.name ? `/${input.command.name} ${input.command.text ?? ""}`.trim() : "";
@@ -92,6 +121,54 @@ export class RunStore {
       if (this.runtimeOps === 0) for (const resolve of this.runtimeIdle.splice(0)) resolve();
     });
     return this.public(run);
+  }
+
+  /** Admit a message into the native session inbox exactly once. The receipt
+   * is written before calling OpenCode so a lost response is never retried
+   * with a new native message id. */
+  async steer(run, body) {
+    if (!run) throw httpError(404, "run not found");
+    const key = body?.idempotencyKey;
+    const prompt = body?.prompt;
+    const delivery = body?.delivery ?? "steer";
+    if (typeof key !== "string" || !/^[A-Za-z0-9._:-]{1,160}$/.test(key)) throw httpError(400, "idempotencyKey must contain 1 to 160 safe characters");
+    if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 16000) throw httpError(400, "prompt must contain between 1 and 16000 characters");
+    if (delivery !== "steer") throw httpError(400, "delivery must be steer");
+    run.steeringMessages ??= [];
+    const existing = run.steeringMessages.find(item => item.idempotencyKey === key);
+    if (existing) {
+      if (existing.prompt !== prompt || existing.delivery !== delivery) throw httpError(409, "idempotencyKey is already bound to another steering message");
+      if (existing.status !== "accepted") return { id: existing.id, status: "uncertain", sessionId: run.sessionId };
+      return { id: existing.id, status: "accepted", sessionId: run.sessionId };
+    }
+    if (!run || isTerminal(run.status) || run.admissionClosing) throw httpError(409, "run is no longer active", { notAdmitted: true });
+    if (!["running", "waiting_approval"].includes(run.status) || !run.sessionId) throw httpError(409, "run is not ready to receive steering messages");
+    const messageId = `msg_${createHash("sha256").update(`${run.id}\0${key}`).digest("hex").slice(0, 40)}`;
+    const receipt = { id: messageId, idempotencyKey: key, prompt, delivery, status: "pending", createdAt: new Date().toISOString() };
+    run.steeringMessages.push(receipt);
+    this.persist(run);
+    let releaseAdmission;
+    const admission = new Promise(resolve => { releaseAdmission = resolve; });
+    run.steeringAdmissions ??= new Set();
+    run.steeringAdmissions.add(admission);
+    try {
+      const native = await this.runtime.prompt(run.sessionId, prompt, { messageId, delivery });
+      receipt.status = "accepted";
+      run.steeringGeneration = (run.steeringGeneration ?? 0) + 1;
+      receipt.native = native?.data ?? native ?? null;
+      receipt.acceptedAt = new Date().toISOString();
+      this.persist(run);
+      return { id: messageId, status: "accepted", sessionId: run.sessionId };
+    } catch (error) {
+      receipt.error = error instanceof Error ? error.message : String(error);
+      this.persist(run);
+      receipt.status = "uncertain";
+      this.persist(run);
+      return { id: messageId, status: "uncertain", sessionId: run.sessionId };
+    } finally {
+      run.steeringAdmissions.delete(admission);
+      releaseAdmission();
+    }
   }
 
   botTool(name, args = {}) {
@@ -154,6 +231,8 @@ export class RunStore {
       const before = new Set((await this.runtime.messages?.(run.sessionId) ?? []).map(message => message.id));
       const events = this.runtime.events?.(controller.signal);
       watcher = events ? this.watch(run, events) : Promise.resolve();
+      let steeringGenerationBeforeWait = run.steeringGeneration ?? 0;
+      let messages = [];
       if (input.sessionAction) {
         const actionName = String(input.sessionAction.name ?? "");
         if (!/^[A-Za-z0-9._:-]{1,80}$/.test(actionName)) throw httpError(400, "session action name is invalid");
@@ -174,7 +253,7 @@ export class RunStore {
         if (input.sessionAction.name === 'compact' && this.runtime.wait) await this.runtime.wait(run.sessionId, AbortSignal.timeout(30 * 60 * 1000));
       } else if (this.runtime.wait) {
         await this.waitForNativeCompletion(run);
-        const messages = (await this.runtime.messages(run.sessionId)).filter(message => !before.has(message.id) && message.type === 'assistant').sort((a,b) => (a.time?.created ?? 0) - (b.time?.created ?? 0) || String(a.id).localeCompare(String(b.id)));
+        messages = (await this.runtime.messages(run.sessionId)).filter(message => !before.has(message.id) && message.type === 'assistant').sort((a,b) => (a.time?.created ?? 0) - (b.time?.created ?? 0) || String(a.id).localeCompare(String(b.id)));
         // OpenCode can append assistant messages for commentary and tool calls
         // after the user-facing answer. Use the last assistant message that
         // actually contains text, keeping its text parts together so a later
@@ -186,6 +265,23 @@ export class RunStore {
       } else await watcher;
       if (run.transportFailure) throw new Error(run.transportFailure);
       if (!isTerminal(run.status)) {
+        // Close the admission gate before deciding the run is terminal. Any
+        // native prompt already in flight is drained; later messages receive
+        // a definitive notAdmitted conflict instead of being stranded.
+        run.admissionClosing = true;
+        this.persist(run);
+        if (run.steeringAdmissions?.size) await Promise.all([...run.steeringAdmissions]);
+        // A steer receipt means admission succeeded, but its execution may be
+        // scheduled after the wait that completed the original turn. Drain
+        // that follow-up before publishing terminal status.
+        if ((run.steeringGeneration ?? 0) !== steeringGenerationBeforeWait) {
+          await this.waitForNativeCompletion(run);
+          messages = (await this.runtime.messages(run.sessionId)).filter(message => !before.has(message.id) && message.type === 'assistant').sort((a,b) => (a.time?.created ?? 0) - (b.time?.created ?? 0) || String(a.id).localeCompare(String(b.id)));
+          const finalMessageAfterSteering = [...messages].reverse().find(message => Array.isArray(message.content) && message.content.some(part => part?.type === 'text' && typeof part.text === 'string' && part.text.length > 0));
+          if (finalMessageAfterSteering) run.final = finalMessageAfterSteering.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n');
+          if (run.transportFailure) throw new Error(run.transportFailure);
+          if (run.runtimeOutcome === "session.execution.failed" || messages.some(message => message.error || message.finish === "error")) throw new Error("OpenCode reported an execution error after a follow-up message");
+        }
         run.status = run.cancelRequested ? "cancelled" : "succeeded";
         this.emit(run, run.status, run.final ? { text: run.final } : {});
       }
@@ -207,6 +303,9 @@ export class RunStore {
           }
         }
       }
+      run.admissionClosing = true;
+      this.persist(run);
+      if (run.steeringAdmissions?.size) await Promise.all([...run.steeringAdmissions]);
       run.status = nextStatus;
       this.emit(run, "error", { message: run.transportFailure ?? (error instanceof Error ? error.message : String(error)) });
     } finally {
@@ -256,8 +355,10 @@ export class RunStore {
         }
         if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(type)) {
           run.runtimeOutcome = type;
-          if (!this.runtime.wait) run.status = type.endsWith('succeeded') ? 'succeeded' : type.endsWith('failed') ? 'failed' : 'cancelled';
-          break;
+          if (!this.runtime.wait) {
+            run.status = type.endsWith('succeeded') ? 'succeeded' : type.endsWith('failed') ? 'failed' : 'cancelled';
+            break;
+          }
         }
       }
     } catch (error) {
@@ -294,6 +395,7 @@ export class RunStore {
   }
 
   async checkpoint() {
+    await this.recoverNativeOwnership();
     if (this.configuring || this.paused || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
     this.paused = true;
     // Preserve the fast conflict response for ordinary active work. A run
@@ -321,7 +423,7 @@ export class RunStore {
   }
 
   emit(run, type, data) { run.events.push({ seq: run.events.length + 1, type, data }); this.persist(run); }
-  public(run) { return { delegationRequests: run.delegationRequests ?? [], botCreationRequests: run.botCreationRequests ?? [], runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
+  public(run) { return { delegationRequests: run.delegationRequests ?? [], botCreationRequests: run.botCreationRequests ?? [], steeringMessages: (run.steeringMessages ?? []).map(({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt }) => ({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt })), runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
   load() {
     fs.mkdirSync(this.stateDir, { recursive: true });
     for (const file of fs.readdirSync(this.stateDir).filter((name) => name.endsWith(".json"))) {
@@ -330,6 +432,7 @@ export class RunStore {
         const run = JSON.parse(fs.readFileSync(path.join(this.stateDir, file), "utf8"));
         if (!run.id) continue;
         if (run.status && !isTerminal(run.status)) { run.status = "needs_review"; run.events ??= []; run.events.push({ seq: run.events.length + 1, type: "recovery.needs_review", data: { reason: "runner restarted before terminal receipt" } }); }
+        if (run.sessionId && !run.ownershipStopped && (run.ownershipUncertain || (run.status === "needs_review" && run.events?.some(event => event.type === "recovery.needs_review")))) this.recoverySessions.add(run.sessionId);
         this.runs.set(run.id, run);
         if (run.status === "needs_review") this.persist(run);
       } catch { /* ignore an incomplete temporary file */ }
@@ -385,6 +488,8 @@ export function createServer({ store, authToken = token, botToolToken, workspace
     },
   });
   store.terminalRegistry = terminals.registry;
+  const plugins = createPluginRoutes({workspace,runtimeRoot:store.runtime.root,updateConfiguration:fn=>store.updateConfiguration(fn),reloadRuntime:async()=>{store.runtime.catalogCache?.clear();}});
+  const extensions = createExtensionRoutes({ workspace, updateConfiguration: (fn) => store.updateConfiguration(fn) });
   return http.createServer(async (req, res) => {
     try {
       if (req.url === "/health" && req.method === "GET") return json(res, 200, { ok: true, service: "opencode2-runner", instanceId: store.instanceId });
@@ -405,6 +510,8 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       // Resume is handled above; every other mutating route is fenced while
       // the filesystem is quiesced so cancel/approval cannot restart runtime.
       if (store.paused && req.method !== "GET") return json(res, 409, { error: "runner is quiesced" });
+      if (await extensions.handle(req, res)) return;
+      if (await plugins.handle(req, res)) return;
       if (desktop && req.method === "GET" && new URL(req.url, 'http://runner').pathname === "/desktop/status") return json(res, 200, desktop.status());
       if (desktop && req.method === "GET" && ["/desktop/stream", "/preview"].includes(new URL(req.url, 'http://runner').pathname)) {
         if (store.paused) return json(res, 409, { error: "runner is quiesced" });
@@ -482,7 +589,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       const sessionMessages = new URL(req.url, 'http://runner').pathname.match(/^\/sessions\/([A-Za-z0-9._:-]{1,160})\/messages$/);
       if (sessionMessages && req.method === "GET") {
         if (!store.runtime.messages) return json(res, 501, { error: "session messages are unavailable" });
-        const messages = await store.withRuntime(() => store.runtime.messages(sessionMessages[1]));
+        const messages = await store.withRuntime(() => store.runtime.messages(sessionMessages[1], {cache:true}));
         return json(res, 200, { sessionId: sessionMessages[1], messages: Array.isArray(messages) ? messages.slice().sort((a,b) => (b.time?.created ?? 0) - (a.time?.created ?? 0)).slice(0,200) : [] });
       }
       const sessionRemove = new URL(req.url, 'http://runner').pathname.match(/^\/sessions\/([A-Za-z0-9._:-]{1,160})$/);
@@ -495,6 +602,11 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         return json(res, 200, { deleted: true, sessionId: sessionRemove[1] });
       }
       const match = new URL(req.url, "http://runner").pathname.match(/^\/runs(?:\/([^/]+)(?:\/(cancel|approval))?)?$/);
+      const messageMatch = new URL(req.url, "http://runner").pathname.match(/^\/runs\/([A-Za-z0-9._:-]{1,160})\/messages$/);
+      if (messageMatch && req.method === "POST") {
+        const body = await readJson(req);
+        return json(res, 200, await store.withRuntime(() => store.steer(store.get(messageMatch[1]), body)));
+      }
       if (!match) return json(res, 404, { error: "not found" });
       const body = await readJson(req);
       if (req.method === "POST" && !match[1]) return json(res, 202, await store.start(body));
@@ -503,14 +615,15 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (run && !store.paused) await store.withRuntime(() => store.refresh(run));
         return run ? json(res, 200, store.public(run)) : json(res, 404, { error: "run not found" });
       }
+      if (req.method === "POST" && match[2] === "cancel") return json(res, 200, await store.withRuntime(() => store.cancel(store.get(match[1]))));
       if (req.method === "POST" && match[2] === "approval") return json(res, 200, await store.approval(store.get(match[1]), body));
       return json(res, 405, { error: "method not allowed" });
-    } catch (error) { const status = error.statusCode ?? 500; json(res, status, { error: error.message ?? String(error) }); }
+    } catch (error) { const status = error.statusCode ?? 500; json(res, status, { error: error.message ?? String(error), ...(error.notAdmitted === true ? { notAdmitted: true } : {}) }); }
   });
 }
 
 function isTerminal(status) { return ["succeeded", "failed", "cancelled", "needs_review"].includes(status); }
-function httpError(statusCode, message) { return Object.assign(new Error(message), { statusCode }); }
+function httpError(statusCode, message, details = {}) { return Object.assign(new Error(message), { statusCode, ...details }); }
 function json(res, status, body) { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(body)); }
 async function readJson(req) {
   if (!req.headers["content-length"] && req.method !== "POST") return {};

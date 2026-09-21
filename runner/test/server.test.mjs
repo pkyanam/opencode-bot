@@ -42,6 +42,66 @@ test("duplicate run admission is idempotent", async () => {
   await assert.rejects(store.start({ runId: 'same', prompt: 'different' }), { statusCode: 409 });
 });
 
+test("native steering is authenticated, durably idempotent, and uses a native message id", async () => {
+  const fake = new FakeRuntime();
+  fake.promptCalls = [];
+  fake.prompt = async (session, prompt, options) => { fake.promptCalls.push({ session, prompt, options }); return { data: { id: options.messageId } }; };
+  const store = new RunStore(fake);
+  store.runs.set("steer-1", { id: "steer-1", status: "running", sessionId: "ses_steer", events: [], final: "", steeringMessages: [] });
+  const server = createServer({ store, authToken: "secret" });
+  await new Promise(resolve => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const body = JSON.stringify({ idempotencyKey: "input-1", prompt: "change direction", delivery: "steer" });
+    assert.equal((await fetch(`${base}/runs/steer-1/messages`, { method: "POST", body })).status, 401);
+    const headers = { authorization: "Bearer secret", "content-type": "application/json" };
+    const first = await fetch(`${base}/runs/steer-1/messages`, { method: "POST", headers, body }).then(r => r.json());
+    const second = await fetch(`${base}/runs/steer-1/messages`, { method: "POST", headers, body }).then(r => r.json());
+    assert.equal(first.status, "accepted");
+    assert.deepEqual(second, first);
+    assert.equal(fake.promptCalls.length, 1);
+    assert.equal(fake.promptCalls[0].options.delivery, "steer");
+    assert.match(fake.promptCalls[0].options.messageId, /^msg_/);
+    assert.equal(store.public(store.get("steer-1")).steeringMessages[0].status, "accepted");
+  } finally { server.close(); }
+});
+
+test("run terminal transition drains steering admitted before the native completion race", async () => {
+  const fake = new FakeRuntime();
+  let releaseWait;
+  const waitEntered = new Promise(resolve => { releaseWait = resolve; });
+  let releaseSteer;
+  let steerStarted;
+  const steerEntered = new Promise(resolve => { steerStarted = resolve; });
+  fake.events = undefined;
+  fake.prompt = async (session, prompt, options) => {
+    if (options?.delivery === "steer") {
+      steerStarted();
+      await new Promise(resolve => { releaseSteer = resolve; });
+      return { data: { id: options.messageId } };
+    }
+    return { id: "initial" };
+  };
+  fake.wait = async () => waitEntered;
+  let completedMessages = false;
+  fake.messages = async () => completedMessages ? [{ id: "assistant-1", type: "assistant", content: [{ type: "text", text: "done" }] }] : [];
+  const store = new RunStore(fake);
+  await store.start({ runId: "steer-race", prompt: "start" });
+  for (let i = 0; i < 20 && store.get("steer-race").status !== "running"; i++) await new Promise(resolve => setTimeout(resolve, 1));
+  const steering = store.steer(store.get("steer-race"), { idempotencyKey: "race-1", prompt: "steer", delivery: "steer" });
+  await steerEntered;
+  releaseWait();
+  completedMessages = true;
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(store.get("steer-race").status, "running");
+  releaseSteer();
+  assert.equal((await steering).status, "accepted");
+  for (let i = 0; i < 20 && !isTerminalForTest(store.get("steer-race").status); i++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(store.get("steer-race").status, "succeeded", JSON.stringify(store.get("steer-race")));
+});
+
+function isTerminalForTest(status) { return ["succeeded", "failed", "cancelled", "needs_review"].includes(status); }
+
 test("existing sessions are re-entered so model changes are applied", async () => {
   const fake = new FakeRuntime(); const store = new RunStore(fake);
   await store.start({ runId: "first", prompt: "one", model: "opencode/big-pickle" });
@@ -275,4 +335,51 @@ test('provider settings use native auth, reject unauthenticated access, and neve
     const failed=await fetch(`${base}/providers/key`,{method:'POST',headers,body:JSON.stringify({integrationID:'test',key:'private-test-key'})});
     assert.equal(failed.status,400);assert.doesNotMatch(await failed.text(),/private-test-key/);
   } finally {server.close();}
+});
+
+test("HTTP cancellation interrupts a run waiting for approval and is idempotent", async () => {
+  const runtime = new FakeRuntime();
+  const store = new RunStore(runtime);
+  store.runs.set('stop-me', {id:'stop-me',sessionId:'ses_stop',status:'waiting_approval',events:[],final:''});
+  const server=createServer({store,authToken:'secret'});
+  await new Promise(resolve=>server.listen(0,resolve));
+  try {
+    const url=`http://127.0.0.1:${server.address().port}/runs/stop-me/cancel`;
+    assert.equal((await fetch(url,{method:'POST'})).status,401);
+    for(let i=0;i<2;i++) {
+      const response=await fetch(url,{method:'POST',headers:{authorization:'Bearer secret','content-type':'application/json'},body:'{}'});
+      assert.equal(response.status,200);
+      assert.equal((await response.json()).status,'cancelled');
+    }
+    assert.deepEqual(runtime.interrupts,['ses_stop']);
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
+test('restart interrupts orphaned native sessions before admitting another bot', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runner-recovery-'));
+  fs.writeFileSync(path.join(dir,'old.json'),JSON.stringify({id:'old',sessionId:'ses_old',status:'running',events:[]}));
+  const runtime=new FakeRuntime();
+  let release;
+  runtime.interrupt=async id=>{runtime.interrupts.push(id);await new Promise(resolve=>{release=resolve;});};
+  const store=new RunStore(runtime,{stateDir:dir});
+  let admitted=false;
+  const next=store.start({runId:'new',prompt:'hello'}).then(()=>{admitted=true;});
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(admitted,false);
+  assert.deepEqual(runtime.interrupts,['ses_old']);
+  release();await next;
+  assert.equal(store.get('old').ownershipStopped,true);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  fs.rmSync(dir,{recursive:true,force:true});
+});
+
+test('restart fails closed if old native work cannot be stopped', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runner-recovery-'));
+  fs.writeFileSync(path.join(dir,'old.json'),JSON.stringify({id:'old',sessionId:'ses_old',status:'running',events:[]}));
+  const runtime=new FakeRuntime();runtime.interrupt=async()=>{throw new Error('connection lost');};
+  const store=new RunStore(runtime,{stateDir:dir});
+  await assert.rejects(store.start({runId:'new',prompt:'hello'}),/connection lost/);
+  assert.equal(store.ownershipUncertain,true);
+  assert.equal(store.get('new'),undefined);
+  fs.rmSync(dir,{recursive:true,force:true});
 });

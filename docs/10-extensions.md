@@ -201,3 +201,19 @@ source, licensing, dependencies, and runtime compatibility before installation;
 opening the dialog does not install code. The existing app library remains
 explicitly identified as instructions included in every run, distinct from
 native on-demand skill discovery.
+
+
+## App installation flow
+
+Skills → Discover can save public GitHub repositories, browse SKILL.md entries,
+preview the full instructions and file list, and install a selected directory
+into `.agents/skills`. Supporting binary assets are preserved. Existing skills
+are never overwritten implicitly. Installation waits for an idle computer;
+repository browsing works without starting it.
+
+The Plugins tab accepts exact npm package versions and invokes OpenCode 2's
+native `plugin add` / `plugin remove` commands inside the computer's own
+configuration environment. Plugins execute code in OpenCode; inspect their
+source and version compatibility before installing. This is not a curated
+OpenCode marketplace. Native plugin config remains available for local paths
+and advanced options.

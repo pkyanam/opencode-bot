@@ -2,7 +2,7 @@ import { Check, LoaderCircle, X, CircleStop } from "lucide-react";
 import { useEffect, useState } from 'react';
 import type { Run, ToolPart } from "../api";
 import { toolActionLabel } from "./tool-activity";
-const ACTIVE=['queued','provisioning','running','waiting_approval','waiting_human','recovering','checkpointing','cancelling'];
+const ACTIVE=['queued','provisioning','running','waiting_approval','waiting_human','waiting_dependency','recovering','checkpointing','cancelling'];
 
 const FRESH_ACTIVITY_MS = 20_000;
 type ProgressActivity = 'thinking' | 'provider' | 'retry' | 'responding' | 'working' | 'silent';
@@ -45,20 +45,24 @@ export function RunProgress({run,tools=[],now: clockNow}: {run:Run;tools?:ToolPa
   const [now,setNow]=useState(clockNow ?? Date.now());
   useEffect(()=>{if(!running)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[running]);
   const currentNow = clockNow ?? now;
-  const started=Date.parse(run.createdAt??'') || 0;
-  const recent=tools.filter(tool=>tool.startedAt && Date.parse(tool.startedAt)>=started);
+  const started=Date.parse(run.startedAt??run.createdAt??'') || 0;
+  const queued=run.status==='queued'||run.status==='waiting_dependency';
+  const ended=running?Infinity:Date.parse(run.updatedAt??'')||Infinity;
+  const recent=queued?[]:tools.filter(tool=>tool.startedAt && Date.parse(tool.startedAt)>=started && Date.parse(tool.startedAt)<=ended);
   const current=[...recent].reverse().find(tool=>['running','queued'].includes(tool.status));
   const seconds=started?Math.max(0,Math.floor(((running?currentNow:Date.parse(run.updatedAt??'')||currentNow)-started)/1000)):0;
   const elapsed=seconds>=60?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${seconds}s`;
   const interrupted=Boolean(run.error && /transport|connection|socket/i.test(run.error));
   const activity=run.status==='running' ? classifyRunActivity(run, currentNow) : {kind:'silent' as const};
   const runningTitle = current ? toolActionLabel(current.name) : activity.kind==='thinking' ? 'Thinking' : activity.kind==='responding' ? 'Writing a response' : activity.kind==='working' ? 'Working' : activity.kind==='provider' ? 'Waiting for the model provider' : activity.kind==='retry' ? 'Retrying the model connection' : run.events?.length ? 'No recent activity' : 'Preparing a response';
-  const titles:Record<string,string>={queued:'Waiting for the computer',provisioning:'Starting the computer',running:runningTitle,waiting_approval:'Waiting for approval',waiting_human:'Waiting for your input',recovering:'Reconnecting',checkpointing:'Saving computer state',cancelling:'Stopping',succeeded:'Completed',failed:interrupted?'Response interrupted':'Could not complete this request',cancelled:'Stopped',needs_review:'Needs your attention'};
+  const blocker=run.queue?.blockedBy;
+  const queueTitle=blocker ? `Queued behind ${blocker.botName}${blocker.status==='waiting_approval'?' — approval needed':''}` : run.queue?.reconnecting ? 'Reconnecting to the computer' : (run.queue?.position??1)>1 ? `Queued · position ${run.queue?.position}` : 'Waiting for the computer';
+  const titles:Record<string,string>={queued:queueTitle,waiting_dependency:'Computer needs attention',provisioning:'Starting the computer',running:runningTitle,waiting_approval:'Waiting for approval',waiting_human:'Waiting for your input',recovering:'Reconnecting',checkpointing:'Saving computer state',cancelling:'Stopping',succeeded:'Completed',failed:interrupted?'Response interrupted':'Could not complete this request',cancelled:'Stopped',needs_review:'Needs your attention'};
   const activityAge=activity.ageSeconds !== undefined ? ` · last activity ${activity.ageSeconds < 60 ? `${activity.ageSeconds}s` : `${Math.floor(activity.ageSeconds/60)}m`} ago` : '';
   const failed=['failed','needs_review'].includes(run.status);
   return <section className={`run-progress ${running?'progress-active':''} ${failed?'progress-failed':''}`} aria-label="Task progress">
     <div className="progress-heading"><span className="progress-mark">{running?<LoaderCircle size={15} className="spin"/>:failed?<X size={15}/>:run.status==='cancelled'?<CircleStop size={15}/>:<Check size={15}/>}</span>
-    <div><strong>{titles[run.status]??run.status.replaceAll('_',' ')}</strong><span>{elapsed}{recent.length?` · ${recent.length} tool action${recent.length===1?'':'s'}`:running?' · No tool actions yet':' · No tool actions recorded'}{running && activityAge}</span></div></div>
+    <div><strong>{titles[run.status]??run.status.replaceAll('_',' ')}</strong><span>{elapsed}{recent.length?` · ${recent.length} tool action${recent.length===1?'':'s'}`:queued?' · Not started':running?' · No tool actions yet':' · No tool actions recorded'}{running && activityAge}</span></div></div>
     {run.error&&<p className="progress-error">{interrupted?'The model connection ended before the response completed.':run.error}</p>}
   </section>;
 }

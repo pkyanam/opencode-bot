@@ -37,3 +37,11 @@ it('shows fresh response text as writing rather than stale reasoning',()=>{
  const run={id:'r',threadId:'t',status:'running',events:[{type:'runner.session.reasoning.delta',createdAt:'2026-09-21T00:00:00Z'},{type:'runner.session.text.delta',createdAt:'2026-09-21T00:01:04Z'}]};
  expect(classifyRunActivity(run,now).kind).toBe('responding');
 });
+
+it('explains a blocked queue without counting another run’s tools', () => {
+ const html=renderToStaticMarkup(createElement(RunProgress,{run:{id:'queued',threadId:'thread',status:'queued',createdAt:'2026-09-21T00:00:00Z',queue:{position:1,blockedBy:{id:'active',status:'waiting_approval',botName:'Dilan'}}},tools:[{type:'tool',id:'old',name:'shell',status:'running',startedAt:'2026-09-21T00:01:00Z'}]}));
+ expect(html).toContain('Queued behind Dilan');
+ expect(html).toContain('approval needed');
+ expect(html).toContain('Not started');
+ expect(html).not.toContain('tool action');
+});

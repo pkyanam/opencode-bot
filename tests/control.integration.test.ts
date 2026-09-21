@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], failApproval: false, deleteStatus: 200, messages: [] as any[] }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, messages: [] as any[] }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async ensure() {
@@ -12,12 +12,18 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           const run = { runId: input.runId, sessionId: input.sessionId ?? `session-${input.runId}`, status: 'running', events: [], final: '' };
           remote.runs.set(input.runId, run); return Response.json(run, { status: 202 });
         }
+        if (/^\/runs\/[^/]+\/messages$/.test(path) && init.method === 'POST') {
+          const input = JSON.parse(String(init.body)); remote.steerCalls.push(input);
+          const configured = remote.steerResponses.shift() ?? { status: 200, body: { id: `native-${input.idempotencyKey}`, status: 'accepted' } };
+          if (configured instanceof Error) throw configured;
+          return Response.json(configured.body, { status: configured.status });
+        }
         if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
         if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: 'delete failed' }, { status: remote.deleteStatus });
         const match = path.match(/^\/runs\/([^/]+)(?:\/(cancel|approval))?$/);
         const run = match && remote.runs.get(match[1]);
         if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
-        if (match?.[2] === 'cancel') run.status = 'cancelled';
+        if (match?.[2] === 'cancel') { const configured = remote.cancelResponses.shift() ?? { status: remote.cancelStatus, body: remote.cancelStatus === 200 ? run : { error: 'cancel failed' } }; if (configured.status !== 200) return Response.json(configured.body, { status: configured.status }); run.status = 'cancelled'; }
         if (match?.[2] === 'approval') { if (remote.failApproval) return Response.json({ error: 'refused' }, { status: 503 }); run.status = 'running'; }
         return Response.json(run);
       } } };
@@ -60,7 +66,7 @@ function fixture() {
   };
   return { db, request, create, env, alarms, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.failApproval = false; remote.deleteStatus = 200; remote.messages=[]; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.messages=[]; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('fails closed without the owner token and handles malformed JSON shapes', async () => {
@@ -111,6 +117,29 @@ describe('durable control-plane integration with real SQLite', () => {
     const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Second', idempotencyKey: 'two' });
     await f.alarm(); await f.request(`/api/runs/${active.body.id}/cancel`, 'POST'); await f.alarm();
     expect(remote.calls).toContain(`POST /runs/${active.body.id}/cancel`);
+    expect((await f.request(`/api/runs/${active.body.id}`)).body.status).toBe('cancelled');
+  });
+  it('retries cancellation while the runner is waiting for approval and surfaces failed forwarding', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Needs approval', idempotencyKey: 'cancel-approval' });
+    await f.alarm();
+    const runner = remote.runs.get(active.body.id);
+    runner.status = 'waiting_approval';
+    runner.events = [{ seq: 1, type: 'permission.asked', data: { requestId: 'cancel-permission' } }];
+    await f.alarm();
+    expect((await f.request(`/api/runs/${active.body.id}`)).body.status).toBe('waiting_approval');
+
+    remote.cancelResponses.push({ status: 503, body: { error: 'runner recovering' } });
+    const cancelled = await f.request(`/api/runs/${active.body.id}/cancel`, 'POST');
+    expect(cancelled.body.status).toBe('cancelling');
+    expect((await f.request(`/api/runs/${active.body.id}/events`)).body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'cancel.forward_error', payload: expect.objectContaining({ error: expect.stringContaining('runner cancel HTTP 503') }) }),
+    ]));
+    expect(runner.status).toBe('waiting_approval');
+
+    await f.alarm();
+    expect(remote.calls.filter((call) => call === `POST /runs/${active.body.id}/cancel`)).toHaveLength(2);
+    await f.alarm();
     expect((await f.request(`/api/runs/${active.body.id}`)).body.status).toBe('cancelled');
   });
   it('refuses fabricated approvals', async () => {
@@ -165,6 +194,68 @@ describe('durable control-plane integration with real SQLite', () => {
 });
 
 describe('native command and session action admission', () => {
+  it('steers a same-thread active message once and deduplicates replayed admission', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Work on the issue', idempotencyKey: 'active-run' });
+    await f.alarm();
+    const input = { threadId: thread.id, prompt: 'Also check the tests', idempotencyKey: 'steer-1' };
+    const first = await f.request('/api/runs', 'POST', input);
+    const replay = await f.request('/api/runs', 'POST', input);
+    expect(first.status).toBe(202);
+    expect(first.body).toMatchObject({ id: active.body.id, messageQueued: true });
+    expect(replay.body).toMatchObject({ id: active.body.id, messageQueued: true });
+    expect((await f.request('/api/state')).body.pendingMessages).toHaveLength(1);
+
+    await f.alarm();
+    expect(remote.steerCalls).toEqual([{ idempotencyKey: 'steer-1', prompt: input.prompt, delivery: 'steer' }]);
+    const state = (await f.request('/api/state')).body;
+    expect(state.pendingMessages[0]).toMatchObject({ id: 'steer-1', runId: active.body.id, status: 'accepted', nativeId: 'native-steer-1' });
+    expect((await f.request(`/api/runs/${active.body.id}/events`)).body.filter((event: any) => event.type === 'message.accepted')).toHaveLength(1);
+
+    await f.request('/api/runs', 'POST', input); await f.alarm();
+    expect(remote.steerCalls).toHaveLength(1);
+  });
+
+  it('falls back to a queued run when native steering safely reports not admitted', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Long task', idempotencyKey: 'active-fallback' });
+    await f.alarm();
+    remote.steerResponses.push({ status: 409, body: { notAdmitted: true } });
+    const message = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Run this after the task', idempotencyKey: 'fallback-1' });
+    await f.alarm();
+    const state = (await f.request('/api/state')).body;
+    const runs = state.runs.filter((run: any) => run.idempotencyKey === 'fallback-1');
+    expect(remote.steerCalls).toHaveLength(1);
+    expect(message.body.id).toBe(active.body.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ prompt: 'Run this after the task', status: 'queued' });
+    expect(state.pendingMessages).toEqual([]);
+
+    remote.runs.get(active.body.id).status = 'succeeded';
+    await f.alarm();
+    await f.alarm();
+    expect(remote.submitted.some((run: any) => run.runId === runs[0].id)).toBe(true);
+  });
+
+  it('marks an uncertain native delivery for review without creating a duplicate run', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Long task', idempotencyKey: 'active-uncertain' });
+    await f.alarm();
+    remote.steerResponses.push({ status: 503, body: { error: 'runner unavailable' } });
+    await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Do not replay this', idempotencyKey: 'uncertain-1' });
+    await f.alarm();
+    const state = (await f.request('/api/state')).body;
+    expect(remote.steerCalls).toHaveLength(1);
+    expect(state.runs).toHaveLength(1);
+    expect(state.runs[0].id).toBe(active.body.id);
+    expect(state.pendingMessages).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'uncertain-1', runId: active.body.id, status: 'needs_review' })]));
+    expect((await f.request(`/api/runs/${active.body.id}/events`)).body).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'message.delivery.uncertain', payload: expect.objectContaining({ id: 'uncertain-1' }) })]));
+
+    for (let i = 0; i < 3; i++) await f.alarm();
+    expect(remote.steerCalls).toHaveLength(1);
+    expect((await f.request('/api/state')).body.runs).toHaveLength(1);
+  });
+
   it('preserves any catalog command across restart and refuses conflicting retries', async () => {
     const f=fixture(); const {thread,bot}=await f.create();
     await f.request(`/api/bots/${bot.id}`,'PATCH',{agent:'plan'});

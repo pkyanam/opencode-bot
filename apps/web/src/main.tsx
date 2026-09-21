@@ -302,7 +302,16 @@ function App() {
   const runs = state.runs
     .filter((r) => r.threadId === thread?.id)
     .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
-  const latest = runs[runs.length - 1];
+  const latestTerminal = runs[runs.length - 1];
+  const latest =
+    runs
+      .filter(
+        (run) =>
+          isActive(run.status) && (run.status ?? "").toLowerCase() !== "queued",
+      )
+      .at(-1) ??
+    runs.find((run) => (run.status ?? "").toLowerCase() === "queued") ??
+    latestTerminal;
   useEffect(() => {
     setLiveMessages([]);
     setThreadSessionId(undefined);
@@ -321,7 +330,9 @@ function App() {
       try {
         const result = await api.threadMessages(thread.id);
         if (!cancelled) {
-          setLiveMessages(result.messages ?? []);
+          // A just-queued run can briefly expose an empty native transcript.
+          // Keep the rendered transcript until the durable message appears.
+          if (result.messages?.length) setLiveMessages(result.messages);
           setThreadSessionId(result.sessionId);
         }
       } catch {
@@ -338,7 +349,7 @@ function App() {
       cancelled = true;
       if (poll) window.clearInterval(poll);
     };
-  }, [thread?.id, thread?.nodeId, latest?.status, latest?.updatedAt, terminalOpen]);
+  }, [thread?.id, thread?.nodeId, latest?.id, latest?.status, terminalOpen]);
   const messages = useMemo(
     () =>
       liveMessages.length
@@ -348,9 +359,64 @@ function App() {
           liveMessages),
     [state, thread?.id, liveMessages],
   );
-  const baseTranscript = messages.length
-    ? messages
-    : latest?.prompt
+  const pendingInputs = useMemo(
+    () =>
+      (state.pendingMessages ?? [])
+        .filter((input) => input.threadId === thread?.id)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [state.pendingMessages, thread?.id],
+  );
+  const pendingRunIds = new Set(pendingInputs.map((input) => input.runId));
+  const queuedRunInputs = runs
+    .filter((run) => {
+      const status = (run.status ?? "").toLowerCase();
+      return (
+        (status === "queued" || status === "provisioning") &&
+        !run.internal &&
+        Boolean(run.prompt) &&
+        !pendingRunIds.has(run.id)
+      );
+    })
+    .map((run) => ({
+      id: `run-${run.id}`,
+      threadId: run.threadId,
+      runId: run.id,
+      content: run.prompt!,
+      status: "queued",
+      nativeId: undefined,
+      createdAt: run.createdAt ?? new Date().toISOString(),
+    }));
+  const pendingRecords = [...pendingInputs, ...queuedRunInputs].sort((a, b) =>
+    a.createdAt.localeCompare(b.createdAt),
+  );
+  const transcriptMessageIds = new Set(
+    messages.map((message) => message.id).filter(Boolean),
+  );
+  const pendingTranscript = pendingRecords
+    .filter((input) => {
+      if (input.nativeId && transcriptMessageIds.has(input.nativeId)) return false;
+      // Normal queued runs have no nativeId. Once their user message is in the
+      // native transcript, match it by content and temporal position.
+      return !messages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content === input.content &&
+          (!message.createdAt || message.createdAt >= input.createdAt),
+      );
+    })
+    .map(
+      (input) =>
+        ({
+          id: `pending-${input.id}`,
+          role: "user",
+          content: input.content,
+          createdAt: input.createdAt,
+          status: input.status,
+        }) satisfies Message,
+    );
+  const fallbackMessages =
+    latest?.prompt &&
+    !pendingRecords.some((input) => input.content === latest.prompt)
       ? [
           { role: "user", content: latest.prompt },
           ...(latest.result
@@ -358,8 +424,13 @@ function App() {
             : []),
         ]
       : [];
+  const baseTranscript = [
+    ...(messages.length ? messages : fallbackMessages),
+    ...pendingTranscript,
+  ];
   const transcript = mergeActivityMessages(baseTranscript, runs);
   const working = latest && isActive(latest.status);
+  const latestStatus = (latest?.status ?? "").toLowerCase();
   const botWorking = Boolean(
     bot &&
       state.runs.some((run) => {
@@ -367,7 +438,8 @@ function App() {
         return runThread?.botId === bot.id && isActive(run.status);
       }),
   );
-  const composerLocked = terminalOpen || working || submitting;
+  const nativeSessionLocked = terminalOpen || Boolean(working) || submitting;
+  const composerBusy = submitting;
   const chatScroll = useRef<HTMLDivElement>(null);
   const followConversation = useRef(true);
   useEffect(() => { followConversation.current = true; }, [thread?.id]);
@@ -385,9 +457,12 @@ function App() {
     if (!bot || composerModel === (bot.model ?? "")) return;
     await api.updateBot(bot.id, { model: composerModel });
   };
+  const clearSubmittedPrompt = (text: string) => {
+    setPrompt((current) => (current.trim() === text ? "" : current));
+  };
   const submit = async () => {
     const text = prompt.trim();
-    if (!text || !bot || composerLocked || sendInFlight.current) return;
+    if (!text || !bot || sendInFlight.current) return;
     followConversation.current = true;
     sendInFlight.current = true;
     setSubmitting(true);
@@ -402,7 +477,7 @@ function App() {
           (command) => command.name === slash[1],
         );
         if (native) {
-          setPrompt("");
+          clearSubmittedPrompt(text);
           try {
             await syncComposerModel();
             await api.run({
@@ -415,7 +490,7 @@ function App() {
             await refresh(true);
           } catch (error) {
             setError(error instanceof Error ? error.message : "Command failed");
-            setPrompt(text);
+            setPrompt((current) => (current.trim() ? current : text));
           }
           return;
         }
@@ -423,7 +498,13 @@ function App() {
           (action) => action.name === slash[1],
         );
         if (action) {
-          setPrompt("");
+          if (nativeSessionLocked) {
+            setError(
+              "Native session actions cannot be queued while a run is active. Send an ordinary message instead.",
+            );
+            return;
+          }
+          clearSubmittedPrompt(text);
           if (action.requires?.includes("messageID")) setPaletteOpen(true);
           else await submitNativeAction(action);
           return;
@@ -450,7 +531,7 @@ function App() {
         );
         return;
       }
-      setPrompt("");
+      clearSubmittedPrompt(text);
       try {
         await syncComposerModel();
         await api.run({
@@ -461,7 +542,7 @@ function App() {
         await refresh(true);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Could not start run");
-        setPrompt(text);
+        setPrompt((current) => (current.trim() ? current : text));
       }
     } catch (e) {
       setError(
@@ -473,14 +554,14 @@ function App() {
     }
   };
   const submitNativeCommand = async (name: string) => {
-    if (!thread || composerLocked) return;
+    if (!thread || nativeSessionLocked) return;
     setPrompt(`/${name} `);
   };
   const submitNativeAction = async (
     action: CatalogAction,
     messageID?: string,
   ) => {
-    if (!thread || composerLocked || !action.name) return;
+    if (!thread || nativeSessionLocked || !action.name) return;
     try {
       await api.threadAction(thread.id, {
         command: `/${action.name}`,
@@ -937,16 +1018,6 @@ function App() {
                       onDecision={approve}
                     />
                   )}{" "}
-                  {working &&
-                    !(latest?.events?.length || transcript.some((message) => message.parts?.some((part) => part.type === "tool"))) &&
-                    !pendingApproval(latest) && (
-                      <div className="thinking">
-                        <span className="thinking-icon">
-                          <LoaderCircle size={15} className="spin" />
-                        </span>
-                        <span>Working on your request…</span>
-                      </div>
-                    )}
                 </>
               )}
             </div>
@@ -964,11 +1035,19 @@ function App() {
                       }
                     }}
                     placeholder={`Message ${bot.name}…`}
-                    disabled={!bot || Boolean(composerLocked)}
+                    disabled={!bot}
                   />
                   <div className="composer-foot">
                     <div className="composer-hints">
-                      <span>Shift + Enter for new line</span>
+                      <span>
+                        {latestStatus === "running" ||
+                        latestStatus === "waiting_approval"
+                          ? "Delivered at the next execution boundary"
+                          : latestStatus === "queued" ||
+                              latestStatus === "provisioning"
+                            ? "Queued messages will be sent when the computer is available"
+                            : "Shift + Enter for new line"}
+                      </span>
                       <ModelPicker
                         models={catalog.models ?? []}
                         value={composerModel}
@@ -979,9 +1058,10 @@ function App() {
                       className="send-btn"
                       onClick={submit}
                       disabled={
-                        !prompt.trim() || !bot || Boolean(composerLocked)
+                        !prompt.trim() || !bot || composerBusy
                       }
                       aria-label="Send message"
+                      title="Send message"
                     >
                       <Send size={17} />
                     </button>
@@ -1136,7 +1216,7 @@ function App() {
       )}{" "}
       {showComputer && (
         <ComputerModal
-          active={Boolean(composerLocked)}
+          active={Boolean(nativeSessionLocked)}
           onClose={() => setShowComputer(false)}
         />
       )}{" "}
@@ -1955,6 +2035,15 @@ function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
         {!toolOnly && <div className="message-meta">
           <strong>{user ? "You" : system ? "Activity" : (bot?.name ?? "Bot")}</strong>
           {message.createdAt && <span>{fmtTime(message.createdAt)}</span>}
+          {user && message.status && (
+            <span>
+              {message.status === "accepted"
+                ? "Delivered"
+                : message.status === "needs_review"
+                  ? "Waiting"
+                  : "Queued"}
+            </span>
+          )}
         </div>}
         {message.parts?.length ? (
           <div className="message-parts">

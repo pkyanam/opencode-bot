@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { UpdateController } from "./update-controller";
 import packageInfo from "../../../package.json";
 import { ComputerStartup } from "./computer-startup";
@@ -20,6 +21,20 @@ import {
 } from "../../../packages/domain/src/index";
 import { CloudflareComputerProvider } from "../../../packages/computer-cloudflare/src/index";
 import { advanceDue } from "../../../packages/domain/src/routines";
+import {
+  EXTENSION_REPOSITORY_SCHEMA,
+  ExtensionRepositoryError,
+  extensionRepositoryView,
+  fetchRepositoryFile,
+  fetchRepositoryBytes,
+  listRepositoryTree,
+  normalizeTreeFiles,
+  parseGitHubRepositoryUrl,
+  parseSkillMarkdown,
+  repositoryId,
+  safeRelativePath,
+  skillDirectoryFromPath,
+} from "./extension-repositories";
 import {
   ComputerManager,
   DurableObjectCheckpointStore,
@@ -496,6 +511,7 @@ export class Workspace {
     sql.exec(
       `CREATE TABLE IF NOT EXISTS bot_skills (bot_id TEXT NOT NULL, skill_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(bot_id, skill_id), FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE, FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE)`,
     );
+    sql.exec(EXTENSION_REPOSITORY_SCHEMA);
     sql.exec(
       `CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, thread_id TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, interval_minutes INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
@@ -509,6 +525,7 @@ export class Workspace {
     sql.exec(
       `CREATE TABLE IF NOT EXISTS delegation_continuations (source_run_id TEXT PRIMARY KEY, status TEXT NOT NULL, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
+    sql.exec(`CREATE TABLE IF NOT EXISTS message_inputs (idempotency_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, native_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
     sql.exec(
       `CREATE TABLE IF NOT EXISTS bot_creation_requests (run_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, bot_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, request_id))`,
     );
@@ -557,14 +574,24 @@ export class Workspace {
     const events = this.events(row.id, 30);
     const restart = row.status === "needs_review" && events.some(event => event.type === "runner.recovery.needs_review");
     const error = row.error || (restart ? "The computer restarted before completion could be confirmed. Review its work before retrying." : undefined);
+    const startedAt = this.one<{ created_at: string }>("SELECT created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1", row.id)?.created_at;
+    let queue;
+    if (row.status === "queued") {
+      const blockedBy = this.one<any>("SELECT r.id,r.status,b.name AS botName FROM runs r JOIN threads t ON t.id=r.thread_id JOIN bots b ON b.id=t.bot_id WHERE r.id<>? AND r.status IN ('provisioning','running','waiting_approval','waiting_human','recovering','cancelling') ORDER BY r.created_at,r.rowid LIMIT 1", row.id);
+      const ahead = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs r WHERE r.status='queued' AND (r.created_at<? OR (r.created_at=? AND r.rowid<(SELECT rowid FROM runs WHERE id=?)))", row.created_at, row.created_at, row.id)?.n ?? 0;
+      queue = { position: ahead + 1, ...(blockedBy ? { blockedBy } : {}), reconnecting: events.some(event => event.type === "runner.reconcile_error") };
+    }
     return {
       id: row.id,
       threadId: row.thread_id,
       prompt: row.prompt,
+      internal: Number(row.bot_messaging ?? 1) === 0,
       status: row.status,
       idempotencyKey: row.idempotency_key,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      startedAt,
+      ...(queue ? { queue } : {}),
       ...(row.node_job_id ? { nodeJobId: row.node_job_id } : {}),
       ...(row.node_command_job_id
         ? { nodeCommandJobId: row.node_command_job_id }
@@ -591,7 +618,7 @@ export class Workspace {
   async fetch(request: Request): Promise<Response> {
     this.init();
     const url = new URL(request.url);
-    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/(status|preview)|terminal(?:\/.*)?)$/.test(url.pathname);
+    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/(status|preview)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
       if (url.pathname === "/api/updates" || url.pathname.startsWith("/api/updates/"))
         return await this.updateRoute(request, url);
@@ -693,6 +720,24 @@ export class Workspace {
         return response(this.skills());
       if (url.pathname === "/api/skills" && request.method === "POST")
         return response(this.createSkill(await body(request)), 201);
+      if (url.pathname === "/api/extensions/plugins" && ["GET","POST","DELETE"].includes(request.method)) {
+        const transport = await this.transport();
+        const result = await transport.fetch("/extensions/plugins", {method:request.method, headers:{"content-type":"application/json"}, ...(request.method !== "GET" ? {body:JSON.stringify(await body(request))} : {})});
+        return response(await result.json(), result.status);
+      }
+      if (url.pathname === "/api/extension-repositories" && request.method === "GET")
+        return response({ repositories: this.extensionRepositories() });
+      if (url.pathname === "/api/extension-repositories" && request.method === "POST")
+        return response(this.addExtensionRepository(await body(request)), 201);
+      const extensionRepoRoute = url.pathname.match(/^\/api\/extension-repositories\/([^/]+)(?:\/(tree|preview|install))?$/);
+      if (extensionRepoRoute) {
+        const repoId = decodeURIComponent(extensionRepoRoute[1]);
+        const action = extensionRepoRoute[2];
+        if (!action && request.method === "DELETE") return response(this.removeExtensionRepository(repoId));
+        if (action === "tree" && request.method === "GET") return response(await this.extensionTree(repoId, url.searchParams.get("path") ?? undefined));
+        if (action === "preview" && request.method === "GET") return response(await this.extensionPreview(repoId, url.searchParams.get("path") ?? ""));
+        if (action === "install" && request.method === "POST") return response(await this.installExtension(repoId, await body(request)), 201);
+      }
       const skillEdit = url.pathname.match(/^\/api\/skills\/([^/]+)$/);
       if (skillEdit && request.method === "PATCH")
         return response(this.updateSkill(skillEdit[1], await body(request)));
@@ -769,7 +814,7 @@ export class Workspace {
         return response(this.events(runEvents[1]));
       }
       if (url.pathname === "/api/runs" && request.method === "POST")
-        return response(this.createRun(await body(request)), 202);
+        return response(this.admitMessage(await body(request)), 202);
       const action = url.pathname.match(/^\/api\/threads\/([^/]+)\/action$/);
       if (action && request.method === "POST")
         return response(
@@ -789,6 +834,8 @@ export class Workspace {
         return response({ ...readiness, code: "computer_starting", error: "Your computer is reconnecting. Please try again shortly." }, 503, { "retry-after": "3" });
       }
       if (error instanceof HttpError)
+        return response({ error: error.message }, error.status);
+      if (error instanceof ExtensionRepositoryError)
         return response({ error: error.message }, error.status);
       console.error(error);
       return response({ error: "internal error" }, 500);
@@ -828,7 +875,7 @@ export class Workspace {
     ).map((r) => this.run(r));
   }
   private stateView(): any {
-    return { bots: this.bots(), threads: this.threads(), runs: this.runs() };
+    return { bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at})) };
   }
   private routines(): any[] {
     return this.rows<any>("SELECT * FROM routines ORDER BY created_at").map(
@@ -1021,7 +1068,7 @@ export class Workspace {
     const counts: Record<string, number> = {};
     // Rows referencing runs must be removed before the run receipts. These
     // tables predate foreign-key enforcement, so do this explicitly.
-    for (const table of ["delegation_requests", "approvals", "events"]) {
+    for (const table of ["delegation_requests", "approvals", "events", "message_inputs"]) {
       const column = "run_id";
       counts[table] = this.deleteRows(table, `${column} IN (${marks})`, ...runIds);
     }
@@ -1049,7 +1096,8 @@ export class Workspace {
       )`,
       ...threadIds, ...threadIds, ...threadIds, ...threadIds,
     )?.n ?? 0);
-    return { activeRuns, pendingHandoffs };
+    const pendingInputs = Number(this.one<any>(`SELECT COUNT(*) AS n FROM message_inputs WHERE thread_id IN (${marks}) AND status IN ('pending','dispatching')`, ...threadIds)?.n ?? 0);
+    return { activeRuns: activeRuns + pendingInputs, pendingHandoffs };
   }
 
   private async removeNativeSessions(threadIds: string[]): Promise<string[]> {
@@ -1152,6 +1200,54 @@ export class Workspace {
       throw new HttpError(409, "bot has active runs or pending handoffs");
     const nativeSessionsDeleted = (await this.removeNativeSessions(threadIds)).length;
     return { ...this.atomic(() => this.deleteBotRecords(botId)), nativeSessionsDeleted };
+  }
+  private extensionRepositories(): any[] {
+    return this.rows<any>("SELECT * FROM extension_repositories ORDER BY created_at DESC").map(extensionRepositoryView);
+  }
+  private addExtensionRepository(input: any): any {
+    const repo = parseGitHubRepositoryUrl(String(input?.url ?? ""));
+    const repoId = `extrepo_${repositoryId(repo).replace(/[^A-Za-z0-9._-]/g, "_")}`;
+    const now = isoNow();
+    this.state.storage.sql.exec("INSERT INTO extension_repositories (id,owner,name,ref,url,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET updated_at=excluded.updated_at", repoId, repo.owner, repo.name, repo.ref, repo.url, now, now);
+    return extensionRepositoryView(this.one<any>("SELECT * FROM extension_repositories WHERE url=?", repo.url));
+  }
+  private removeExtensionRepository(repoId: string): any {
+    const result = this.state.storage.sql.exec("DELETE FROM extension_repositories WHERE id=?", repoId);
+    if (!result.rowsWritten) throw new HttpError(404, "extension repository not found");
+    return { deleted: true, id: repoId };
+  }
+  private extensionRepo(repoId: string): any {
+    const row = this.one<any>("SELECT * FROM extension_repositories WHERE id=?", repoId);
+    if (!row) throw new HttpError(404, "extension repository not found");
+    return row;
+  }
+  private async extensionTree(repoId: string, pathValue?: string): Promise<any> {
+    const row = this.extensionRepo(repoId), repo = parseGitHubRepositoryUrl(row.url), tree = await listRepositoryTree(repo);
+    const prefix = pathValue ? safeRelativePath(pathValue).replace(/\/$/, "") : "";
+    return { repository: extensionRepositoryView(row), path: prefix, entries: tree.filter((entry) => !prefix || entry.path === prefix || entry.path.startsWith(`${prefix}/`)).slice(0, 500) };
+  }
+  private async extensionPreview(repoId: string, pathValue: string): Promise<any> {
+    const row = this.extensionRepo(repoId), repo = parseGitHubRepositoryUrl(row.url), skillDirectory = skillDirectoryFromPath(pathValue), tree = await listRepositoryTree(repo), files = normalizeTreeFiles(tree, skillDirectory), content = await fetchRepositoryFile(repo, safeRelativePath(pathValue));
+    const metadata = parseSkillMarkdown(content, skillDirectory.split("/").pop() || undefined);
+    return { repository: extensionRepositoryView(row), path: safeRelativePath(pathValue), metadata, files: files.map((file) => ({ path: file, size: tree.find((entry) => entry.path === file)?.size ?? null })), content };
+  }
+  private async installExtension(repoId: string, input: any): Promise<any> {
+    const row = this.extensionRepo(repoId), repo = parseGitHubRepositoryUrl(row.url), requested = String(input?.skillPath ?? ""), directory = skillDirectoryFromPath(requested), tree = await listRepositoryTree(repo), files = normalizeTreeFiles(tree, directory), contents = [];
+    let totalBytes = 0;
+    for (let offset = 0; offset < files.length; offset += 4) {
+      const batch = await Promise.all(files.slice(offset, offset + 4).map(async file => {
+        const bytes = await fetchRepositoryBytes(repo, file);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > 10_000_000) throw new HttpError(413, "skill download is too large");
+        return {path:file.slice(directory ? directory.length + 1 : 0),contentBase64:Buffer.from(bytes).toString("base64")};
+      }));
+      contents.push(...batch);
+    }
+    const metadata = parseSkillMarkdown(Buffer.from(contents.find(file => file.path === "SKILL.md")?.contentBase64 ?? "", "base64").toString("utf8"), directory.split("/").pop() || undefined);
+    const transport = await this.transport();
+    const result = await transport.fetch("/extensions/install", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: contents, skillName: metadata.name }) });
+    if (!result.ok) throw new HttpError(result.status, (await result.json<any>()).error ?? "skill installation failed");
+    return { ...(await result.json<any>()), source: { repository: extensionRepositoryView(row), path: requested } };
   }
   private skills(): any[] {
     return this.rows<any>("SELECT * FROM skills ORDER BY name").map((s) => ({
@@ -1475,7 +1571,58 @@ export class Workspace {
     );
     return item;
   }
-  private createRun(input: any): any {
+  private admitMessage(input: any): any {
+    if (this.maintenance) throw new HttpError(409, "computer maintenance is in progress");
+    if (typeof input.prompt !== "string" || !input.prompt.trim() || typeof input.idempotencyKey !== "string" || !input.idempotencyKey || typeof input.threadId !== "string" || input.command || input.commandName || input.sessionAction) return this.createRun(input);
+    const existing = this.one<any>("SELECT * FROM message_inputs WHERE idempotency_key=?", input.idempotencyKey);
+    if (existing) {
+      if (existing.thread_id !== input.threadId || existing.prompt !== input.prompt) throw new HttpError(409, "idempotency key conflicts with an existing message");
+      return { ...this.run(this.one("SELECT * FROM runs WHERE id=?", existing.run_id)), messageQueued: true };
+    }
+    if (this.one("SELECT id FROM runs WHERE idempotency_key=?", input.idempotencyKey)) return this.createRun(input);
+    const active = this.one<any>("SELECT r.* FROM runs r JOIN threads t ON t.id=r.thread_id WHERE r.thread_id=? AND t.node_id IS NULL AND r.status IN ('running','waiting_approval') ORDER BY r.created_at LIMIT 1", input.threadId);
+    if (!active) return this.createRun(input);
+    if (input.prompt.length > 16000) throw new HttpError(400, "message must contain at most 16000 characters");
+    if (!/^[A-Za-z0-9._:-]{1,160}$/.test(input.idempotencyKey)) throw new HttpError(400, "invalid message idempotency key");
+    const now=isoNow();
+    this.state.storage.sql.exec("INSERT INTO message_inputs (idempotency_key,thread_id,run_id,prompt,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", input.idempotencyKey,input.threadId,active.id,input.prompt,"pending",now,now);
+    this.state.storage.sql.exec("INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)", id("msg"),input.threadId,"user",input.prompt,now);
+    this.event(active.id,"message.queued",{id:input.idempotencyKey,delivery:"steer"});
+    this.state.storage.setAlarm(Date.now()+100);
+    return {...this.run(active),messageQueued:true};
+  }
+  private async flushMessageInputs(): Promise<void> {
+    const pending=this.rows<any>("SELECT * FROM message_inputs WHERE status IN ('pending','dispatching') ORDER BY created_at LIMIT 4");
+    for(const input of pending){
+      const run=this.one<any>("SELECT * FROM runs WHERE id=?",input.run_id);
+      if(!run) continue;
+      if(TERMINAL.has(run.status) && input.status==='pending'){
+        const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key},false);
+        this.state.storage.sql.exec("UPDATE message_inputs SET status='queued',run_id=?,updated_at=? WHERE idempotency_key=?",queued.id,isoNow(),input.idempotency_key);
+        continue;
+      }
+      this.state.storage.sql.exec("UPDATE message_inputs SET status='dispatching',updated_at=? WHERE idempotency_key=?",isoNow(),input.idempotency_key);
+      try {
+        const transport=await this.transport();
+        const result=await transport.fetch(`/runs/${input.run_id}/messages`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({idempotencyKey:input.idempotency_key,prompt:input.prompt,delivery:"steer"})});
+        const receipt=await result.json() as any;
+        if(result.ok && receipt.status==='accepted'){
+          this.state.storage.sql.exec("UPDATE message_inputs SET status='accepted',native_id=?,updated_at=? WHERE idempotency_key=?",receipt.id??null,isoNow(),input.idempotency_key);
+          this.event(input.run_id,"message.accepted",{id:input.idempotency_key,delivery:"steer"});
+        }else if(result.status===409 && receipt.notAdmitted===true){
+          const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key},false);
+          this.state.storage.sql.exec("UPDATE message_inputs SET status='queued',run_id=?,updated_at=? WHERE idempotency_key=?",queued.id,isoNow(),input.idempotency_key);
+        }else{
+          this.state.storage.sql.exec("UPDATE message_inputs SET status='needs_review',updated_at=? WHERE idempotency_key=?",isoNow(),input.idempotency_key);
+          this.event(input.run_id,"message.delivery.uncertain",{id:input.idempotency_key,reason:"Message delivery could not be confirmed; it was not replayed."});
+        }
+      }catch{
+        // Keep the same durable ID. The runner deduplicates this receipt on retry.
+        this.state.storage.setAlarm(Date.now()+3000);
+      }
+    }
+  }
+  private createRun(input: any, recordUserMessage = true): any {
     if (this.maintenance)
       throw new HttpError(409, "computer maintenance is in progress");
     if (input.command && input.sessionAction)
@@ -1566,7 +1713,7 @@ export class Workspace {
     const commandText = input.commandText ? String(input.commandText) : null;
     // Continuations are internal control-plane turns. Keep their prompt in
     // the run receipt, but do not present it as a user-authored message.
-    if (input.allowBotMessaging !== false)
+    if (input.allowBotMessaging !== false && recordUserMessage)
       this.state.storage.sql.exec(
         "INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)",
         id("msg"),
@@ -1681,7 +1828,8 @@ export class Workspace {
         } else {
           try {
             const transport = await this.transport();
-            await transport.fetch(`/runs/${runId}/cancel`, { method: "POST" });
+            const result = await transport.fetch(`/runs/${runId}/cancel`, { method: "POST" });
+            if (!result.ok) throw new Error(`runner cancel HTTP ${result.status}`);
           } catch (error) {
             this.event(runId, "cancel.forward_error", { error: String(error) });
           }
@@ -1854,6 +2002,7 @@ export class Workspace {
       this.state.storage.setAlarm(Date.now() + 1000);
       return;
     }
+    await this.flushMessageInputs();
     let run = this.one<any>(
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
@@ -1951,6 +2100,7 @@ export class Workspace {
         "SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling')",
       )?.n
       || this.one<{ n: number }>("SELECT COUNT(*) AS n FROM delegation_continuations WHERE status='pending'")?.n
+      || this.one<{ n: number }>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n
     )
       this.state.storage.setAlarm(Date.now() + 3000);
     this.schedule();
@@ -1967,7 +2117,9 @@ export class Workspace {
     const polling = this.one<any>(
       "SELECT COUNT(*) AS n FROM telegram_bot_configs WHERE transport='polling'",
     )?.n;
+    const inputs = this.one<{n:number}>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n;
     const wake = Math.min(
+      inputs ? Date.now() + 3000 : Infinity,
       polling ? Date.now() + 5000 : Infinity,
       due?.at ? Number(due.at) : Infinity,
       active ? Date.now() + 3000 : Infinity,
@@ -2046,7 +2198,8 @@ export class Workspace {
       lifecycle: {
         assertIdle: async () => {
           const active = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('succeeded','failed','cancelled','needs_review')")?.n ?? 0;
-          if (active) throw new Error("Finish or stop active work before updating the app.");
+          const inputs = this.one<{n:number}>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n;
+          if (active || inputs) throw new Error("Finish or stop active work before updating the app.");
         },
         checkpoint: async () => {
           const ready = await this.computerManager().prepare(await this.computerSpec());
@@ -3033,11 +3186,12 @@ export class Workspace {
       });
     else if (
       current.status === "cancelling" &&
-      ["running", "provisioning"].includes(remoteStatus)
+      ["running", "provisioning", "waiting_approval"].includes(remoteStatus)
     ) {
       try {
         const transport = await this.transport();
-        await transport.fetch(`/runs/${run.id}/cancel`, { method: "POST" });
+        const result = await transport.fetch(`/runs/${run.id}/cancel`, { method: "POST" });
+        if (!result.ok) throw new Error(`runner cancel HTTP ${result.status}`);
       } catch (error) {
         this.event(run.id, "cancel.forward_error", { error: String(error) });
       }

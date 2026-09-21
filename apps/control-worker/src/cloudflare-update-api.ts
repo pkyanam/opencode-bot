@@ -168,8 +168,8 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
       const app = (await this.listContainerApplications()).find((item) => item.id === previous.containerApplicationId);
       if (!app) throw new Error("previous container application was not found");
       const configuration = { ...(app.configuration ?? {}), image: previous.imageReference };
-      const modified = await this.modifyContainerApplication(app.id, { configuration });
-      await this.createContainerRollout(app.id, { description: "opencode-bot rollback", strategy: "rolling", target_configuration: modified.configuration ?? configuration, step_percentage: 100, kind: "full_auto" });
+      await this.modifyContainerApplication(app.id, { configuration });
+      await this.createContainerRollout(app.id, { description: "opencode-bot rollback", strategy: "rolling", target_configuration: configuration, step_percentage: 100, kind: "full_auto" });
     }
   }
 }

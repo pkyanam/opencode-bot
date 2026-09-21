@@ -12,7 +12,8 @@
     "@opencode/cli": "2.0.11",
     "@opencode/client": "2.0.11",
     "@playwright/mcp": "0.0.82",
-    "playwright": "1.64.0-alpha-1789764292000"
+    "playwright": "1.64.0-alpha-1789764292000",
+    "yaml": "2.8.2"
   },
   "optionalDependencies": {
     "@opencode/cli-linux-x64": "2.0.11"

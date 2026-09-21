@@ -27,6 +27,8 @@ export class OpenCode2Runtime {
     this.desktop = options.desktop;
     this.botTools = options.botTools;
     this._eventsStarted = false;
+    this.catalogCache = new Map();
+    this.messageCache = new Map();
     this.browser = options.browser ?? process.env.OPENCODE_BOT_BROWSER === "1";
   }
 
@@ -101,8 +103,7 @@ export class OpenCode2Runtime {
       throwOnError: true
     });
     await this.client.server.info();
-    if (this.browser && this.client.mcp?.list) await this.waitForBrowserMcp();
-    if (this.botTools && this.client.mcp?.list) await this.waitForBrowserMcp(30_000, "bots");
+    await Promise.all([...(this.browser && this.client.mcp?.list ? [this.waitForBrowserMcp()] : []), ...(this.botTools && this.client.mcp?.list ? [this.waitForBrowserMcp(30_000, "bots")] : [])]);
     return this.client;
   }
 
@@ -150,9 +151,10 @@ export class OpenCode2Runtime {
     await this.start();
     const input = {
       sessionID: sessionId,
-      ...(options.messageId || options.resume !== undefined || options.delivery
-        ? { id: { ...(options.messageId ? { id: options.messageId } : {}), text, ...(options.resume !== undefined ? { resume: options.resume } : {}), ...(options.delivery ? { delivery: options.delivery } : {}) } }
-        : { text })
+      text,
+      ...(options.messageId ? { id: options.messageId } : {}),
+      ...(options.resume !== undefined ? { resume: options.resume } : {}),
+      ...(options.delivery ? { delivery: options.delivery } : {})
     };
     return this.client.session.prompt(input);
   }
@@ -170,6 +172,18 @@ export class OpenCode2Runtime {
 
   /** Return the live, location-scoped native catalog. Values are upstream data. */
   async catalog(directory = this.directory) {
+    const cached = this.catalogCache.get(directory);
+    if (cached && cached.expiresAt > Date.now()) return cached.promise;
+    const entry = {expiresAt:Infinity,promise:undefined};
+    entry.promise = this.readCatalog(directory).then(value => {
+      entry.expiresAt = Date.now() + (value.models.length ? 5000 : 500);
+      return value;
+    }, error => { if (this.catalogCache.get(directory) === entry) this.catalogCache.delete(directory); throw error; });
+    this.catalogCache.set(directory,entry);
+    return entry.promise;
+  }
+
+  async readCatalog(directory = this.directory) {
     await this.start();
     const location = { location: { directory } };
     // OpenCode hydrates provider/model/agent registries asynchronously after
@@ -264,6 +278,7 @@ export class OpenCode2Runtime {
    * daemon and is intentionally absent from both the return value and errors.
    */
   async configureProvider({ integrationID, key, answer, label, directory } = {}) {
+    this.catalogCache.clear();
     requireNonEmpty(integrationID, "integrationID");
     requireNonEmpty(key, "key");
     await this.start();
@@ -292,6 +307,7 @@ export class OpenCode2Runtime {
    * runtime and written atomically with mode 0600.
    */
   async configureCustomProvider({ providerID, name, baseURL, modelIDs, models, apiKey, packageName = "@opencode/ai/providers/openai-compatible", settings, headers, body, restart = true } = {}) {
+    this.catalogCache.clear();
     requireProviderID(providerID);
     requireNonEmpty(baseURL, "baseURL");
     const modelNames = normalizeModelIDs(modelIDs, models);
@@ -369,6 +385,7 @@ export class OpenCode2Runtime {
 
   /** Native credential lifecycle operations, with no credential material returned. */
   async updateProviderCredential({ credentialID, label } = {}) {
+    this.catalogCache.clear();
     requireNonEmpty(credentialID, "credentialID");
     requireNonEmpty(label, "label");
     await this.start();
@@ -378,6 +395,7 @@ export class OpenCode2Runtime {
   }
 
   async activateProviderCredential({ credentialID } = {}) {
+    this.catalogCache.clear();
     requireNonEmpty(credentialID, "credentialID");
     await this.start();
     if (!this.client.credential?.activate) throw new Error("OpenCode credential activation API is unavailable");
@@ -386,6 +404,7 @@ export class OpenCode2Runtime {
   }
 
   async removeProviderCredential({ credentialID } = {}) {
+    this.catalogCache.clear();
     requireNonEmpty(credentialID, "credentialID");
     await this.start();
     if (!this.client.credential?.remove) throw new Error("OpenCode credential removal API is unavailable");
@@ -422,6 +441,7 @@ export class OpenCode2Runtime {
   }
 
   async providerOAuthComplete({ integrationID, attemptID, code, directory } = {}) {
+    this.catalogCache.clear();
     requireNonEmpty(integrationID, "integrationID");
     requireNonEmpty(attemptID, "attemptID");
     await this.start();
@@ -534,7 +554,20 @@ export class OpenCode2Runtime {
   }
 
   async wait(sessionID, signal) { await this.start(); return this.client.session.wait({ sessionID }, { signal }); }
-  async messages(sessionID) { await this.start(); return (await this.client.message.list({ sessionID })).data; }
+  async messages(sessionID, { cache = false } = {}) {
+    await this.start();
+    if (!cache) return (await this.client.message.list({sessionID})).data;
+    const prior = this.messageCache.get(sessionID);
+    if (prior && prior.expiresAt > Date.now()) return prior.promise;
+    const entry = {expiresAt:Infinity,promise:undefined};
+    entry.promise = this.client.message.list({sessionID}).then(result => {
+      entry.expiresAt = Date.now() + 1000;
+      return result.data;
+    }, error => {this.messageCache.delete(sessionID); throw error;});
+    this.messageCache.set(sessionID,entry);
+    if (this.messageCache.size > 100) this.messageCache.delete(this.messageCache.keys().next().value);
+    return entry.promise;
+  }
   async permissions(sessionID) { await this.start(); return this.client.permission.list({ sessionID }); }
 
   async *log(sessionId, after = 0, follow = false) {
@@ -543,6 +576,8 @@ export class OpenCode2Runtime {
   }
 
   async stop() {
+    this.catalogCache.clear();
+    this.messageCache.clear();
     if (this.endpoint) await this.service.stop({ file: this.serviceFile });
     if (this.desktop?.close) await this.desktop.close();
     this.client = undefined;

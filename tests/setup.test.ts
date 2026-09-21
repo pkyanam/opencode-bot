@@ -30,6 +30,7 @@ describe("setup planner", () => {
     mkdirSync(resolve(fixture, "scripts/setup"), { recursive: true });
     mkdirSync(resolve(fixture, "infra"), { recursive: true });
     cpSync(resolve(root, "scripts/setup/botctl.mjs"), resolve(fixture, "scripts/setup/botctl.mjs"));
+    cpSync(resolve(root, "scripts/setup/uninstall.mjs"), resolve(fixture, "scripts/setup/uninstall.mjs"));
     cpSync(resolve(root, "scripts/setup/release.mjs"), resolve(fixture, "scripts/setup/release.mjs"));
     cpSync(resolve(root, "scripts/setup.mjs"), resolve(fixture, "scripts/setup.mjs"));
     cpSync(resolve(root, "wrangler.jsonc"), resolve(fixture, "wrangler.jsonc"));

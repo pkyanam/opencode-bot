@@ -64,6 +64,9 @@ export type ApprovalRequest = {
   payload?: Record<string, unknown>;
 };
 export type Run = {
+  internal?: boolean;
+  startedAt?: string;
+  queue?: { position: number; blockedBy?: { id: string; status: string; botName: string }; reconnecting?: boolean };
   id: string;
   threadId: string;
   status: string;
@@ -199,6 +202,7 @@ export type Catalog = {
   mcp?: unknown[];
 };
 export type State = {
+  pendingMessages?: Array<{id:string;threadId:string;runId:string;content:string;status:string;nativeId?:string;createdAt:string}>;
   bots: Bot[];
   threads: Thread[];
   runs: Run[];

@@ -89,3 +89,22 @@ describe("resumable updater", () => {
     expect(h.calls).not.toContain("rollback");
   });
 });
+
+
+it("rolls out the requested image even when PATCH returns the current configuration", async () => {
+  const h=harness({phase:"rolling_out_container",previous:{containerApplicationId:"app-1"}});
+  h.options.api.modifyContainerApplication=async()=>({id:"app-1",name:"computer",configuration:{image:"old-image"}});
+  let target: unknown;
+  h.options.api.createContainerRollout=async(_id,body)=>{target=body.target_configuration;return{id:"new-rollout"};};
+  await resumeUpdate(h.options);
+  expect(target).toMatchObject({image:bundle().computerImage.reference});
+  expect(h.job?.phase).toBe("waiting_container");
+});
+
+it("does not restore into a rollout targeting the wrong image", async () => {
+  const h=harness({phase:"waiting_container",previous:{containerApplicationId:"app-1"},containerRolloutId:"roll-1"});
+  h.options.api.getContainerRollout=async()=>({id:"roll-1",status:"completed",target_configuration:{image:"old-image"}});
+  await resumeUpdate(h.options);
+  expect(h.job?.phase).toBe("rollback_required");
+  expect(h.calls).not.toContain("restore");
+});

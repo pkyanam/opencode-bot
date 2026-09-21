@@ -14,6 +14,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { validateManifest, verifyArchive, downloadReleaseArchive, assertSourceCommit, craneAsset } from "./release.mjs";
+import { readOwnership, uninstallPlan, uninstallResources } from "./uninstall.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const argv = process.argv.slice(2);
@@ -220,7 +221,11 @@ async function applyDaemonless(config) {
   }
   const material = secretMaterial();
   const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { schemaVersion: 1, project: config.name ?? "ocbot-personal", createdAt: new Date().toISOString(), resources: {}, journal: [] };
+  if (state.uninstall && !state.uninstalledAt) throw new Error("Finish the interrupted uninstall before reinstalling.");
+  if (state.uninstalledAt) { state.previousUninstalledAt = state.uninstalledAt; delete state.uninstalledAt; delete state.uninstall; state.resources = {}; state.journal = []; delete state.deploymentUrl; }
   ensureWorkerOwnership(config, state);
+  state.accountId = account;
+  state.workerName = config.name ?? "ocbot-personal";
   state.secretDigests = { APP_TOKEN: digest(material.APP_TOKEN), RUNNER_TOKEN: digest(material.RUNNER_TOKEN) };
   journal(state, "prepare", "started");
   runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
@@ -240,7 +245,7 @@ async function applyDaemonless(config) {
   const workerName = config.name ?? "ocbot-personal";
   const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
   if (!appUrl || !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL");
-  state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.image = published.image; journal(state, "deploy", "complete", appUrl);
+  state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.workerName = workerName; state.resources.accountId = account; state.resources.containerApplication = { worker: workerName, className: "Sandbox", managedBy: workerName }; state.resources.image = published.image; journal(state, "deploy", "complete", appUrl);
   runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", deploymentConfig], { inherit: true }); journal(state, "secrets", "complete");
   state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
   journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
@@ -344,6 +349,8 @@ async function applyDeployment(config) {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const material = secretMaterial();
   const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { schemaVersion: 1, project: config.name ?? "ocbot-personal", createdAt: new Date().toISOString(), resources: {}, journal: [] };
+  if (state.uninstall && !state.uninstalledAt) throw new Error("Finish the interrupted uninstall before reinstalling.");
+  if (state.uninstalledAt) { state.previousUninstalledAt = state.uninstalledAt; delete state.uninstalledAt; delete state.uninstall; state.resources = {}; state.journal = []; delete state.deploymentUrl; }
   ensureWorkerOwnership(config, state);
   state.secretDigests = { APP_TOKEN: digest(material.APP_TOKEN), RUNNER_TOKEN: digest(material.RUNNER_TOKEN) };
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -361,7 +368,7 @@ async function applyDeployment(config) {
   const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
   if (appUrl && !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL; refusing to hand off credentials");
   if (!appUrl) throw new Error("Worker deploy completed without a discoverable public URL; inspect Wrangler output and rerun setup");
-  state.deploymentUrl = appUrl; state.resources.worker = appUrl; journal(state, "deploy", "complete", appUrl);
+  state.accountId = cloudflareAccount(config); state.workerName = workerName; state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.workerName = workerName; state.resources.accountId = state.accountId; state.resources.containerApplication = { worker: workerName, className: "Sandbox", managedBy: workerName }; journal(state, "deploy", "complete", appUrl);
   runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", "wrangler.jsonc"], { inherit: true }); journal(state, "secrets", "complete");
   state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
   journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
@@ -371,10 +378,18 @@ async function applyDeployment(config) {
 }
 
 async function main() {
-  if (args.has("--help") || args.has("-h")) { console.log("Usage: setup.sh [doctor|plan|apply] [--config FILE] [--apply] [--install-missing]"); return; }
+  if (args.has("--help") || args.has("-h")) { console.log("Usage: setup.sh [doctor|plan|apply|uninstall] [--config FILE] [--apply] [--install-missing] [--yes] [--keep-artifacts]"); return; }
   const config = readConfig();
   if (command === "doctor") { const result = checks(); printChecks(result); if (result.some((item) => !item.ok)) process.exitCode = 1; return; }
   if (command === "plan" || args.has("--plan")) { console.log(JSON.stringify(plan(config), null, 2)); return; }
+  if (command === "uninstall") {
+    const ownership = readOwnership({ statePath, config, root });
+    const keepData = args.has("--keep-data") || args.has("--keep-artifacts");
+    console.log(JSON.stringify(uninstallPlan(ownership, { keepData }), null, 2));
+    if (args.has("--yes")) await uninstallResources({ ownership, root, statePath, yes: true, keepData });
+    else console.log("Dry run only. No Cloudflare resources were changed. Re-run with `uninstall --yes` to delete the listed resources.");
+    return;
+  }
   if (command === "apply") {
     if (!apply) throw new Error("apply requires explicit --apply");
     if (args.has("--build-local")) await applyDeployment(config);
@@ -386,4 +401,4 @@ async function main() {
 
 try { await main(); } catch (error) { console.error(`setup error: ${error.message}`); process.exitCode = 1; }
 
-export { checkNode, checks, plan, digest, validateDeploymentConfig, writeDeploymentConfig, publishImage, applyDaemonless };
+export { checkNode, checks, plan, digest, validateDeploymentConfig, writeDeploymentConfig, publishImage, applyDaemonless, readOwnership, uninstallPlan, uninstallResources };

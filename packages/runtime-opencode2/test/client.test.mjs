@@ -18,9 +18,12 @@ test("runtime qualifies service with isolated roots and maps v2 calls", async ()
   let ensureInput;
   const runtime = new OpenCode2Runtime({ root: "/workspace/state", directory: "/workspace/shared", client: fakeClient, service: { ensure: async (x) => { ensureInput = x; return { url: "http://127.0.0.1:4096" }; }, headers: () => ({}) } });
   assert.equal(await runtime.createSession({ model: "openai/gpt-5.6-luna" }), "ses_1");
-  await runtime.prompt("ses_1", "hello"); await runtime.interrupt("ses_1");
+  await runtime.prompt("ses_1", "hello");
+  await runtime.prompt("ses_1", "steer me", { messageId: "msg_123", delivery: "steer", resume: true });
+  await runtime.interrupt("ses_1");
   assert.deepEqual(calls[0][1].model, { providerID: "openai", id: "gpt-5.6-luna" });
   assert.deepEqual(calls[1][1], { sessionID: "ses_1", text: "hello" });
+  assert.deepEqual(calls[2][1], { sessionID: "ses_1", text: "steer me", id: "msg_123", resume: true, delivery: "steer" });
   assert.equal(eventText({ properties: { delta: "x" } }), "x");
   assert.equal(ensureInput, undefined, "injected client should avoid service startup");
 });
@@ -204,4 +207,22 @@ test('computer browser is directly exposed and attaches to the live desktop CDP 
       assert.equal(config.mcp.servers.browser,undefined);
     }
   } finally { if(previousDisplay===undefined)delete process.env.DISPLAY;else process.env.DISPLAY=previousDisplay;await rm(root,{recursive:true,force:true}); }
+});
+
+test('concurrent catalog readers share one native hydration pass', async () => {
+  let calls=0;
+  const list=async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,10));return {data:[{id:'test'}]};};
+  const runtime=new OpenCode2Runtime({client:{model:{list},provider:{list},agent:{list},command:{list},mcp:{list}}});
+  await Promise.all(Array.from({length:6},()=>runtime.catalog()));
+  assert.equal(calls,5);
+  await runtime.catalog();assert.equal(calls,5);
+  runtime.catalogCache.clear();await runtime.catalog();assert.equal(calls,10);
+});
+
+test('transcript polls deduplicate while execution reads stay fresh', async () => {
+  let calls=0;
+  const runtime=new OpenCode2Runtime({client:{message:{list:async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,10));return {data:[{id:String(calls)}]};}}}});
+  await Promise.all([runtime.messages('ses_x',{cache:true}),runtime.messages('ses_x',{cache:true})]);
+  assert.equal(calls,1);
+  await runtime.messages('ses_x');assert.equal(calls,2);
 });

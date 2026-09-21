@@ -138,6 +138,7 @@ export function NativeTerminal({
         });
         const poll = async () => {
           if (abort.signal.aborted || !attachmentRef.current) return;
+          let nextPollMs = 1000;
           try {
             const response = await fetch(
               `${attachUrl.origin}${attachUrl.pathname.replace(/\/$/, "")}/${attached.terminalId}/output?after=${offsetRef.current}`,
@@ -153,7 +154,7 @@ export function NativeTerminal({
               offset?: number;
               closed?: boolean;
             };
-            if (payload.data) terminal.write(payload.data);
+            if (payload.data) { terminal.write(payload.data); nextPollMs = 100; }
             if (typeof payload.offset === "number")
               offsetRef.current = payload.offset;
             if (payload.closed) {
@@ -167,7 +168,7 @@ export function NativeTerminal({
             }
           }
           if (!abort.signal.aborted)
-            pollTimer = window.setTimeout(() => void poll(), 100);
+            pollTimer = window.setTimeout(() => void poll(), nextPollMs);
         };
         void poll();
       } catch (e) {
