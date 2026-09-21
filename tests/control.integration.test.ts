@@ -598,3 +598,14 @@ it('delivers Telegram activity from native messages before a formatted final ans
   expect(calls.some(c=>c.method==='sendMessage' && c.input.parse_mode==='HTML' && c.input.text.includes('<b>Done</b>'))).toBe(true);
  }finally {globalThis.fetch=original;}
 });
+
+it('returns a chronological activity tail and explains interrupted runner recovery', async()=>{
+ const f=fixture();const {thread}=await f.create();const run=(await f.request('/api/runs','POST',{threadId:thread.id,prompt:'Inspect',idempotencyKey:'tail-test'})).body;
+ const insert=f.db.prepare('INSERT INTO events (id,run_id,sequence,type,payload,created_at) VALUES (?,?,?,?,?,?)');
+ for(let i=2;i<=70;i++)insert.run(`tail-${i}`,run.id,i,'runner.session.reasoning.delta','{}',new Date().toISOString());
+ insert.run('recovery-tail',run.id,71,'runner.recovery.needs_review','{}',new Date().toISOString());
+ f.db.prepare("UPDATE runs SET status='needs_review' WHERE id=?").run(run.id);
+ const state=(await f.request('/api/state')).body;expect(state.runs[0].events).toHaveLength(30);
+ expect(state.runs[0].events.map((e:any)=>e.sequence)).toEqual(Array.from({length:30},(_,i)=>42+i));
+ expect(state.runs[0].error).toContain('restarted before completion could be confirmed');
+});

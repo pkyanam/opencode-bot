@@ -554,6 +554,9 @@ export class Workspace {
   }
   private run(row: any): any {
     if (!row) return null;
+    const events = this.events(row.id, 30);
+    const restart = row.status === "needs_review" && events.some(event => event.type === "runner.recovery.needs_review");
+    const error = row.error || (restart ? "The computer restarted before completion could be confirmed. Review its work before retrying." : undefined);
     return {
       id: row.id,
       threadId: row.thread_id,
@@ -566,16 +569,16 @@ export class Workspace {
       ...(row.node_command_job_id
         ? { nodeCommandJobId: row.node_command_job_id }
         : {}),
-      events: this.events(row.id).slice(-30),
-      ...(row.error ? { error: row.error } : {}),
+      events,
+      ...(error ? { error } : {}),
       ...(row.result ? { result: row.result } : {}),
     };
   }
-  private events(runId: string): any[] {
-    return this.rows<any>(
-      "SELECT * FROM events WHERE run_id = ? ORDER BY sequence",
-      runId,
-    ).map((e) => ({
+  private events(runId: string, limit?: number): any[] {
+    const rows = limit === undefined
+      ? this.rows<any>("SELECT * FROM events WHERE run_id = ? ORDER BY sequence", runId)
+      : this.rows<any>("SELECT * FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT ?", runId, limit).reverse();
+    return rows.map((e) => ({
       id: e.id,
       runId: e.run_id,
       sequence: e.sequence,

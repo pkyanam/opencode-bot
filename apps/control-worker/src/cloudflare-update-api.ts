@@ -26,8 +26,13 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
     const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
     let response: Response;
-    try { response = await this.fetchImpl(`${this.root}${path}`, { ...init, headers, signal }); }
-    catch { throw new Error("Cloudflare API request failed: network error"); }
+    const fetcher = this.fetchImpl;
+    try { response = await fetcher(`${this.root}${path}`, { ...init, headers, signal }); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : "network error";
+      const safe = [this.apiToken, bearer].filter(Boolean).reduce((message, secret) => message.replaceAll(secret, "[redacted]"), detail).slice(0, 300);
+      throw new Error(`Cloudflare API request failed: ${safe}`);
+    }
     let payload: CfEnvelope<T> | undefined;
     try { payload = await response.json() as CfEnvelope<T>; } catch { /* status below is sufficient */ }
     if (!response.ok || !payload?.success) {

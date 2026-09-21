@@ -82,3 +82,9 @@ it('reuses an accepted rollout after an interrupted receipt write', async () => 
   expect(await client.createContainerRollout('app-id',{description:rollout.description,target_configuration:rollout.target_configuration})).toEqual(rollout);
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+
+it('calls the Workers fetch primitive without an application receiver', async () => {
+  const fetcher = function(this: unknown) { expect(this).toBeUndefined(); return Promise.resolve(reply({deployments:[]})); } as typeof fetch;
+  const client=new CloudflareUpdateApiClient(account,'worker',token,fetcher,'https://cf.test');
+  await expect(client.currentDeployment()).resolves.toEqual({deploymentId:undefined,workerVersionId:undefined});
+});
