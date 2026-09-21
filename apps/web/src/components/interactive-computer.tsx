@@ -29,7 +29,8 @@ export function translateComputerKey(event: {
   const alt = Boolean(event.altKey);
   const shift = Boolean(event.shiftKey);
   if (key.length === 1 && !ctrl && !alt) return [{ type: "text", text: key }];
-  if (ctrl && /^[a-zA-Z]$/.test(key)) return [{ type: "key", action: "press", key: `Control+${key.toUpperCase()}` }];
+  if (ctrl && /^[a-zA-Z]$/.test(key)) return [{ type: "key", action: "press", key: `Control+${shift ? "Shift+" : ""}${key.toUpperCase()}` }];
+  if ((ctrl || shift) && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Tab"].includes(key)) return [{ type: "key", action: "press", key: `${ctrl ? "Control+" : ""}${shift ? "Shift+" : ""}${key}` }];
   if (alt && ["ArrowLeft", "ArrowRight"].includes(key)) return [{ type: "key", action: "press", key: `Alt+${key}` }];
   if (shift && key === "Tab") return [{ type: "key", action: "press", key: "Shift+Tab" }];
   if (["Control", "Meta", "Alt", "Shift"].includes(key)) return [];
@@ -126,6 +127,12 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
 
   const enqueue = useCallback((input: ComputerInput, pointerMove = false) => {
     if (!leaseRef.current) return;
+    const tail = queue.current[queue.current.length - 1];
+    if (input.type === "text" && tail?.input.type === "text" && tail.lease === leaseRef.current && typeof input.text === "string" && typeof tail.input.text === "string" && tail.input.text.length + input.text.length <= 16_000) {
+      tail.input = { type: "text", text: tail.input.text + input.text };
+      void drain();
+      return;
+    }
     if (pointerMove) {
       const index = queue.current.findIndex((item) => item.pointerMove);
       if (index >= 0) {

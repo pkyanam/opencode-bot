@@ -12,7 +12,9 @@ const MAX_CONTROL_TEXT = 16_000;
 const MODIFIERS = new Set(["Alt", "Control", "Meta", "Shift"]);
 const NAVIGATION_KEYS = new Set(["Backspace", "Delete", "Enter", "Escape", "Tab", "Space", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home", "PageDown", "PageUp"]);
 const ALLOWED_SHORTCUTS = new Set([
-  "Control+A", "Control+C", "Control+L", "Control+V", "Control+X",
+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").flatMap(key => [`Control+${key}`, `Control+Shift+${key}`]),
+  ...["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].flatMap(key => [`Shift+${key}`, `Control+${key}`, `Control+Shift+${key}`]),
+  "Control+Tab", "Control+Shift+Tab",
   "Meta+A", "Meta+C", "Meta+L", "Meta+V", "Meta+X",
   "Alt+ArrowLeft", "Alt+ArrowRight", "Shift+Tab",
 ]);
@@ -189,7 +191,7 @@ export class DesktopController {
         const horizontalButton = deltaX < 0 ? 6 : 7;
         const count = Math.min(100, Math.max(1, Math.round(Math.abs(deltaY || deltaX) / 100)));
         const button = deltaY ? verticalButton : horizontalButton;
-        await this.runCommand("xdotool", ["click", "--repeat", String(count), "--button", String(button)], undefined, this.display);
+        await this.runCommand("xdotool", ["click", "--repeat", String(count), String(button)], undefined, this.display);
         return { ok: true };
       }
       case "key": {

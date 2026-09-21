@@ -42,6 +42,7 @@ import {
 } from "../../../packages/coordinator-cloudflare/src/index";
 import { PairingError, PairingService } from "./pairing";
 import { createMcpHandler } from "./mcp";
+import { verifyCheckpointObject } from "./checkpoint-verification";
 // Re-export the Cloudflare Sandbox Durable Object class for the `SANDBOX`
 // container binding declared in wrangler.jsonc.
 export { Sandbox } from "@cloudflare/sandbox";
@@ -2356,11 +2357,10 @@ export class Workspace {
           if (ready.state !== "ready") throw new Error("Restore the computer before updating the app.");
           const pointer = await this.computerManager().checkpoint("shared", await this.computerGeneration(), 0, ready.runnerState?.instanceId);
           const manifest = pointer.manifest;
-          if (!manifest.supported || !manifest.durable || !manifest.sha256 || !manifest.checkpointKey || !this.env.ARTIFACTS) throw new Error("A durable Computer checkpoint is required before updating.");
+          if (!manifest.supported || !manifest.durable || !manifest.sha256 || !manifest.checkpointKey || typeof manifest.bytes !== "number" || !this.env.ARTIFACTS) throw new Error("A durable Computer checkpoint is required before updating.");
           const saved = await this.env.ARTIFACTS.get(manifest.checkpointKey);
-          if (!saved || saved.size !== manifest.bytes) throw new Error("Checkpoint verification failed. The app has not been changed.");
-          const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await saved.arrayBuffer()))].map(v => v.toString(16).padStart(2, "0")).join("");
-          if (digest !== manifest.sha256) throw new Error("Checkpoint verification failed. The app has not been changed.");
+          if (!saved) throw new Error("Checkpoint verification failed. The app has not been changed.");
+          await verifyCheckpointObject(saved, manifest.bytes, manifest.sha256);
           return { id: manifest.id, sha256: `sha256:${manifest.sha256}`, runnerInstanceId: pointer.runnerInstanceId };
         },
         waitForReplacement: async (checkpointId, previousRunnerInstanceId) => {
