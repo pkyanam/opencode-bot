@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { listWorkspaceArtifacts, resolveWorkspaceFile, resolveWorkspacePath, WorkspacePathError } from "../packages/browser/src/index.ts";
 
@@ -81,15 +81,39 @@ function parseLimit(value) {
 async function ensureWritableTarget(workspace, target) {
   const root = path.resolve(workspace);
   const parent = path.dirname(target);
-  resolveWorkspacePath(root, path.relative(root, parent) || ".");
-  const parentInfo = await lstat(parent);
-  if (!parentInfo.isDirectory()) throw new WorkspacePathError("artifact parent is not a directory");
+  await ensureDirectoryPath(root, parent);
   try {
     const existing = await lstat(target);
     if (existing.isSymbolicLink()) throw new WorkspacePathError("cannot overwrite a symbolic link");
     if (existing.isDirectory()) throw new WorkspacePathError("artifact target is a directory");
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+/** Ensure an upload's parent exists without following symlinks in the path. */
+async function ensureDirectoryPath(root, directory) {
+  const relative = path.relative(root, directory);
+  // Keep the same workspace boundary check used for existing paths before
+  // creating anything. The upload path has already rejected dot segments.
+  resolveWorkspacePath(root, relative || ".");
+  let current = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      try {
+        await mkdir(current);
+      } catch (mkdirError) {
+        if (mkdirError?.code !== "EEXIST") throw mkdirError;
+      }
+      info = await lstat(current);
+    }
+    if (info.isSymbolicLink()) throw new WorkspacePathError("Symbolic links are not allowed");
+    if (!info.isDirectory()) throw new WorkspacePathError("artifact parent is not a directory");
   }
 }
 

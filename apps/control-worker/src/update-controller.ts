@@ -88,7 +88,7 @@ export class UpdateController {
     if (job?.phase !== "rollback_required" || !job.resumePhase) throw new Error("There is no paused update to resume.");
     if (!await this.config()) throw new Error("Restore update access first.");
     await this.options.lifecycle.assertIdle();
-    await this.options.storage.put(jobKey, { ...job, phase: job.resumePhase, error: undefined, rolloutWaitAttempts: 0, updatedAt: new Date().toISOString() });
+    await this.options.storage.put(jobKey, { ...job, phase: job.resumePhase, error: undefined, rolloutWaitAttempts: 0, replacementWaitAttempts: 0, updatedAt: new Date().toISOString() });
     this.options.schedule();
     return this.status();
   }

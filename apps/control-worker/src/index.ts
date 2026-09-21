@@ -2313,7 +2313,28 @@ export class Workspace {
           if (!saved || saved.size !== manifest.bytes) throw new Error("Checkpoint verification failed. The app has not been changed.");
           const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await saved.arrayBuffer()))].map(v => v.toString(16).padStart(2, "0")).join("");
           if (digest !== manifest.sha256) throw new Error("Checkpoint verification failed. The app has not been changed.");
-          return { id: manifest.id, sha256: `sha256:${manifest.sha256}` };
+          return { id: manifest.id, sha256: `sha256:${manifest.sha256}`, runnerInstanceId: pointer.runnerInstanceId };
+        },
+        waitForReplacement: async (checkpointId, previousRunnerInstanceId) => {
+          // A provider can report a completed rollout while the old Sandbox
+          // instance is still serving traffic. Waiting for the runner identity
+          // to change prevents restoring into that old instance immediately
+          // before Cloudflare replaces it and drops the restored files.
+          this.computerProvider = undefined;
+          this.computerCoordinator = undefined;
+          this.startup.invalidate();
+          const ready = await this.computerManager().prepare(await this.computerSpec());
+          if (ready.committedCheckpoint?.manifest.id !== checkpointId) throw new Error("The saved update checkpoint could not be located.");
+          if (ready.state === "restore_required") return true;
+          // A recovery action may have restored the checkpoint before this
+          // alarm ran. In that case the committed pointer moves to the new
+          // instance and prepare() legitimately reports ready.
+          if (ready.state === "ready" && previousRunnerInstanceId && ready.runnerState?.instanceId && ready.runnerState.instanceId !== previousRunnerInstanceId) return true;
+          // Keep this phase resumable: the next alarm gets another provider
+          // instance and probe, without holding a DO invocation open.
+          this.computerProvider = undefined;
+          this.computerCoordinator = undefined;
+          return false;
         },
         restore: async checkpointId => {
           this.computerProvider = undefined;

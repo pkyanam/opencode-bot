@@ -108,3 +108,43 @@ it("does not restore into a rollout targeting the wrong image", async () => {
   expect(h.job?.phase).toBe("rollback_required");
   expect(h.calls).not.toContain("restore");
 });
+
+it("waits for the replacement runner before entering restore", async () => {
+  const h = harness({ phase: "waiting_container", checkpointId: "cp-1", previous: { containerApplicationId: "app-1" }, containerRolloutId: "roll-1" });
+  let waited = false;
+  h.options.lifecycle.waitForReplacement = async checkpointId => {
+    expect(checkpointId).toBe("cp-1");
+    waited = true;
+    h.calls.push("replacement");
+  };
+  h.options.api.getContainerRollout = async () => ({ id: "roll-1", status: "completed", target_configuration: { image: bundle().computerImage.reference } });
+  await resumeUpdate(h.options);
+  expect(waited).toBe(true);
+  expect(h.calls).toEqual(["replacement"]);
+  expect(h.job?.phase).toBe("restoring");
+});
+
+it("keeps polling when rollout is complete but the old runner is still ready", async () => {
+  const h = harness({ phase: "waiting_container", checkpointId: "cp-1", checkpointRunnerInstanceId: "old", previous: { containerApplicationId: "app-1" }, containerRolloutId: "roll-1" });
+  let probes = 0;
+  h.options.lifecycle.waitForReplacement = async (_checkpointId, previous) => {
+    expect(previous).toBe("old");
+    probes += 1;
+    return probes > 1;
+  };
+  h.options.api.getContainerRollout = async () => ({ id: "roll-1", status: "completed", target_configuration: { image: bundle().computerImage.reference } });
+  await resumeUpdate(h.options);
+  expect(h.job?.phase).toBe("waiting_container");
+  expect(h.job?.replacementWaitAttempts).toBe(1);
+  await resumeUpdate(h.options);
+  expect(h.job?.phase).toBe("restoring");
+  expect(probes).toBe(2);
+});
+
+it("skips the replacement barrier when the Computer image is unchanged", async () => {
+  const h = harness({ phase: "waiting_container", checkpointId: "cp-1", checkpointRunnerInstanceId: "old", previous: { containerApplicationId: "app-1", imageReference: bundle().computerImage.reference }, containerRolloutId: "roll-1" });
+  h.options.lifecycle.waitForReplacement = async () => { throw new Error("barrier should be skipped"); };
+  h.options.api.getContainerRollout = async () => ({ id: "roll-1", status: "completed", target_configuration: { image: bundle().computerImage.reference } });
+  await resumeUpdate(h.options);
+  expect(h.job?.phase).toBe("restoring");
+});

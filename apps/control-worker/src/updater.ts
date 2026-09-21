@@ -48,12 +48,14 @@ export type UpdateJob = {
   bundle?: { version: string; commit: string; sha256: string };
   previous?: { deploymentId?: string; workerVersionId?: string; imageReference?: string; containerApplicationId?: string };
   checkpointId?: string;
+  checkpointRunnerInstanceId?: string;
   uploadedWorkerVersionId?: string;
   /** Short-lived asset completion JWT; stored only in the control-plane DO job. */
   assetsJwt?: string;
   deploymentId?: string;
   containerRolloutId?: string;
   rolloutWaitAttempts?: number;
+  replacementWaitAttempts?: number;
   /** Phase to retry after an operator completes recovery from rollback_required. */
   resumePhase?: UpdatePhase;
 };
@@ -62,7 +64,9 @@ export interface UpdateStore { read(): Promise<UpdateJob | null>; write(job: Upd
 
 export interface UpdateLifecycle {
   assertIdle(): Promise<void>;
-  checkpoint(): Promise<{ id: string; sha256: string }>;
+  checkpoint(): Promise<{ id: string; sha256: string; runnerInstanceId?: string }>;
+  /** Wait until the container rollout is serving a replacement runner. */
+  waitForReplacement?(checkpointId: string, previousRunnerInstanceId?: string): Promise<boolean | void>;
   restore(checkpointId: string): Promise<void>;
   healthCheck(): Promise<void>;
 }
@@ -162,7 +166,7 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
     if (job.phase === "checkpointing") {
       const checkpoint = await options.lifecycle.checkpoint();
       if (!checkpoint?.id || !/^[A-Za-z0-9._:-]{1,200}$/.test(checkpoint.id) || !/^sha256:[0-9a-f]{64}$/.test(checkpoint.sha256)) fail("checkpoint receipt is missing a valid id or sha256");
-      job = transition(job, "uploading_assets", now, { checkpointId: checkpoint.id }); await options.store.write(job); return job;
+      job = transition(job, "uploading_assets", now, { checkpointId: checkpoint.id, checkpointRunnerInstanceId: checkpoint.runnerInstanceId }); await options.store.write(job); return job;
     }
     if (job.phase === "uploading_assets") {
       const files = new Map(bundle.assets.map((asset) => [`/${asset.path}`, decode(asset.contentBase64)]));
@@ -205,6 +209,16 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
         const attempts = (job.rolloutWaitAttempts ?? 0) + 1;
         if (attempts > 120) fail("container rollout timed out");
         await options.store.write({ ...job, rolloutWaitAttempts: attempts, updatedAt: now() }); return job;
+      }
+      const imageChanged = job.previous?.imageReference !== bundle.computerImage.reference;
+      if (imageChanged && job.checkpointId && options.lifecycle.waitForReplacement) {
+        const replaced = await options.lifecycle.waitForReplacement(job.checkpointId, job.checkpointRunnerInstanceId);
+        if (replaced === false) {
+          const attempts = (job.replacementWaitAttempts ?? 0) + 1;
+          if (attempts > 120) fail("replacement runner did not become ready");
+          await options.store.write({ ...job, replacementWaitAttempts: attempts, updatedAt: now() });
+          return job;
+        }
       }
       job = transition(job, "restoring", now); await options.store.write(job); return job;
     }

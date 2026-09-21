@@ -45,6 +45,9 @@ test("artifact content and atomic upload work", async () => {
     const uploaded = await request(root, "POST", "/files?path=output.txt", "uploaded");
     assert.equal(uploaded.response.status, 201);
     assert.equal(await readFile(path.join(root, "output.txt"), "utf8"), "uploaded");
+    const nested = await request(root, "POST", "/files?path=newdir%2Fdeeper%2Foutput.txt", "nested upload");
+    assert.equal(nested.response.status, 201, nested.bytes.toString());
+    assert.equal(await readFile(path.join(root, "newdir", "deeper", "output.txt"), "utf8"), "nested upload");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

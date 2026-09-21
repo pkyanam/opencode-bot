@@ -244,14 +244,13 @@ function App() {
       .routines()
       .then(setRoutines)
       .catch(() => undefined);
-    api
-      .catalog()
-      .then((value) => {
+    const loadCatalog = async () => {
+      try {
+        const value = await api.catalog();
         setCatalog(value);
         setCatalogError("");
         setCatalogWarming(false);
-      })
-      .catch((e) => {
+      } catch (e) {
         if (isComputerWarmingUpError(e)) {
           setCatalogWarming(true);
           setCatalogError("");
@@ -261,7 +260,9 @@ function App() {
         setCatalogError(
           e instanceof Error ? e.message : "Live catalog unavailable",
         );
-      });
+      }
+    };
+    void loadCatalog();
     let cancelled = false;
     let retryTimer: number | undefined;
     const pollReadiness = async () => {
@@ -270,6 +271,11 @@ function App() {
         if (cancelled) return;
         if (readiness.state === "ready") {
           setComputerWarming(false);
+          // A catalog request made during startup can fail with 503 (or
+          // observe an empty registry). Readiness is the durable transition
+          // signal, so refresh once when it becomes ready rather than leaving
+          // the initial failed catalog in the UI until a manual refresh.
+          void loadCatalog();
           return;
         }
         if (readiness.state === "error") {
