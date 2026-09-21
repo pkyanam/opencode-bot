@@ -25,3 +25,5 @@ The separate [credential-free model record](free-model.md) captures an app-level
 Cloudflare-local wrapped run using native OpenCode CLI 2.0.11 and
 `opencode/muse-spark-1.3-contributor-free`. It also records a scoped isolated
 Big Pickle/Zen 403 observation; the two results qualify different request paths.
+
+[Cloud update, uninstall, extension, and performance qualification for v0.1.6](v0.1.6.md).
