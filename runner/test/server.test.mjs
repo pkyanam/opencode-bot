@@ -149,6 +149,31 @@ test('transient wait transport failures are retried while native execution conti
   assert.deepEqual(runtime.interrupts, []);
 });
 
+test('Telegram final receipt uses the last textual assistant message and ignores a tool-only tail', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  let started = false;
+  runtime.prompt = async () => { started = true; };
+  runtime.wait = async () => {};
+  runtime.messages = async () => started ? [
+    { id: 'assistant-commentary', type: 'assistant', time: { created: 1 }, content: [{ type: 'text', text: 'old commentary' }] },
+    { id: 'assistant-tool', type: 'assistant', time: { created: 2 }, content: [{ type: 'tool', tool: 'search' }] },
+    { id: 'assistant-final', type: 'assistant', time: { created: 3 }, content: [
+      { type: 'text', text: 'final part one' },
+      { type: 'tool', tool: 'handoff' },
+      { type: 'text', text: 'final part two' },
+    ] },
+    { id: 'assistant-tail', type: 'assistant', time: { created: 4 }, content: [{ type: 'tool', tool: 'cleanup' }] },
+  ] : [];
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'textual-final', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const run = store.public(store.get('textual-final'));
+  assert.equal(run.status, 'succeeded');
+  assert.equal(run.final, 'final part one\n\nfinal part two');
+  assert.doesNotMatch(run.final, /old commentary/);
+});
+
 test('unrecoverable wait transport failure interrupts native ownership before review', async () => {
   const runtime = new FakeRuntime();
   runtime.events = undefined;

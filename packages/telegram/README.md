@@ -100,3 +100,11 @@ store bot configs (including token and webhook secret) server-side, hash pairing
 nonces with SHA-256, atomically delete a consumed challenge, atomically claim
 `(botId, updateId)`, and key bindings by `(botId, chatId, telegramUserId)`.
 Never put tokens in SQL query errors, logs, response bodies, or frontend state.
+
+For active runs, call `deliverRunProgress({ runId, text })` with public activity.
+The adapter reserves one quiet message, edits it when content changes (at least
+four seconds between updates), and persists its Telegram message ID. Do not
+include reasoning, credentials, or raw tool payloads. `inheritRunProgress`
+transfers that activity to a bot-handoff continuation with the same chat route.
+Completion settles the activity and sends a distinct formatted answer. Pass
+only the final answer as `output`; retain commentary in the activity timeline.

@@ -205,7 +205,7 @@ Dropped native wait connections are retried without resubmitting the prompt.
 If the connection cannot recover, the runner stops native execution before
 publishing a review state; checkpointing also waits for execution to unwind.
 
-The current local suite reports **116 passing tests** covering real SQLite
+The current local suite reports **125 passing tests** covering real SQLite
 coordination, provider contracts, artifact paths, owned-node routing/receipts,
 setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
 That harness runs isolated OpenCode CLI 2.0.11 against a local fake
@@ -217,6 +217,13 @@ CLI 2.0.11 and `opencode/muse-spark-1.3-contributor-free`, returning `My name
 is Scout.` at zero reported cost; see the [qualification record](tests/qualification/free-model.md).
 An account deployment remains a separate validation step, and local checks do
 not establish production readiness.
+
+Telegram uses a quiet, edited activity message for current commentary and tool
+actions, throttled to at most one edit every four seconds. Bot handoffs carry
+that message into the continuation. The final reply contains the last assistant
+answer rather than concatenated progress commentary, with Telegram HTML for
+bold text, links, lists, and code. Long replies split into independently valid
+messages. Activity excludes private reasoning and raw tool payloads.
 
 Telegram live qualification paired a user-created BotFather bot and delivered
 two real Muse replies. The durable `telegram_run_deliveries` records reached

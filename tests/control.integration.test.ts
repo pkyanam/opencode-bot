@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], failApproval: false }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], failApproval: false, messages: [] as any[] }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async ensure() {
@@ -12,6 +12,7 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           const run = { runId: input.runId, sessionId: input.sessionId ?? `session-${input.runId}`, status: 'running', events: [], final: '' };
           remote.runs.set(input.runId, run); return Response.json(run, { status: 202 });
         }
+        if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
         const match = path.match(/^\/runs\/([^/]+)(?:\/(cancel|approval))?$/);
         const run = match && remote.runs.get(match[1]);
         if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
@@ -58,7 +59,7 @@ function fixture() {
   };
   return { db, request, create, env, alarms, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.failApproval = false; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.failApproval = false; remote.messages=[]; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('fails closed without the owner token and handles malformed JSON shapes', async () => {
@@ -463,4 +464,29 @@ it('lets a fresh user request message a previous source bot without inheriting t
   const replies=(await f.request(`/api/threads/${handoff.targetThreadId}/delegations`)).body;
   expect(replies).toHaveLength(1);
   expect(replies[0]).toMatchObject({targetBotId:a.id,prompt:'Hello from the user'});
+});
+
+it('delivers Telegram activity from native messages before a formatted final answer', async()=>{
+ const f=fixture();const {bot,thread}=await f.create();const original=globalThis.fetch;const calls:any[]=[];
+ globalThis.fetch=vi.fn(async(url:any,init?:RequestInit)=>{
+  const method=String(url).split('/').at(-1);calls.push({method,input:JSON.parse(String(init?.body??'{}'))});
+  return Response.json({ok:true,result:method==='getMe'?{id:123,is_bot:true,username:'test_bot',first_name:'Test'}:method==='getUpdates'?[]:method==='sendMessage'?{message_id:991}:true});
+ }) as any;
+ try {
+  await f.request(`/api/bots/${bot.id}/telegram/configure`,'POST',{token:'123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef',transport:'polling'});
+  f.db.prepare('INSERT INTO telegram_chat_bindings VALUES (?,?,?,?,?,?)').run(bot.id,'77','77','owner',thread.id,new Date().toISOString());
+  const run=await f.request('/api/runs','POST',{threadId:thread.id,prompt:'Check the page',idempotencyKey:'tg-activity'});
+  f.db.prepare('INSERT INTO telegram_run_deliveries (run_id,bot_id,chat_id,telegram_user_id,created_at,status) VALUES (?,?,?,?,?,?)').run(run.body.id,bot.id,'77','77',new Date().toISOString(),'pending');
+  remote.messages=[{type:'assistant',time:{created:Date.now()+100},content:[{type:'text',text:'Checking the page now.'},{type:'tool',name:'computer_browser_browser_snapshot',state:{status:'running'}}]}];
+  await f.alarm();
+  // Advance the durable throttle without sleeping; the next alarm must edit the same message.
+  f.db.prepare('UPDATE telegram_run_activities SET last_sent_at=0').run();
+  await f.alarm();
+  f.db.prepare('UPDATE telegram_run_activities SET last_sent_at=0').run();
+  await f.alarm();
+  expect(calls.filter(c=>c.method==='editMessageText').map(c=>c.input.text)).toEqual(expect.arrayContaining([expect.stringContaining('Inspecting a page')]));
+  const active=remote.runs.get(run.body.id);active.status='succeeded';active.final='**Done** — page verified.';
+  await f.alarm();
+  expect(calls.some(c=>c.method==='sendMessage' && c.input.parse_mode==='HTML' && c.input.text.includes('<b>Done</b>'))).toBe(true);
+ }finally {globalThis.fetch=original;}
 });

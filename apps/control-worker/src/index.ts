@@ -1,3 +1,4 @@
+import { telegramActivity } from "./telegram-activity";
 import { NodeRegistry } from "../../../packages/nodes/src/index";
 import {
   TelegramService,
@@ -337,12 +338,43 @@ export class Workspace {
       );
     }
   }
+  private async deliverTelegramProgress() {
+    // Only chats that explicitly started a run receive activity updates.
+    const runs = this.rows<any>(`SELECT r.* FROM runs r JOIN telegram_run_deliveries d ON d.run_id=r.id
+      WHERE d.status='pending' AND (r.status IN ('queued','provisioning','running','waiting_approval','cancelling') OR EXISTS (SELECT 1 FROM delegation_continuations c WHERE c.source_run_id=r.id AND c.status='pending')) ORDER BY r.created_at LIMIT 8`);
+    for (const run of runs) {
+      try {
+        let messages: any[] = [];
+        const thread = this.one<any>('SELECT node_id,runner_session_id FROM threads WHERE id=?', run.thread_id);
+        if(thread?.runner_session_id && !thread.node_id && !this.maintenance) {
+          const result = await this.nativeMessages(run.thread_id);
+          if(result.ok) messages = ((await result.json()) as any).messages ?? [];
+        }
+        let text = telegramActivity(run,messages);
+        const pending = this.one<any>("SELECT source_run_id FROM delegation_continuations WHERE source_run_id=? AND status='pending'",run.id);
+        if(pending) {
+          const peers = this.rows<any>('SELECT b.name,r.* FROM delegations d JOIN bots b ON b.id=d.target_bot_id JOIN runs r ON r.id=d.target_run_id WHERE d.source_run_id=? ORDER BY d.created_at LIMIT 8',run.id);
+          text = 'Working with other bots\n\n' + peers.map(peer=>`${peer.name}: ${peer.status==='succeeded'?'finished':peer.status==='queued'?'waiting for the computer':peer.status.replaceAll('_',' ')}`).join('\n');
+          const peer = peers.find(peer=>peer.status==='running');
+          if(peer) {
+            const peerThread = this.one<any>('SELECT node_id FROM threads WHERE id=?',peer.thread_id);
+            if(!peerThread?.node_id) {
+              const result = await this.nativeMessages(peer.thread_id);
+              if(result.ok) text += '\n\n' + telegramActivity(peer,((await result.json()) as any).messages??[]);
+            }
+          }
+        }
+        await this.telegram().deliverRunProgress({runId:run.id,text});
+      } catch { /* Progress failure must never prevent a final reply or run reconciliation. */ }
+    }
+  }
   private async deliverTelegramResults() {
     // Delivery records exist only for runs explicitly started through Telegram.
     for (const run of this.rows<any>(
       "SELECT * FROM runs WHERE status IN ('succeeded','failed','cancelled','needs_review') ORDER BY updated_at DESC LIMIT 100",
     )) {
       try {
+        if(this.one<any>("SELECT source_run_id FROM delegation_continuations WHERE source_run_id=? AND status IN ('pending','created')",run.id)) continue;
         await this.telegram().deliverRunCompletion({
           runId: run.id,
           status: run.status,
@@ -1616,6 +1648,7 @@ export class Workspace {
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
     await this.pollTelegram();
+    await this.deliverTelegramProgress();
     await this.deliverTelegramResults();
     await this.fireRoutines();
     await this.advancePendingContinuations();
@@ -1701,6 +1734,7 @@ export class Workspace {
           });
       }
     }
+    await this.deliverTelegramProgress();
     await this.deliverTelegramResults();
     if (
       this.one<{ n: number }>(
@@ -2495,6 +2529,7 @@ export class Workspace {
         isoNow(),
         "pending",
       );
+    if(telegramDelivery) await this.telegram().inheritRunProgress(sourceRunId, continuation.id);
     this.state.storage.sql.exec("UPDATE delegation_continuations SET status='created',continuation_run_id=?,updated_at=? WHERE source_run_id=?", continuation.id, isoNow(), sourceRunId);
   }
   private async advancePendingContinuations(): Promise<void> {

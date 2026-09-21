@@ -3,6 +3,7 @@ import type {
   TelegramChatBinding,
   TelegramPairingChallenge,
   TelegramRunDelivery,
+  TelegramRunActivity,
   TelegramStore,
 } from "./index";
 
@@ -65,6 +66,11 @@ export class DurableObjectTelegramStore implements TelegramStore {
       telegram_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending'
+    )`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS telegram_run_activities (
+      run_id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+      telegram_user_id TEXT NOT NULL, message_id INTEGER, last_html TEXT,
+      last_sent_at INTEGER, status TEXT NOT NULL
     )`);
     // Existing installations created before delivery state was introduced.
     try { this.sql.exec("ALTER TABLE telegram_run_deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"); } catch { /* already exists */ }
@@ -210,6 +216,25 @@ export class DurableObjectTelegramStore implements TelegramStore {
     this.sql.exec("UPDATE telegram_run_deliveries SET status='needs_review' WHERE run_id=? AND status='sending'", runId);
   }
 
+  async claimRunActivity(activity: TelegramRunActivity): Promise<{ activity: TelegramRunActivity; claimed: boolean }> {
+    const inserted = this.sql.exec(`INSERT OR IGNORE INTO telegram_run_activities
+      (run_id,bot_id,chat_id,telegram_user_id,status) VALUES (?,?,?,?,?)`, activity.runId, activity.botId,
+      activity.chatId, activity.telegramUserId, "creating");
+    const row = this.one<any>("SELECT * FROM telegram_run_activities WHERE run_id=?", activity.runId);
+    if (!row) throw new Error("Telegram activity reservation failed");
+    return { activity: this.activity(row), claimed: Number(inserted.rowsWritten ?? 0) > 0 };
+  }
+
+  async getRunActivity(runId: string): Promise<TelegramRunActivity | null> {
+    const row = this.one<any>("SELECT * FROM telegram_run_activities WHERE run_id=?", runId);
+    return row ? this.activity(row) : null;
+  }
+
+  async putRunActivity(activity: TelegramRunActivity): Promise<void> {
+    this.sql.exec(`UPDATE telegram_run_activities SET message_id=?,last_html=?,last_sent_at=?,status=? WHERE run_id=?`,
+      activity.messageId ?? null, activity.lastHtml ?? null, activity.lastSentAt ?? null, activity.status, activity.runId);
+  }
+
   private one<T = Record<string, unknown>>(query: string, ...args: unknown[]): T | undefined {
     return this.sql.exec(query, ...args).toArray()[0] as T | undefined;
   }
@@ -223,5 +248,11 @@ export class DurableObjectTelegramStore implements TelegramStore {
       threadId: row.thread_id ?? undefined,
       createdAt: row.created_at,
     };
+  }
+
+  private activity(row: any): TelegramRunActivity {
+    return { runId: row.run_id, botId: row.bot_id, chatId: row.chat_id, telegramUserId: row.telegram_user_id,
+      messageId: row.message_id == null ? undefined : Number(row.message_id), lastHtml: row.last_html ?? undefined,
+      lastSentAt: row.last_sent_at == null ? undefined : Number(row.last_sent_at), status: row.status };
   }
 }

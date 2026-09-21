@@ -143,7 +143,12 @@ export class RunStore {
       } else if (this.runtime.wait) {
         await this.waitForNativeCompletion(run);
         const messages = (await this.runtime.messages(run.sessionId)).filter(message => !before.has(message.id) && message.type === 'assistant').sort((a,b) => (a.time?.created ?? 0) - (b.time?.created ?? 0) || String(a.id).localeCompare(String(b.id)));
-        run.final = messages.flatMap(message => message.content.filter(part => part.type === 'text').map(part => part.text)).join('\n\n');
+        // OpenCode can append assistant messages for commentary and tool calls
+        // after the user-facing answer. Use the last assistant message that
+        // actually contains text, keeping its text parts together so a later
+        // tool-only message cannot replace the final receipt.
+        const finalMessage = [...messages].reverse().find(message => Array.isArray(message.content) && message.content.some(part => part?.type === 'text' && typeof part.text === 'string' && part.text.length > 0));
+        if (finalMessage) run.final = finalMessage.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n');
         if (run.runtimeOutcome === 'session.execution.failed' || messages.some(message => message.error || message.finish === 'error')) throw new Error(messages.find(message => message.error)?.error?.message ?? messages.find(message => typeof message.error === 'string')?.error ?? 'OpenCode reported an execution error');
         if (!messages.length && !run.cancelRequested) throw new Error('Execution ended without an assistant result');
       } else await watcher;

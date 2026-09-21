@@ -1,3 +1,5 @@
+import { markdownToTelegramHtml, splitTelegramHtml } from "./rich-text";
+export { markdownToTelegramHtml, splitTelegramHtml } from "./rich-text";
 /**
  * Telegram Bot API integration.
  *
@@ -61,6 +63,17 @@ export type TelegramRunDelivery = {
   status?: "pending" | "sending" | "sent" | "needs_review";
 };
 
+export type TelegramRunActivity = {
+  runId: string;
+  botId: string;
+  chatId: string;
+  telegramUserId: string;
+  messageId?: number;
+  lastHtml?: string;
+  lastSentAt?: number;
+  status: "creating" | "active" | "terminal" | "needs_review";
+};
+
 /** Persistence operations required by TelegramService. Implement atomically in production. */
 export interface TelegramStore {
   getBotConfig(botId: string): Promise<TelegramBotConfig | null>;
@@ -88,6 +101,10 @@ export interface TelegramStore {
   claimRunDelivery?(runId: string): Promise<TelegramRunDelivery | null>;
   markRunDeliverySent?(runId: string): Promise<void>;
   markRunDeliveryNeedsReview?(runId: string): Promise<void>;
+  /** Atomically reserves the single public progress message for a run. */
+  claimRunActivity?(activity: TelegramRunActivity): Promise<{ activity: TelegramRunActivity; claimed: boolean }>;
+  getRunActivity?(runId: string): Promise<TelegramRunActivity | null>;
+  putRunActivity?(activity: TelegramRunActivity): Promise<void>;
   getPollingOffset?(botId: string): Promise<number | null>;
   setPollingOffset?(botId: string, offset: number): Promise<void>;
 }
@@ -107,8 +124,10 @@ export type TelegramApi = {
   setMyCommands?(token: string, commands: TelegramCommand[]): Promise<void>;
   sendMessage(
     token: string,
-    input: { chatId: string; text: string },
+    input: { chatId: string; text: string; parseMode?: "HTML"; disableNotification?: boolean },
   ): Promise<{ messageId?: number }>;
+  editMessageText?(token: string, input: { chatId: string; messageId: number; text: string; parseMode?: "HTML" }): Promise<void>;
+  sendChatAction?(token: string, input: { chatId: string; action: "typing" }): Promise<void>;
 };
 
 export type TelegramPairingLink = {
@@ -219,6 +238,8 @@ export type RunCompletion = {
   error?: string;
 };
 
+export type TelegramProgressResult = { sent: boolean; edited: boolean; throttled?: boolean };
+
 const MAX_WEBHOOK_BODY = 1_000_000;
 const MAX_TELEGRAM_MESSAGE = 4096;
 const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
@@ -231,7 +252,7 @@ const DEFAULT_COMMANDS: TelegramCommand[] = [
 const textEncoder = new TextEncoder();
 
 export class TelegramApiError extends Error {
-  constructor(public readonly method: string, public readonly status: number) {
+  constructor(public readonly method: string, public readonly status: number, public readonly retryAfter?: number, public readonly notModified = false) {
     super(`Telegram API ${method} failed (${status})`);
   }
 }
@@ -379,7 +400,7 @@ export function createTelegramApi(fetchImpl: typeof fetch = fetch, baseUrl = "ht
       throw new Error(`Telegram API ${method} returned an invalid response`);
     }
     if (!response.ok || payload?.ok !== true)
-      throw new TelegramApiError(method, Number(payload?.error_code ?? response.status));
+      throw new TelegramApiError(method, Number(payload?.error_code ?? response.status), Number(payload?.parameters?.retry_after) || undefined, /message is not modified/i.test(String(payload?.description??"")));
     return payload.result as T;
   }
   return {
@@ -414,8 +435,16 @@ export function createTelegramApi(fetchImpl: typeof fetch = fetch, baseUrl = "ht
       const result = await call<{ message_id?: number }>(token, "sendMessage", {
         chat_id: input.chatId,
         text: input.text,
+        ...(input.parseMode ? { parse_mode: input.parseMode } : {}),
+        ...(input.disableNotification ? { disable_notification: true } : {}),
       });
       return { messageId: result?.message_id };
+    },
+    async editMessageText(token, input) {
+      await call<boolean>(token, "editMessageText", { chat_id: input.chatId, message_id: input.messageId, text: input.text, ...(input.parseMode ? { parse_mode: input.parseMode } : {}) });
+    },
+    async sendChatAction(token, input) {
+      await call<boolean>(token, "sendChatAction", { chat_id: input.chatId, action: input.action });
     },
   };
 }
@@ -426,6 +455,7 @@ export class InMemoryTelegramStore implements TelegramStore {
   readonly bindings = new Map<string, TelegramChatBinding>();
   readonly updates = new Set<string>();
   readonly deliveries = new Map<string, TelegramRunDelivery>();
+  readonly activities = new Map<string, TelegramRunActivity>();
   readonly pollingOffsets = new Map<string, number>();
 
   async getBotConfig(botId: string): Promise<TelegramBotConfig | null> { return this.configs.get(botId) ?? null; }
@@ -480,6 +510,14 @@ export class InMemoryTelegramStore implements TelegramStore {
     const old = this.deliveries.get(runId);
     if (old) this.deliveries.set(runId, { ...old, status: "needs_review" });
   }
+  async claimRunActivity(activity: TelegramRunActivity): Promise<{ activity: TelegramRunActivity; claimed: boolean }> {
+    const existing = this.activities.get(activity.runId);
+    if (existing) return { activity: { ...existing }, claimed: false };
+    this.activities.set(activity.runId, { ...activity, status: "creating" });
+    return { activity: { ...activity, status: "creating" }, claimed: true };
+  }
+  async getRunActivity(runId: string): Promise<TelegramRunActivity | null> { const a = this.activities.get(runId); return a ? { ...a } : null; }
+  async putRunActivity(activity: TelegramRunActivity): Promise<void> { this.activities.set(activity.runId, { ...activity }); }
   async getPollingOffset(botId: string): Promise<number | null> { return this.pollingOffsets.get(botId) ?? null; }
   async setPollingOffset(botId: string, offset: number): Promise<void> { this.pollingOffsets.set(botId, offset); }
 }
@@ -764,6 +802,83 @@ export class TelegramService {
   }
 
   /** Call this from the worker's run reconciliation/alarm after a run becomes terminal. */
+  async deliverRunProgress(input: { runId: string; text: string; terminal?: boolean }): Promise<TelegramProgressResult> {
+    const store = this.options.store;
+    if (!store.getRunActivity || !store.claimRunActivity || !store.putRunActivity) return { sent: false, edited: false };
+    const delivery = await store.getRunDelivery(input.runId);
+    if (!delivery) return { sent: false, edited: false };
+    const config = await store.getBotConfig(delivery.botId);
+    if (!config) return { sent: false, edited: false };
+    if (store.getChatBinding && !(await store.getChatBinding(delivery.botId, delivery.chatId, delivery.telegramUserId))) return { sent: false, edited: false };
+    const existing = await store.getRunActivity(input.runId);
+    const now = this.now();
+    const html = markdownToTelegramHtml(redactSecret(input.text, config.token));
+    if (existing && existing.status === "needs_review") return { sent: false, edited: false };
+    if (existing?.status === "terminal") return { sent: false, edited: false };
+    if (existing?.lastHtml === html) return { sent: false, edited: false, throttled: true };
+    if (existing?.messageId && existing.lastSentAt !== undefined && now - existing.lastSentAt < 4_000 && !input.terminal)
+      return { sent: false, edited: false, throttled: true };
+    let activity = existing;
+    if (!activity) {
+      const claim = await store.claimRunActivity({ runId: input.runId, botId: delivery.botId, chatId: delivery.chatId, telegramUserId: delivery.telegramUserId, status: "creating" });
+      if (!claim.claimed) return { sent: false, edited: false };
+      activity = claim.activity;
+    } else if (activity.status === "creating") {
+      return { sent: false, edited: false };
+    } else if (!activity.messageId) {
+      await store.putRunActivity({ ...activity, status: "needs_review" });
+      return { sent: false, edited: false };
+    } else if (!this.api.editMessageText) {
+      await store.putRunActivity({ ...activity, status: "needs_review" });
+      return { sent: false, edited: false };
+    }
+    try {
+      if (activity.messageId && this.api.editMessageText) {
+        await this.api.editMessageText(config.token, { chatId: activity.chatId, messageId: activity.messageId, text: splitTelegramHtml(html)[0], parseMode: "HTML" });
+        await store.putRunActivity({ ...activity, lastHtml: html, lastSentAt: now, status: input.terminal ? "terminal" : "active" });
+        return { sent: false, edited: true };
+      }
+      const sent = await this.api.sendMessage(config.token, { chatId: activity.chatId, text: splitTelegramHtml(html)[0], parseMode: "HTML", disableNotification: true });
+      await store.putRunActivity({ ...activity, messageId: sent.messageId, lastHtml: html, lastSentAt: now, status: input.terminal ? "terminal" : "active" });
+      return { sent: true, edited: false };
+    } catch (error) {
+      const status = error instanceof TelegramApiError ? error.status : undefined;
+      // 400/not-modified is already in the desired state; 429 is transient.
+      if (status === 400 && error instanceof TelegramApiError && error.notModified && activity.messageId) {
+        await store.putRunActivity({ ...activity, lastHtml: html, lastSentAt: now, status: input.terminal ? "terminal" : "active" });
+      } else if (activity.messageId && (status === 429 || !status || status >= 500)) {
+        const delay = status === 429 && error instanceof TelegramApiError ? Math.max(4,Math.min(3600,error.retryAfter??4)) : 4;
+        await store.putRunActivity({...activity,lastSentAt:now+delay*1000-4000,status:'active'});
+      } else {
+        await store.putRunActivity({ ...activity, status: "needs_review" });
+      }
+      return { sent: false, edited: false };
+    }
+  }
+
+  /** Move a live activity to a continuation run without creating another Telegram message. */
+  async inheritRunProgress(sourceRunId: string, targetRunId: string): Promise<boolean> {
+    const store = this.options.store;
+    if (!store.getRunActivity || !store.putRunActivity || !store.getRunDelivery || !store.claimRunActivity) return false;
+    const source = await store.getRunActivity(sourceRunId);
+    const target = await store.getRunDelivery(targetRunId);
+    const oldDelivery = await store.getRunDelivery(sourceRunId);
+    if (!target || !oldDelivery) return false;
+    if (target.botId !== oldDelivery.botId || target.chatId !== oldDelivery.chatId || target.telegramUserId !== oldDelivery.telegramUserId) return false;
+    if (store.getChatBinding && !(await store.getChatBinding(target.botId, target.chatId, target.telegramUserId))) return false;
+    if (!source) {
+      if (store.markRunDeliverySent) await store.markRunDeliverySent(sourceRunId);
+      return true;
+    }
+    if (source.status === "needs_review" || source.status === "terminal") return false;
+    const reserved = await store.claimRunActivity({ ...source, runId: targetRunId, botId: target.botId, chatId: target.chatId, telegramUserId: target.telegramUserId });
+    if (!reserved.claimed && reserved.activity.messageId !== source.messageId) return false;
+    await store.putRunActivity({ ...source, runId: targetRunId });
+    await store.putRunActivity({ ...source, status: "terminal" });
+    if (store.markRunDeliverySent) await store.markRunDeliverySent(sourceRunId);
+    return true;
+  }
+
   async deliverRunCompletion(completion: RunCompletion): Promise<{ sent: boolean; chunks: number; needsReview?: boolean }> {
     const existing = await this.options.store.getRunDelivery(completion.runId);
     if (!existing) return { sent: false, chunks: 0 };
@@ -786,12 +901,25 @@ export class TelegramService {
       else await this.options.store.putRunDelivery({ ...delivery, status: "needs_review" });
       return { sent: false, chunks: 0, needsReview: true };
     }
+    if (this.options.store.getChatBinding && !(await this.options.store.getChatBinding(delivery.botId, delivery.chatId, delivery.telegramUserId))) return { sent: false, chunks: 0 };
+    // Close the live activity before posting the final result as a distinct notification.
+    const activity = this.options.store.getRunActivity ? await this.options.store.getRunActivity(completion.runId) : null;
+    if (activity && activity.status === "active" && this.options.store.putRunActivity) {
+      try {
+        const label = {succeeded:'Completed',failed:'Could not complete the request',cancelled:'Stopped',needs_review:'Needs your attention'}[completion.status];
+        const summary = (activity.lastHtml??'').split('\n\n').slice(1).join('\n\n');
+        const finalActivityHtml = `<b>${label}</b>${summary ? '\n\n'+summary : ''}`;
+        if (activity.messageId && this.api.editMessageText)
+          await this.api.editMessageText(config.token, { chatId: activity.chatId, messageId: activity.messageId, text: splitTelegramHtml(finalActivityHtml)[0], parseMode: "HTML" });
+        await this.options.store.putRunActivity({ ...activity, lastHtml: finalActivityHtml, lastSentAt: this.now(), status: "terminal" });
+      } catch { /* final delivery remains independently tracked */ }
+    }
     const prefix = completion.status === "succeeded" ? "" : `Run ${completion.status}: `;
-    const text = redactSecret(`${prefix}${completion.output ?? completion.error ?? "(no output)"}`, config.token);
+    const text = markdownToTelegramHtml(redactSecret(`${prefix}${completion.output ?? completion.error ?? "(no output)"}`, config.token));
     let chunks = 0;
     try {
-      for (const chunk of splitMessage(text)) {
-        await this.api.sendMessage(config.token, { chatId: delivery.chatId, text: chunk });
+      for (const chunk of splitTelegramHtml(text)) {
+        await this.api.sendMessage(config.token, { chatId: delivery.chatId, text: chunk, parseMode: "HTML" });
         chunks++;
       }
     } catch {

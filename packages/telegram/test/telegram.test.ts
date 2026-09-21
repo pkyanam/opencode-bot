@@ -88,6 +88,7 @@ describe("TelegramService", () => {
     const link = await service.createPairingLink({ botId: "bot_1", ownerUserId: "owner", threadId: "thread" });
     await service.handleWebhook("bot_1", await request({ update_id: 1, message: { from: { id: 42 }, chat: { id: 42 }, text: `/start ${link.deepLink.split("start=")[1]}` } }, "secret_123456789"));
     await store.putRunDelivery({ runId: "run_1", botId: "bot_1", chatId: "42", telegramUserId: "42", createdAt: new Date().toISOString() });
+    await store.putChatBinding({ botId: "bot_1", chatId: "42", telegramUserId: "42", createdAt: new Date().toISOString() });
     const result = await service.deliverRunCompletion({ runId: "run_1", status: "succeeded", output: "x".repeat(8_500) });
     expect(result).toEqual({ sent: true, chunks: 3 });
     expect(api.sent.at(-1)?.chatId).toBe("42");
@@ -106,6 +107,7 @@ describe("TelegramService", () => {
     const service = new TelegramService({ store, api });
     await service.configureBot({ botId: "bot_1", token: "bot-token-secret", webhookUrl: "https://example.test/hooks/telegram", webhookSecret: "secret_123456789" });
     await store.putRunDelivery({ runId: "run_uncertain", botId: "bot_1", chatId: "42", telegramUserId: "42", createdAt: new Date().toISOString() });
+    await store.putChatBinding({ botId: "bot_1", chatId: "42", telegramUserId: "42", createdAt: new Date().toISOString() });
     expect(await service.deliverRunCompletion({ runId: "run_uncertain", status: "succeeded", output: "result" })).toMatchObject({ sent: false, needsReview: true });
     expect(await service.deliverRunCompletion({ runId: "run_uncertain", status: "succeeded", output: "result" })).toMatchObject({ sent: false, needsReview: true });
     expect(calls).toBe(1);
