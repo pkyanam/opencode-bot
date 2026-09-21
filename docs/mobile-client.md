@@ -1,8 +1,8 @@
-# Expo mobile client architecture plan
+# Expo mobile client
 
-Status: planning document. This repository does not contain a native mobile app yet.
+Status: native preview in `apps/mobile`, with the remaining roadmap identified below.
 
-The proposed client is a small Expo Router app that talks to the existing
+The client is a small Expo Router app that talks to the existing
 opencode-bot control Worker. It should use the Worker’s `/api` contract as its
 only product backend. It must not copy the chat-template’s server route or its
 direct Anthropic integration (`src/app/api/chat+api.ts`); model execution,
@@ -210,8 +210,11 @@ so no Grok branding or copied screens are included.
 
 Verification completed locally with `npm install`, Expo dependency checks,
 `npm run typecheck`, and `npx expo export --platform ios` plus
-`npx expo export --platform android`. These are JavaScript bundle exports, not
-device or simulator tests. A signed development build is still required to
-verify SecureStore, camera permissions, document picker, and the custom link on
-real iOS/Android hardware. The root web typecheck excludes `apps/mobile/**`;
+`npx expo export --platform android`. A signed iOS Release build has also been installed over Wi-Fi on a physical
+iPhone. Launch verification and end-to-end pairing, camera permissions, and
+document-picker testing are pending; Android has only bundle verification. The root web typecheck excludes `apps/mobile/**`;
 the app has its own `typecheck` script.
+
+The iOS configuration enables Expo's scene lifecycle support for builds made
+with Xcode 27. Without it, iOS 27 terminates the app during launch. See
+[Expo's scene lifecycle migration guide](https://github.com/expo/fyi/blob/main/ios-scene-lifecycle.md).
