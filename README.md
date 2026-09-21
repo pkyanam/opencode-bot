@@ -171,7 +171,7 @@ responses, persisted browser state, or error messages.
 
 Sandbox working disk is ephemeral. Use **Computer → Checkpoint** while idle to
 preserve workspace, runtime state, and browser profile. Only committed archives
-can be restored; the initial buffered checkpoint limit is **8 MiB compressed**.
+can be restored; the initial buffered checkpoint limit is **32 MiB compressed**.
 Larger workspaces need the planned streaming snapshot implementation.
 Ambiguous interrupted runs become `needs_review` and are not automatically
 replayed.
@@ -194,7 +194,18 @@ browser connection. A live Scout request successfully navigated to
 `https://opencode.ai/`, verified its title, and displayed that page in the
 expanded computer stream.
 
-The current local suite reports **103 passing tests** covering real SQLite
+The conversation displays native assistant updates and tool calls in their original
+order. Tool rows show the action, target, execution state, and a short result;
+expanding a row reveals bounded input and output. While a task runs, native
+messages refresh every two seconds. Retry and approval notices appear alongside
+messages, and raw reasoning/event payloads are excluded from the transcript.
+A live free-Muse check displayed commentary, two shell calls, and a final reply;
+a second check verified that a running shell call appeared before completion.
+Dropped native wait connections are retried without resubmitting the prompt.
+If the connection cannot recover, the runner stops native execution before
+publishing a review state; checkpointing also waits for execution to unwind.
+
+The current local suite reports **116 passing tests** covering real SQLite
 coordination, provider contracts, artifact paths, owned-node routing/receipts,
 setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
 That harness runs isolated OpenCode CLI 2.0.11 against a local fake

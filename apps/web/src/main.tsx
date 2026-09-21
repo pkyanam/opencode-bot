@@ -1,3 +1,4 @@
+import { mergeActivityMessages } from "./lib/transcript";
 import { Delegations } from "./components/delegations";
 import { SettingsModal } from "./components/settings";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -57,6 +58,8 @@ import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { MarkdownContent } from "./components/markdown-content";
+import { ToolActivity } from "./components/tool-activity";
+import { RunProgress } from "./components/run-progress";
 const NativeTerminal = React.lazy(() =>
   import("./components/native-terminal").then((module) => ({
     default: module.NativeTerminal,
@@ -247,18 +250,31 @@ function App() {
       return;
     }
     let cancelled = false;
-    api
-      .threadMessages(thread.id)
-      .then((result) => {
-        if (cancelled) return;
-        setLiveMessages(result.messages ?? []);
-        setThreadSessionId(result.sessionId);
-      })
-      .catch(() => undefined);
+    let inFlight = false;
+    const load = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const result = await api.threadMessages(thread.id);
+        if (!cancelled) {
+          setLiveMessages(result.messages ?? []);
+          setThreadSessionId(result.sessionId);
+        }
+      } catch {
+        // The regular workspace refresh will surface connection errors.
+      } finally {
+        inFlight = false;
+      }
+    };
+    void load();
+    const poll = latest && isActive(latest.status)
+      ? window.setInterval(() => void load(), 2000)
+      : undefined;
     return () => {
       cancelled = true;
+      if (poll) window.clearInterval(poll);
     };
-  }, [thread?.id, thread?.nodeId, latest?.updatedAt, terminalOpen]);
+  }, [thread?.id, thread?.nodeId, latest?.status, latest?.updatedAt, terminalOpen]);
   const messages = useMemo(
     () =>
       liveMessages.length
@@ -268,7 +284,7 @@ function App() {
           liveMessages),
     [state, thread?.id, liveMessages],
   );
-  const transcript = messages.length
+  const baseTranscript = messages.length
     ? messages
     : latest?.prompt
       ? [
@@ -278,6 +294,7 @@ function App() {
             : []),
         ]
       : [];
+  const transcript = mergeActivityMessages(baseTranscript, runs);
   const working = latest && isActive(latest.status);
   const composerLocked = terminalOpen || working || submitting;
   const chatScroll = useRef<HTMLDivElement>(null);
@@ -755,12 +772,12 @@ function App() {
                   {transcript.map((m, i) => (
                     <MessageBubble key={m.id ?? i} message={m} bot={bot} />
                   ))}
-                  {latest && (latest.events?.length || latest.error) ? (
-                    <RunCard
+                  {latest ? (
+                    <RunProgress
                       run={latest}
-                      errorInTranscript={transcript.some(
-                        (m) => "error" in m && m.error,
-                      )}
+                      tools={transcript.flatMap((message) =>
+                        (message.parts ?? []).filter((part) => part.type === "tool"),
+                      ) as import("./api").ToolPart[]}
                     />
                   ) : null}
                   {thread && bot && (
@@ -782,7 +799,7 @@ function App() {
                     />
                   )}{" "}
                   {working &&
-                    !latest?.events?.length &&
+                    !(latest?.events?.length || transcript.some((message) => message.parts?.some((part) => part.type === "tool"))) &&
                     !pendingApproval(latest) && (
                       <div className="thinking">
                         <span className="thinking-icon">
@@ -1744,19 +1761,31 @@ function FilesWorkspace() {
 
 function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
   const user = message.role === "user";
+  const system = message.role === "system";
+  const toolOnly = !message.content.trim() && message.parts?.some(part => part.type === "tool");
   return (
-    <div className={`message-row ${user ? "user-row" : "assistant-row"}`}>
-      <div className={`message-avatar ${user ? "user-avatar" : "bot-avatar"}`}>
+    <div className={`message-row ${user ? "user-row" : system ? "system-row" : "assistant-row"} ${toolOnly ? "tool-only-row" : ""}`}>
+      {!system && !toolOnly && <div className={`message-avatar ${user ? "user-avatar" : "bot-avatar"}`}>
         {user ? "P" : (bot?.name?.[0]?.toUpperCase() ?? "B")}
-      </div>
+      </div>}
       <div className="message-content">
-        <div className="message-meta">
-          <strong>{user ? "You" : (bot?.name ?? "Bot")}</strong>
+        {!toolOnly && <div className="message-meta">
+          <strong>{user ? "You" : system ? "Activity" : (bot?.name ?? "Bot")}</strong>
           {message.createdAt && <span>{fmtTime(message.createdAt)}</span>}
-        </div>
-        {message.content && (
+        </div>}
+        {message.parts?.length ? (
+          <div className="message-parts">
+            {message.parts.map((part, index) =>
+              part.type === "tool" ? (
+                <ToolActivity key={part.id ?? index} part={part} />
+              ) : (
+                <MarkdownContent key={index} className="message-text">{part.text}</MarkdownContent>
+              ),
+            )}
+          </div>
+        ) : message.content ? (
           <MarkdownContent className="message-text">{message.content}</MarkdownContent>
-        )}
+        ) : null}
         {message.error && (
           <div className="message-error" role="alert">
             <strong>Request failed</strong>
@@ -1764,94 +1793,6 @@ function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-function RunCard({
-  run,
-  errorInTranscript = false,
-}: {
-  run: Run;
-  errorInTranscript?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const retry = [...(run.events ?? [])]
-    .reverse()
-    .find((e) => e.type?.includes("retry.scheduled"));
-  return (
-    <div className="run-card">
-      <button className="run-header" onClick={() => setOpen(!open)}>
-        <span
-          className={`run-icon ${isActive(run.status) ? "run-live" : "run-done"}`}
-        >
-          {isActive(run.status) ? (
-            <LoaderCircle size={15} className="spin" />
-          ) : (
-            <Zap size={15} />
-          )}
-        </span>
-        <span className="run-title">Run {run.status.replaceAll("_", " ")}</span>
-        <span className="run-time">
-          {fmtTime(run.updatedAt ?? run.createdAt)}
-        </span>
-        {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-      </button>
-      {isActive(run.status) && retry && (
-        <div className="run-error" role="status">
-          Provider retry {retry.payload?.attempt ?? ""}:{" "}
-          {retry.payload?.error?.message ?? "Connection interrupted"}
-        </div>
-      )}
-      {run.error && !errorInTranscript && (
-        <div className="run-error" role="alert">
-          {run.error}
-        </div>
-      )}
-      {open && (
-        <div className="run-events">
-          {run.events
-            ?.filter((e) =>
-              [
-                "run.queued",
-                "runner.session.created",
-                "runner.approval.requested",
-                "runner.session.action.completed",
-                "run.succeeded",
-                "run.failed",
-                "run.cancelled",
-                "run.needs_review",
-              ].includes(e.type ?? ""),
-            )
-            .map((e, i) => (
-              <div className="event-row" key={e.id ?? i}>
-                <div>
-                  <strong>
-                    {
-                      (
-                        {
-                          "run.queued": "Request queued",
-                          "runner.session.created": "OpenCode session ready",
-                          "runner.approval.requested": "Permission requested",
-                          "runner.session.action.completed":
-                            "Command completed",
-                          "run.succeeded": "Finished",
-                          "run.failed": "Request failed",
-                          "run.cancelled": "Stopped",
-                          "run.needs_review": "Review required",
-                        } as Record<string, string>
-                      )[e.type ?? ""]
-                    }
-                  </strong>
-                  {e.createdAt && <p>{fmtTime(e.createdAt)}</p>}
-                </div>
-              </div>
-            ))}
-          <details className="technical-details">
-            <summary>Technical details</summary>
-            <pre>{JSON.stringify(run.events ?? [], null, 2)}</pre>
-          </details>
-        </div>
-      )}
     </div>
   );
 }

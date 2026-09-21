@@ -19,10 +19,23 @@ export type Thread = {
   createdAt?: string;
   updatedAt?: string;
 };
+export type ToolPart = {
+  type: "tool";
+  id: string;
+  name: string;
+  status: "queued" | "running" | "completed" | "failed" | "interrupted";
+  input?: unknown;
+  output?: string;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+export type MessagePart = { type: "text"; text: string } | ToolPart;
 export type Message = {
   id?: string;
   role: "user" | "assistant" | "system" | string;
   content: string;
+  parts?: MessagePart[];
   createdAt?: string;
   status?: string;
   error?: string;

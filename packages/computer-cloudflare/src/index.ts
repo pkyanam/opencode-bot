@@ -109,7 +109,7 @@ export type CloudflareComputerProviderOptions = {
   checkpointPrefix?: string;
   /** Paths are archived only after the runner confirms it is quiescent. */
   checkpointPaths?: string[];
-  /** Keep the archive below the Worker memory budget when using base64 readFile. */
+  /** Keep the archive below the Worker memory budget while reading binary chunks. */
   maxCheckpointBytes?: number;
   /** Test seam and alternative Sandbox implementations; production defaults to getSandbox. */
   sandboxFactory?: (namespace: CloudflareSandboxBinding, key: string) => Sandbox<unknown>;
@@ -126,6 +126,18 @@ const DEFAULT_RUNNER_COMMAND = "node /opt/opencode-bot/runner/server.mjs";
 const DEFAULT_WORKSPACE = "/workspace/shared";
 // Sandbox's container server owns 3000; the bot runner uses the private image port.
 const DEFAULT_PORT = 8787;
+// Bound buffering during checkpoint upload and checksum verification.
+const DEFAULT_MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+// Chromium rebuilds these files; preserving them adds size without preserving
+// user state such as cookies, history, or local storage.
+const DEFAULT_CHECKPOINT_EXCLUDES = [
+  "/workspace/browser/profile/Default/Cache",
+  "/workspace/browser/profile/Default/Code Cache",
+  "/workspace/browser/profile/Default/GPUCache",
+  "/workspace/browser/profile/Default/DawnGraphiteCache",
+  "/workspace/browser/profile/Default/DawnWebGPUCache",
+  "/workspace/browser/profile/BrowserMetrics-spare.pma",
+];
 
 /**
  * Cloudflare Sandbox implementation.
@@ -230,17 +242,14 @@ export class CloudflareComputerProvider implements ComputerProvider {
       let checkpointFailure: unknown;
       try {
         const archive = await managed.sandbox.exec(
-          `tar -czf ${shellQuote(archiveName)} -C / ${paths.map((path) => shellQuote(path.replace(/^\/+/, ""))).join(" ")}`,
+          `tar -czf ${shellQuote(archiveName)} ${DEFAULT_CHECKPOINT_EXCLUDES.map((path) => `--exclude=${shellQuote(path.replace(/^\/+/, ""))}`).join(" ")} -C / ${paths.map((path) => shellQuote(path.replace(/^\/+/, ""))).join(" ")}`,
         );
         if (!archive.success) throw new Error(`Checkpoint archive failed: ${archive.stderr || archive.stdout}`);
-        const maxBytes = this.options.maxCheckpointBytes ?? 8 * 1024 * 1024;
+        const maxBytes = this.options.maxCheckpointBytes ?? DEFAULT_MAX_CHECKPOINT_BYTES;
         const size = await archiveSize(managed.sandbox, archiveName);
         if (size > maxBytes) throw new Error(`Checkpoint archive is ${size} bytes; maximum is ${maxBytes}`);
-        const bytesResult = await managed.sandbox.readFile(archiveName, { encoding: "base64" });
-        if (!bytesResult.success) throw new Error(`Checkpoint archive read failed for ${archiveName}`);
-        const bytes = Uint8Array.from(atob(bytesResult.content), (char) => char.charCodeAt(0));
-        if (bytes.byteLength > maxBytes) throw new Error(`Checkpoint archive is ${bytes.byteLength} bytes; maximum is ${maxBytes}`);
-        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        const bytes = await readArchiveBytes(managed.sandbox, archiveName, maxBytes);
+        const digest = await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer);
         const sha256 = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
         const checkpointId = `${id}:${managed.generation}:${Date.now()}`;
         const key = `${this.options.checkpointPrefix ?? "checkpoints"}/${safeId(id)}/${checkpointId.replaceAll(":", "-")}.tar.gz`;
@@ -279,7 +288,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
     if (!managed || !bucket || !checkpoint.checkpointKey) throw new Error("R2 checkpoint restore is not configured for this provider");
     const object = await bucket.get(checkpoint.checkpointKey);
     if (!object) throw new Error(`Checkpoint object not found: ${checkpoint.checkpointKey}`);
-    const maxBytes = this.options.maxCheckpointBytes ?? 8 * 1024 * 1024;
+    const maxBytes = this.options.maxCheckpointBytes ?? DEFAULT_MAX_CHECKPOINT_BYTES;
     if (typeof object.size !== "number" || !Number.isFinite(object.size) || object.size < 0) throw new Error("Checkpoint object does not expose a trusted size");
     if (object.size > maxBytes) throw new Error(`Checkpoint object is ${object.size} bytes; maximum is ${maxBytes}`);
     const bytes = new Uint8Array(await object.arrayBuffer());
@@ -445,6 +454,50 @@ async function archiveSize(sandbox: Sandbox<unknown>, archiveName: string): Prom
   const size = Number(result.stdout.trim());
   if (!Number.isSafeInteger(size) || size < 0) throw new Error("Checkpoint archive returned an invalid size");
   return size;
+}
+
+async function readArchiveBytes(sandbox: Sandbox<unknown>, archiveName: string, maxBytes: number): Promise<Uint8Array> {
+  // Raw RPC streams avoid the transient base64 and decoded JS strings. Some
+  // Sandbox transports do not support `none`, so retain the bounded fallback.
+  try {
+    const streamed = await sandbox.readFile(archiveName, { encoding: "none" });
+    if (streamed.size > maxBytes) throw new Error(`Checkpoint archive is ${streamed.size} bytes; maximum is ${maxBytes}`);
+    const reader = streamed.content.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const part = await reader.read();
+        if (part.done) break;
+        total += part.value.byteLength;
+        if (total > maxBytes) throw new Error(`Checkpoint archive is ${total} bytes; maximum is ${maxBytes}`);
+        chunks.push(part.value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  } catch (error) {
+    // The HTTP/WebSocket Sandbox transports reject encoding `none`; only fall
+    // back for that transport limitation, while preserving size/read errors.
+    if (!(error instanceof Error) || !/encoding|stream|getReader|rpc|transport|unsupported/i.test(error.message)) throw error;
+  }
+  const bytesResult = await sandbox.readFile(archiveName, { encoding: "base64" });
+  if (!bytesResult.success) throw new Error(`Checkpoint archive read failed for ${archiveName}`);
+  const decodedLength = Math.floor(bytesResult.content.length * 3 / 4) - (bytesResult.content.endsWith("==") ? 2 : bytesResult.content.endsWith("=") ? 1 : 0);
+  if (decodedLength > maxBytes) throw new Error(`Checkpoint archive is ${decodedLength} bytes; maximum is ${maxBytes}`);
+  const bytes = Uint8Array.from(atob(bytesResult.content), (char) => char.charCodeAt(0));
+  if (bytes.byteLength > maxBytes) throw new Error(`Checkpoint archive is ${bytes.byteLength} bytes; maximum is ${maxBytes}`);
+  return bytes;
 }
 
 function validateCheckpointPaths(paths: string[], workspacePath: string): void {

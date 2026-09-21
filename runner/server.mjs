@@ -13,6 +13,7 @@ const port = Number(process.env.RUNNER_PORT ?? process.env.PORT ?? 8787);
 const token = process.env.RUNNER_TOKEN;
 const isEntrypoint = process.argv[1]?.endsWith("/runner/server.mjs") || process.argv[1]?.endsWith("\\runner\\server.mjs");
 if (!token && isEntrypoint && process.env.NODE_ENV !== "test") throw new Error("RUNNER_TOKEN is required");
+const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(error instanceof Error ? error.message : String(error));
 
 export class RunStore {
   constructor(runtime, options = {}) {
@@ -23,6 +24,7 @@ export class RunStore {
     this.configuring = false;
     this.runtimeOps = 0;
     this.runtimeIdle = [];
+    this.ownershipUncertain = false;
     this.runs = new Map();
     if (this.stateDir) this.load();
   }
@@ -45,7 +47,7 @@ export class RunStore {
   }
 
   async updateConfiguration(fn) {
-    if (this.paused || this.configuring || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
+    if (this.paused || this.configuring || this.ownershipUncertain || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
     this.configuring = true;
     try { await this.waitForRuntimeIdle(); return await fn(); }
     finally { this.configuring = false; }
@@ -57,7 +59,7 @@ export class RunStore {
   }
 
   async start(input) {
-    if (this.paused || this.configuring) throw httpError(409, "computer settings or checkpoint are being updated");
+    if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
     const commandPrompt = input?.command?.name ? `/${input.command.name} ${input.command.text ?? ""}`.trim() : "";
     const hasAction = Boolean(input?.sessionAction?.name);
@@ -70,7 +72,13 @@ export class RunStore {
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
     const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
-    void this.execute(run, input);
+    // Runs use the native runtime outside HTTP request handlers. Keep them in
+    // the same idle barrier so checkpoint cannot stop the service mid-turn.
+    this.runtimeOps += 1;
+    void this.execute(run, input).finally(() => {
+      this.runtimeOps -= 1;
+      if (this.runtimeOps === 0) for (const resolve of this.runtimeIdle.splice(0)) resolve();
+    });
     return this.public(run);
   }
 
@@ -133,7 +141,7 @@ export class RunStore {
         // message. Their explicit action result is the receipt.
         if (input.sessionAction.name === 'compact' && this.runtime.wait) await this.runtime.wait(run.sessionId, AbortSignal.timeout(30 * 60 * 1000));
       } else if (this.runtime.wait) {
-        await this.runtime.wait(run.sessionId, AbortSignal.timeout(30 * 60 * 1000));
+        await this.waitForNativeCompletion(run);
         const messages = (await this.runtime.messages(run.sessionId)).filter(message => !before.has(message.id) && message.type === 'assistant').sort((a,b) => (a.time?.created ?? 0) - (b.time?.created ?? 0) || String(a.id).localeCompare(String(b.id)));
         run.final = messages.flatMap(message => message.content.filter(part => part.type === 'text').map(part => part.text)).join('\n\n');
         if (run.runtimeOutcome === 'session.execution.failed' || messages.some(message => message.error || message.finish === 'error')) throw new Error(messages.find(message => message.error)?.error?.message ?? messages.find(message => typeof message.error === 'string')?.error ?? 'OpenCode reported an execution error');
@@ -145,14 +153,49 @@ export class RunStore {
         this.emit(run, run.status, run.final ? { text: run.final } : {});
       }
     } catch (error) {
-      run.status = run.cancelRequested ? "cancelled" : (run.transportFailure || error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
-      if (run.status === 'needs_review' && run.sessionId) await this.runtime.interrupt(run.sessionId).catch(() => {});
+      const transportError = isTransientTransportError(error);
+      if (transportError && !run.transportFailure) run.transportFailure = `The native runtime lost its connection while starting this task${error instanceof Error && error.message ? ` (${error.message})` : ''}.`;
+      const nextStatus = run.cancelRequested ? "cancelled" : (run.transportFailure || transportError || error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
+      if (nextStatus === 'needs_review' && run.sessionId) {
+        try {
+          await this.runtime.interrupt(run.sessionId);
+        } catch (interruptError) {
+          try {
+            if (this.runtime.stop) await this.runtime.stop();
+            else throw interruptError;
+          } catch (stopError) {
+            this.ownershipUncertain = true;
+            run.ownershipUncertain = true;
+            run.transportFailure = `${run.transportFailure ?? 'The native runtime lost its connection.'} Native ownership could not be confirmed stopped; restart the computer before retrying.`;
+          }
+        }
+      }
+      run.status = nextStatus;
       this.emit(run, "error", { message: run.transportFailure ?? (error instanceof Error ? error.message : String(error)) });
     } finally {
       controller.abort();
       run.finishedAt = new Date().toISOString();
       this.persist(run);
     }
+  }
+
+  async waitForNativeCompletion(run) {
+    let lastTransportError;
+    const deadline = Date.now() + 30 * 60 * 1000;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const remaining = Math.max(1, deadline - Date.now());
+        await this.runtime.wait(run.sessionId, AbortSignal.timeout(remaining));
+        return undefined;
+      } catch (error) {
+        if (!isTransientTransportError(error)) throw error;
+        lastTransportError = error;
+        this.emit(run, 'connection.recovering', { attempt: attempt + 1, message: error instanceof Error ? error.message : String(error) });
+        if (attempt < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+      }
+    }
+    run.transportFailure = `The native runtime lost its connection while waiting for this task to finish${lastTransportError?.message ? ` (${lastTransportError.message})` : ''}.`;
+    throw lastTransportError ?? new Error(run.transportFailure);
   }
 
   async watch(run, iterable) {
@@ -214,8 +257,13 @@ export class RunStore {
   }
 
   async checkpoint() {
-    if (this.configuring || this.paused) throw httpError(409, "computer settings or checkpoint are being updated");
+    if (this.configuring || this.paused || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
     this.paused = true;
+    // Preserve the fast conflict response for ordinary active work. A run
+    // already in review may still be unwinding after an ownership loss, so it
+    // is drained by the runtime idle barrier below before the archive starts.
+    const activeBeforeWait = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");
+    if (activeBeforeWait.length) { this.paused = false; throw httpError(409, "cannot checkpoint while runs are active"); }
     await this.waitForRuntimeIdle();
     if (this.terminalRegistry?.active()) { this.paused = false; throw httpError(409, "cannot checkpoint while terminal controller is active"); }
     const active = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");

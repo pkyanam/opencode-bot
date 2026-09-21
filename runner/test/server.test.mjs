@@ -127,6 +127,76 @@ test('provider failures retain their explanation instead of an empty success', a
   assert.equal(store.public(store.get('certificate')).error,'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR');
 });
 
+test('transient wait transport failures are retried while native execution continues', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => {};
+  let waits = 0;
+  let nativeFinished = false;
+  runtime.messages = async () => nativeFinished ? [{ id: 'assistant-1', type: 'assistant', finish: 'stop', content: [{ type: 'text', text: 'finished' }] }] : [];
+  runtime.wait = async () => {
+    waits += 1;
+    if (waits < 3) throw new Error('Transport');
+    nativeFinished = true;
+  };
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'transport-retry', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const run = store.public(store.get('transport-retry'));
+  assert.equal(run.status, 'succeeded');
+  assert.equal(run.final, 'finished');
+  assert.equal(waits, 3);
+  assert.deepEqual(runtime.interrupts, []);
+});
+
+test('unrecoverable wait transport failure interrupts native ownership before review', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => {};
+  runtime.wait = async () => { throw new Error('Transport'); };
+  runtime.messages = async () => [];
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'transport-lost', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const run = store.public(store.get('transport-lost'));
+  assert.equal(run.status, 'needs_review');
+  assert.deepEqual(runtime.interrupts, ['ses_1']);
+});
+
+test('prompt transport failure is reviewable and interrupts without replaying the prompt', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => { throw new Error('Transport'); };
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'prompt-transport', prompt: 'Do this once' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const run = store.public(store.get('prompt-transport'));
+  assert.equal(run.status, 'needs_review');
+  assert.deepEqual(runtime.interrupts, ['ses_1']);
+});
+
+test('new runs remain blocked until deferred native interruption completes', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => { throw new Error('Transport'); };
+  let signalInterruptStarted;
+  const interruptStarted = new Promise(resolve => { signalInterruptStarted = resolve; });
+  let releaseInterrupt;
+  runtime.interrupt = async id => {
+    runtime.interrupts.push(id);
+    signalInterruptStarted();
+    await new Promise(resolve => { releaseInterrupt = resolve; });
+  };
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'deferred-interrupt', prompt: 'Do this once' });
+  await interruptStarted;
+  assert.equal(store.get('deferred-interrupt').status, 'running');
+  await assert.rejects(() => store.start({ runId: 'blocked', prompt: 'Do this next' }), error => error.statusCode === 409);
+  releaseInterrupt();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(store.get('deferred-interrupt').status, 'needs_review');
+});
+
 test('certificate failures stop provider retries and require an explicit retry', async () => {
   const runtime=new FakeRuntime();
   runtime.events=async function* () { yield {type:'session.retry.scheduled',properties:{sessionID:'ses_1',attempt:1,error:{type:'provider.transport',message:'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR'}}}; };

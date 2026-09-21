@@ -401,6 +401,24 @@ button:disabled {
   margin-bottom: 28px;
   max-width: 780px;
 }
+.system-row {
+  margin: 8px 0 14px 42px;
+  max-width: 760px;
+}
+.system-row .message-meta {
+  margin: 0 0 4px;
+}
+.system-row .message-meta strong {
+  color: #9b978c;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.system-row .message-text {
+  color: #8f8c83;
+  font-size: 11px;
+  line-height: 1.45;
+}
 .message-avatar {
   width: 29px;
   height: 29px;
@@ -420,6 +438,7 @@ button:disabled {
   color: #e39a77;
 }
 .message-content {
+  flex: 1;
   min-width: 0;
 }
 .message-meta {
@@ -444,6 +463,119 @@ button:disabled {
   color: #bbb9b1;
   font-size: 13px;
 }
+.message-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tool-activity {
+  width: min(100%, 650px);
+  border: 1px solid #3b3932;
+  border-radius: 8px;
+  background: #1b1a17;
+  overflow: hidden;
+}
+.tool-running {
+  border-color: #4b614d;
+  background: #1c211d;
+}
+.tool-failed {
+  border-color: #65423d;
+}
+.tool-summary {
+  width: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+  color: #c7c3b9;
+  text-align: left;
+  padding: 8px 10px;
+}
+.tool-summary:hover { background: #24231e; }
+.tool-icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: #c99462;
+  background: #30271f;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.tool-running .tool-icon { color: #85ba91; background: #25332a; }
+.tool-failed .tool-icon { color: #dd978e; background: #352321; }
+.tool-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tool-copy strong { font: 11px "DM Mono", monospace; color: #d5d0c5; }
+.tool-target {
+  color: #88867e;
+  font: 10px "DM Mono", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(53vw, 520px);
+}
+.tool-state { margin-left: auto; display: grid; color: #7fa88a; flex-shrink: 0; }
+.tool-failed .tool-state { color: #df9388; }
+.tool-output {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  border-top: 1px solid #33312b;
+  padding: 10px 12px;
+  color: #aaa79e;
+  background: #151512;
+  font: 10px/1.55 "DM Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-preview {
+  border-top: 1px solid #302e28;
+  padding: 7px 12px 8px 43px;
+  color: #8f8c83;
+  font: 10px/1.45 "DM Mono", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-progress {
+  width: min(100%, 760px);
+  margin: 0 0 25px 42px;
+  border: 1px solid #39362f;
+  border-radius: 9px;
+  background: #191916;
+  overflow: hidden;
+}
+.progress-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  color: #aaa69c;
+}
+.progress-mark {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  color: #85ba91;
+  background: #25332a;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.progress-failed .progress-mark { color: #df9388; background: #352321; }
+.progress-heading div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.progress-heading strong { font: 11px "DM Mono", monospace; color: #d0cbc0; }
+.progress-heading span { font: 9px "DM Mono", monospace; color: #6d6a62; }
+.progress-live { margin-left: auto; color: #88b291 !important; font-size: 9px !important; }
+.progress-current { padding: 0 10px 9px; }
+.progress-current { color: #88867e; font: 10px "DM Mono", monospace; }
+.progress-current strong { color: #c8a17f; font-weight: 500; }
+.progress-history { border-top: 1px solid #302e28; padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.progress-history .tool-activity { opacity: .72; }
+.progress-error { margin: 0; padding: 0 13px 11px; color: #dd978e; font-size: 11px; }
 .user-row .message-text {
   color: #e4e0d5;
 }
@@ -3370,3 +3502,17 @@ a:focus-visible {
     padding: 14px;
   }
 }
+
+/* Tool actions sit within the conversation rather than competing with it. */
+.tool-only-row { margin-top: -8px; margin-bottom: 18px; }
+.tool-only-row .message-content { margin-left: 42px; }
+.tool-activity { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.tool-running { background: transparent; border-color: var(--line); }
+.tool-icon, .tool-running .tool-icon { color: var(--muted); background: transparent; }
+.tool-copy strong { font-size: 12px; }
+.tool-target, .tool-preview { font-size: 11px; }
+.tool-output { font-size: 12px; }
+.run-progress { width: calc(100% - 42px); border: 0; border-radius: 0; background: transparent; }
+.progress-mark { color: var(--muted); background: transparent; }
+.progress-heading strong { font-size: 12px; }
+.progress-heading span { font-size: 11px; }

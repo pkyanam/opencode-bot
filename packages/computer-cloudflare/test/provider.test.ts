@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "vitest";
 import { CloudflareComputerProvider, type CloudflareSandboxBinding } from "../src/index.js";
 
-function fakeSandbox(options: { archive?: Uint8Array; calls?: string[]; reads?: { value: number }; resumeFailure?: boolean } = {}) {
+function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; resumeFailure?: boolean } = {}) {
   let starts = 0;
   const calls = options.calls ?? [];
   const process = {
@@ -29,8 +29,32 @@ function fakeSandbox(options: { archive?: Uint8Array; calls?: string[]; reads?: 
     getProcess: async () => starts ? process : null,
     stop: async () => undefined,
     destroy: async () => undefined,
-    exec: async (command: string) => ({ success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archive?.byteLength ?? 0) : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }),
-    readFile: async () => { if (options.reads) options.reads.value += 1; return { success: Boolean(options.archive), path: "", content: options.archive ? Buffer.from(options.archive).toString("base64") : "", timestamp: "" }; },
+    exec: async (command: string) => { options.execs?.push(command); return { success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archiveStatBytes ?? options.archive?.byteLength ?? 0) : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }; },
+    readFile: async (_path: string, readOptions?: { encoding?: string }) => {
+      if (readOptions?.encoding === "none" && options.streamArchive) {
+        if (options.streamReads) options.streamReads.value += 1;
+        const archive = options.archive;
+        return {
+          success: true,
+          path: "",
+          content: new ReadableStream<Uint8Array>({
+            start(controller) {
+              if (archive) {
+                for (let offset = 0; offset < archive.byteLength; offset += 64 * 1024) {
+                  controller.enqueue(archive.subarray(offset, Math.min(offset + 64 * 1024, archive.byteLength)));
+                }
+              }
+              controller.close();
+            },
+          }),
+          size: archive?.byteLength ?? 0,
+          mimeType: "application/gzip",
+          timestamp: "",
+        };
+      }
+      if (options.reads) options.reads.value += 1;
+      return { success: Boolean(options.archive), path: "", content: options.archive ? Buffer.from(options.archive).toString("base64") : "", timestamp: "" };
+    },
     writeFile: async () => ({ success: true, path: "", timestamp: "" }),
   };
 }
@@ -107,4 +131,50 @@ it("checks the archive size before buffering and surfaces a failed resume", asyn
   const second = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => resumeless as never, checkpointBucket: bucket as never });
   await second.ensure({ computerId: "c6", runnerToken: "secret" });
   await assert.rejects(() => second.checkpoint("c6", 1), /failed to resume/);
+});
+
+it("uses bounded raw binary streaming for a default-sized checkpoint", async () => {
+  const archive = new Uint8Array(17 * 1024 * 1024);
+  const streamReads = { value: 0 };
+  const execs: string[] = [];
+  let stored: Uint8Array | undefined;
+  const sandbox = fakeSandbox({ archive, streamArchive: true, streamReads, execs });
+  const bucket = {
+    put: async (_key: string, value: ArrayBuffer | ArrayBufferView) => {
+      stored = new Uint8Array(value instanceof ArrayBuffer ? value : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    },
+    get: async () => null,
+  };
+  const provider = new CloudflareComputerProvider({
+    sandboxNamespace: {} as CloudflareSandboxBinding,
+    sandboxFactory: () => sandbox as never,
+    checkpointBucket: bucket as never,
+  });
+  await provider.ensure({ computerId: "streamed", runnerToken: "secret" });
+  const manifest = await provider.checkpoint("streamed", 1);
+  assert.equal(streamReads.value, 1);
+  assert.equal(manifest.bytes, archive.byteLength);
+  assert.equal(stored?.byteLength, archive.byteLength);
+  const tarCommand = execs.find((command) => command.startsWith("tar -czf"));
+  assert.ok(tarCommand);
+  assert.match(tarCommand, /--exclude='workspace\/browser\/profile\/Default\/Cache'/);
+  assert.match(tarCommand, /--exclude='workspace\/browser\/profile\/BrowserMetrics-spare\.pma'/);
+  assert.doesNotMatch(tarCommand, /--exclude='workspace\/browser\/profile'/);
+});
+
+it("stops consuming a raw stream at the configured checkpoint bound", async () => {
+  const streamReads = { value: 0 };
+  const oversized = fakeSandbox({ archive: new Uint8Array(2_000), archiveStatBytes: 0, streamArchive: true, streamReads });
+  let uploads = 0;
+  const bucket = { put: async () => { uploads += 1; }, get: async () => null };
+  const provider = new CloudflareComputerProvider({
+    sandboxNamespace: {} as CloudflareSandboxBinding,
+    sandboxFactory: () => oversized as never,
+    checkpointBucket: bucket as never,
+    maxCheckpointBytes: 10,
+  });
+  await provider.ensure({ computerId: "streamed-oversized", runnerToken: "secret" });
+  await assert.rejects(() => provider.checkpoint("streamed-oversized", 1), /maximum/);
+  assert.equal(streamReads.value, 1);
+  assert.equal(uploads, 0);
 });
