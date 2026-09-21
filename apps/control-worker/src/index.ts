@@ -1231,7 +1231,14 @@ export class Workspace {
       for (const sessionId of candidates) {
         const result = await transport.fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
         if (result.status === 404) continue;
-        if (!result.ok) throw new HttpError(result.status === 409 ? 409 : 502, "native conversation could not be deleted");
+        if (!result.ok) {
+          // Older runners translated the native OpenCode 404 into a 500. Keep
+          // cleanup idempotent for that exact stale-session response only;
+          // unrelated 500s must still preserve the control-plane records.
+          const payload = await result.clone().json<any>().catch(() => undefined);
+          if (result.status === 500 && payload?.error === `Session not found: ${sessionId}`) continue;
+          throw new HttpError(result.status === 409 ? 409 : 502, "native conversation could not be deleted");
+        }
       }
       return candidates;
     } finally {

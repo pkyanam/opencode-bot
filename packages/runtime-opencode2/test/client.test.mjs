@@ -28,6 +28,27 @@ test("runtime qualifies service with isolated roots and maps v2 calls", async ()
   assert.equal(ensureInput, undefined, "injected client should avoid service startup");
 });
 
+test("native session removal maps a missing session to an idempotent 404", async () => {
+  const fakeClient = {
+    session: {
+      remove: async () => { throw { _tag: "SessionNotFoundError" }; },
+    },
+  };
+  const runtime = new OpenCode2Runtime({ client: fakeClient });
+  await assert.rejects(runtime.removeSession("ses_missing"), (error) => error.statusCode === 404);
+});
+
+test("native session removal preserves permission failures", async () => {
+  const permissionError = { _tag: "UnauthorizedError" };
+  const fakeClient = {
+    session: {
+      remove: async () => { throw permissionError; },
+    },
+  };
+  const runtime = new OpenCode2Runtime({ client: fakeClient });
+  await assert.rejects(runtime.removeSession("ses_forbidden"), (error) => error === permissionError);
+});
+
 test("catalog uses location-scoped native v2 APIs", async () => {
   const locationCalls = [];
   const fake = {

@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, messages: [] as any[] }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[] }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async ensure() {
@@ -21,7 +21,7 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           return Response.json(configured.body, { status: configured.status });
         }
         if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
-        if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: 'delete failed' }, { status: remote.deleteStatus });
+        if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: remote.deleteError }, { status: remote.deleteStatus });
         const match = path.match(/^\/runs\/([^/]+)(?:\/(cancel|approval))?$/);
         const run = match && remote.runs.get(match[1]);
         if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
@@ -71,7 +71,7 @@ function fixture() {
   };
   return { db, request, create, env, alarms, queries, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.messages=[]; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('exposes the checkpoint and permits restore while runtime recovery is required', async () => {
@@ -452,6 +452,28 @@ it('keeps control-plane data when native session deletion fails', async () => {
   expect(deleted.status).toBe(502);
   expect((await f.request('/api/threads')).body.some((item: any) => item.id === thread.id)).toBe(true);
   expect(remote.calls).toContain('DELETE /sessions/native-failure');
+});
+
+it('cleans up a stale native session reported as a legacy runner 500', async () => {
+  const f = fixture(); const { thread } = await f.create();
+  const sessionId = 'native-stale';
+  f.db.prepare('UPDATE threads SET runner_session_id=? WHERE id=?').run(sessionId, thread.id);
+  remote.deleteStatus = 500;
+  remote.deleteError = `Session not found: ${sessionId}`;
+  const deleted = await f.request(`/api/threads/${thread.id}`, 'DELETE');
+  expect(deleted.status).toBe(200);
+  expect((await f.request('/api/threads')).body.some((item: any) => item.id === thread.id)).toBe(false);
+});
+
+it('does not treat an unrelated native 500 as stale-session cleanup', async () => {
+  const f = fixture(); const { thread } = await f.create();
+  const sessionId = 'native-failure-500';
+  f.db.prepare('UPDATE threads SET runner_session_id=? WHERE id=?').run(sessionId, thread.id);
+  remote.deleteStatus = 500;
+  remote.deleteError = 'native permission failure';
+  const deleted = await f.request(`/api/threads/${thread.id}`, 'DELETE');
+  expect(deleted.status).toBe(502);
+  expect((await f.request('/api/threads')).body.some((item: any) => item.id === thread.id)).toBe(true);
 });
 
 it('rejects deletion when a native session is shared by another conversation', async () => {

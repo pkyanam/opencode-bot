@@ -1,4 +1,4 @@
-import { OpenCode } from "@opencode/client";
+import { OpenCode, isSessionNotFoundError } from "@opencode/client";
 import * as ServiceModule from "@opencode/client/service";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createPlaywrightMcpServer } from "../../browser/src/index.ts";
@@ -149,7 +149,18 @@ export class OpenCode2Runtime {
   async removeSession(sessionId) {
     await this.start();
     if (!this.client.session.remove) throw new Error("OpenCode 2 session removal API is unavailable");
-    await this.client.session.remove({ sessionID: sessionId });
+    try {
+      await this.client.session.remove({ sessionID: sessionId });
+    } catch (error) {
+      // A control-plane row may outlive the native session after a restore or
+      // runtime reset. Treat that idempotent cleanup case as HTTP 404 so the
+      // control worker can remove its durable records. Keep every other native
+      // failure (including authorization) intact for the caller.
+      if (isSessionNotFoundError(error)) {
+        throw Object.assign(new Error("native session not found"), { statusCode: 404 });
+      }
+      throw error;
+    }
   }
 
   async prompt(sessionId, text, options = {}) {
