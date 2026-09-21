@@ -1,15 +1,98 @@
 # Control Worker MCP endpoint
 
-`apps/control-worker/src/mcp.ts` exposes the control API as an explicit MCP
-tool catalog. It is a route adapter, not a second backend: every `tools/call`
-maps to a reviewed `/api/...` path and the caller’s bearer credential must be
-checked again by the existing Worker route.
+Connect an external agent to your bots, conversations, files, and Computer.
+**Codex works today. ChatGPT’s custom-app connection needs OAuth support that
+this server does not yet implement.**
 
-## Connect an agent
+## Codex desktop: fill in the connection form
 
-The endpoint is **`https://YOUR-WORKER.workers.dev/api/mcp`**. Use Streamable HTTP
-and an `Authorization: Bearer <token>` header in your client's MCP configuration.
-Client configuration file formats vary; use its documented remote-server format.
+Open Codex’s custom MCP connection form and enter:
+
+| Field | What to enter |
+| --- | --- |
+| Name | `OpenCode Bot` |
+| Type | **Streamable HTTP** |
+| URL | Your app URL followed by `/api/mcp`, for example `https://YOUR-WORKER.workers.dev/api/mcp` |
+| Bearer token env var | **Leave blank** for this setup |
+| Headers → Key | `Authorization` |
+| Headers → Value | `Bearer YOUR_APP_TOKEN` — replace `YOUR_APP_TOKEN` with your actual app token, keeping `Bearer` and the space |
+| Headers from environment variables | **Leave blank** |
+
+Click **Save**, then start a new conversation and ask:
+
+> Use OpenCode Bot to list my bots. Do not create or change anything.
+
+### Where do I get the token?
+
+For your own Codex installation, the **application token** saved by the installer
+works. This is the credential used to connect to your workspace. It is **not** the
+Cloudflare “Deployment token” used by the updater, a node token, or a one-time
+pairing code.
+
+On the Mac where you ran the default installer, this command copies the complete
+header value to your clipboard. Paste it directly into **Headers → Value**:
+
+```bash
+node -e 'const fs=require("node:fs");const os=require("node:os");const s=JSON.parse(fs.readFileSync(os.homedir()+"/.local/share/opencode-bot/.opencode-bot/secrets.json","utf8"));if(!s.APP_TOKEN)throw new Error("No application token found");process.stdout.write("Bearer "+s.APP_TOKEN)' | pbcopy
+```
+
+If you installed to a custom directory, adjust that path. The command reads your
+local installer secrets; it does not contact Cloudflare or generate a new token.
+Codex saves the static header in its configuration, so treat that configuration
+as containing a credential. Do not paste the token into chat or commit it.
+
+For an integration you want to revoke independently, use a paired device token
+instead; see **Separate credentials for each agent** below. It goes in the same
+header value: `Bearer DEVICE_TOKEN`.
+
+### Optional: use an environment variable instead
+
+**Bearer token env var takes a variable name, not a secret.** For example, enter
+`OPENCODE_BOT_TOKEN` only if that variable is already available to the Codex
+process. Its value must be the token alone, without `Bearer `. Leave the static
+Authorization header blank when using this option.
+
+For Codex CLI, set the variable in the terminal that launches Codex and add this
+to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.opencode_bot]
+url = "https://YOUR-WORKER.workers.dev/api/mcp"
+bearer_token_env_var = "OPENCODE_BOT_TOKEN"
+```
+
+An `export` in a terminal does not automatically configure a desktop app launched
+from the Dock. The static-header setup above avoids that extra environment setup.
+See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+## ChatGPT: current limitation
+
+ChatGPT’s developer-mode custom apps support OAuth, no authentication, and mixed
+OAuth/no-auth. They do not provide the custom static Authorization-header field
+shown in Codex. “Static credentials” in its OAuth setup means OAuth client
+credentials, not an OpenCode Bot application token.
+
+Our endpoint requires a bearer credential and does not yet provide an OAuth
+sign-in flow, so **direct authenticated ChatGPT setup is not supported yet**.
+Selecting “No Authentication” will fail. Do not put your token in the endpoint
+URL or disable authentication to work around this. Use Codex or another MCP
+client with bearer-header support for now.
+
+Source: [ChatGPT developer mode](https://developers.openai.com/api/docs/guides/developer-mode).
+
+## Troubleshooting
+
+- **401 / unauthorized:** use the application token or a paired device token;
+  check that the header value starts with `Bearer `, followed by the token.
+- **Environment variable missing:** use the static-header setup or make the
+  named variable available to the process that launches Codex.
+- **404 / page HTML:** use `/api/mcp`, not the app’s root URL or a pairing link.
+- **Tools missing:** save the connection and start a new conversation. Paired
+  credentials intentionally have fewer tools than the owner credential.
+- **Computer still starting:** the MCP catalog and workspace controls can connect
+  before the Computer is ready. Computer-dependent tools still need it to boot.
+
+## Separate credentials for each agent
 
 Prefer a separate paired token for each agent:
 
