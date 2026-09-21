@@ -39,8 +39,10 @@ const databases: DatabaseSync[] = [];
 function fixture() {
   const db = new DatabaseSync(':memory:'); databases.push(db);
   const alarms: number[] = [];
+  const queries: string[] = [];
   const storage = {
     sql: { exec(query: string, ...args: any[]) {
+      queries.push(query);
       const statement = db.prepare(query);
       let rows: any[] = []; let changes = 0;
       if (statement.columns().length) rows = statement.all(...args);
@@ -66,7 +68,7 @@ function fixture() {
     const thread = await request('/api/threads', 'POST', { botId: bot.body.id, title: 'Example' });
     return { bot: bot.body, thread: thread.body };
   };
-  return { db, request, create, env, alarms, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
+  return { db, request, create, env, alarms, queries, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
 afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.messages=[]; });
 
@@ -737,4 +739,21 @@ it('returns a chronological activity tail and explains interrupted runner recove
  const state=(await f.request('/api/state')).body;expect(state.runs[0].events).toHaveLength(30);
  expect(state.runs[0].events.map((e:any)=>e.sequence)).toEqual(Array.from({length:30},(_,i)=>42+i));
  expect(state.runs[0].error).toContain('restarted before completion could be confirmed');
+});
+
+
+it('hydrates 100 run summaries with bounded query count and preserves per-run ordering', async () => {
+  const f=fixture(); const {thread}=await f.create();
+  const put=f.db.prepare("INSERT INTO runs(id,thread_id,prompt,status,idempotency_key,created_at,updated_at) VALUES(?,?,?,'succeeded',?,?,?)");
+  const event=f.db.prepare('INSERT INTO events(id,run_id,sequence,type,payload,created_at) VALUES(?,?,?,?,?,?)');
+  for(let i=0;i<100;i++) {
+    const id=`batch-${i}`,stamp=new Date(1700000000000+i).toISOString();
+    put.run(id,thread.id,'task',id,stamp,stamp);
+    for(let j=1;j<=35;j++)event.run(`${id}-${j}`,id,j,j===1?'run.dispatching':'tool.updated','{}',stamp);
+  }
+  f.queries.length=0;
+  const result=await f.request('/api/state');
+  expect(result.status).toBe(200);expect(result.body.runs).toHaveLength(100);
+  for(const run of result.body.runs){expect(run.events.map((e:any)=>e.sequence)).toEqual(Array.from({length:30},(_,i)=>i+6));expect(run.startedAt).toBe(run.createdAt);}
+  expect(f.queries.filter(q=>q.includes('FROM events'))).toHaveLength(2);
 });

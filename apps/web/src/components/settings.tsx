@@ -1,3 +1,4 @@
+import { computerInstallCommand } from "../computer-install";
 import { DeviceSettings, readClientIdentity, type ClientIdentity } from "./device-connection";
 import { useEffect, useState } from "react";
 import {
@@ -55,6 +56,7 @@ export function SettingsModal({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [installPlatform, setInstallPlatform] = useState<"unix" | "windows">("unix");
   const [pair, setPair] = useState<{ token: string; expiresAt: string } | null>(
     null,
   );
@@ -296,26 +298,16 @@ export function SettingsModal({
               {pair && (
                 <div className="setup-detail">
                   <h4>Run on the computer you want to connect</h4>
-                  <p>
-                    From this repository on the other computer, run this
-                    command. Install the runner dependencies with npm ci
-                    --prefix runner, then run node scripts/node-agent.mjs start.
-                  </p>
-                  <code className="copy-block">
-                    node scripts/node-agent.mjs register --control-url{" "}
-                    {location.origin} --pairing-token {pair.token} --name
-                    MyComputer
-                  </code>
-                  <div className="copy-row">
-                    <code>{pair.token}</code>
-                    <button
-                      className="icon-btn"
-                      aria-label="Copy computer pairing token"
-                      onClick={() => void copy(pair.token)}
-                    >
-                      <Copy size={16} />
-                    </button>
-                  </div>
+                  <p>Paste this into a terminal on the other computer. It installs OpenCode and starts the connection automatically.</p>
+                  <label className="field-label" htmlFor="computer-platform">Operating system</label>
+                  <select id="computer-platform" value={installPlatform} onChange={event => setInstallPlatform(event.target.value as "unix" | "windows")}>
+                    <option value="unix">macOS or Linux</option>
+                    <option value="windows">Windows · PowerShell</option>
+                  </select>
+                  <code className="copy-block">{computerInstallCommand(installPlatform, location.origin, pair.token)}</code>
+                  <button className="soft-btn" onClick={() => void copy(computerInstallCommand(installPlatform, location.origin, pair.token))}>
+                    <Copy size={16} /> Copy install command
+                  </button>
                   <p className="settings-muted">
                     Server: {location.origin}
                     <br />

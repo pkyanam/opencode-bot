@@ -587,14 +587,14 @@ export class Workspace {
       isoNow(),
     );
   }
-  private run(row: any): any {
+  private run(row: any, batch?: { events: any[]; startedAt?: string; queue?: any }): any {
     if (!row) return null;
-    const events = this.events(row.id, 30);
+    const events = batch ? batch.events : this.events(row.id, 30);
     const restart = row.status === "needs_review" && events.some(event => event.type === "runner.recovery.needs_review");
     const error = row.error || (restart ? "The computer restarted before completion could be confirmed. Review its work before retrying." : undefined);
-    const startedAt = this.one<{ created_at: string }>("SELECT created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1", row.id)?.created_at;
-    let queue;
-    if (row.status === "queued") {
+    const startedAt = batch ? batch.startedAt : this.one<{ created_at: string }>("SELECT created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1", row.id)?.created_at;
+    let queue = batch?.queue;
+    if (row.status === "queued" && !batch) {
       const blockedBy = this.one<any>("SELECT r.id,r.status,b.name AS botName FROM runs r JOIN threads t ON t.id=r.thread_id JOIN bots b ON b.id=t.bot_id WHERE r.id<>? AND r.status IN ('provisioning','running','waiting_approval','waiting_human','recovering','cancelling') ORDER BY r.created_at,r.rowid LIMIT 1", row.id);
       const ahead = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs r WHERE r.status='queued' AND (r.created_at<? OR (r.created_at=? AND r.rowid<(SELECT rowid FROM runs WHERE id=?)))", row.created_at, row.created_at, row.id)?.n ?? 0;
       queue = { position: ahead + 1, ...(blockedBy ? { blockedBy } : {}), reconnecting: events.some(event => event.type === "runner.reconcile_error") };
@@ -962,9 +962,29 @@ export class Workspace {
     );
   }
   private runs(): any[] {
-    return this.rows<any>(
-      "SELECT * FROM runs ORDER BY created_at DESC LIMIT 100",
-    ).map((r) => this.run(r));
+    const runs = this.rows<any>("SELECT * FROM runs ORDER BY created_at DESC LIMIT 100");
+    if (!runs.length) return [];
+    // Each indexed subquery stays bounded to 30 rows. A window over the full
+    // event history would scan old tool output every time the workspace polls.
+    const ids = runs.map(run => run.id);
+    const eventRows = this.rows<any>(ids.map(() => "SELECT * FROM (SELECT * FROM events WHERE run_id=? ORDER BY sequence DESC LIMIT 30)").join(" UNION ALL "), ...ids);
+    const byRun = new Map<string, any[]>();
+    for (const event of eventRows) {
+      const list = byRun.get(event.run_id) ?? [];
+      list.push({ id: event.id, runId: event.run_id, sequence: event.sequence, type: event.type, payload: parseJson(event.payload, null), createdAt: event.created_at });
+      byRun.set(event.run_id, list);
+    }
+    const starts = new Map(this.rows<any>(ids.map(() => "SELECT * FROM (SELECT run_id,created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1)").join(" UNION ALL "), ...ids).map(event => [event.run_id, event.created_at]));
+    let blockedBy: any;
+    const positions = new Map<string, number>();
+    if (runs.some(run => run.status === "queued")) {
+      blockedBy = this.one<any>("SELECT r.id,r.status,b.name AS botName FROM runs r JOIN threads t ON t.id=r.thread_id JOIN bots b ON b.id=t.bot_id WHERE r.status IN ('provisioning','running','waiting_approval','waiting_human','recovering','cancelling') ORDER BY r.created_at,r.rowid LIMIT 1");
+      this.rows<any>("SELECT id FROM runs WHERE status='queued' ORDER BY created_at,rowid").forEach((run, index) => positions.set(run.id, index + 1));
+    }
+    return runs.map(run => {
+      const events = (byRun.get(run.id) ?? []).reverse();
+      return this.run(run, { events, startedAt: starts.get(run.id), ...(run.status === "queued" ? { queue: { position: positions.get(run.id), ...(blockedBy ? { blockedBy } : {}), reconnecting: events.some(event => event.type === "runner.reconcile_error") } } : {}) });
+    });
   }
   private stateView(): any {
     return { bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at,attachments:parseJson(m.attachments,[])})) };
