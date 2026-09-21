@@ -335,6 +335,8 @@ it('stores uploads under generated attachment ids and resolves only canonical ru
   const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Review the file', idempotencyKey: 'upload-run', attachments: [{ id: uploaded.attachment.id, path: 'forged', name: 'fake', mimeType: 'text/plain', size: 1 }] });
   expect(run.status).toBe(202);
   expect(run.body.attachments).toEqual([{ id: uploaded.attachment.id, path: expect.stringContaining('uploads/'), name: 'report.pdf', mimeType: 'application/pdf', size: 3 }]);
+  await f.alarm();
+  expect(remote.submitted[0].attachments).toEqual([{ id: uploaded.attachment.id, path: expect.stringContaining('uploads/'), name: 'report.pdf', mimeType: 'application/pdf', size: 3 }]);
   expect((await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'bad', idempotencyKey: 'bad-attachment', attachments: [{ id: 'att_00000000-0000-0000-0000-000000000000' }] })).status).toBe(404);
 });
 

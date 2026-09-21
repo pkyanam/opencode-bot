@@ -3244,6 +3244,7 @@ export class Workspace {
         runId: run.id,
         threadId: run.thread_id,
         prompt: run.prompt,
+        ...(run.attachments ? { attachments: parseJson(run.attachments, []) } : {}),
         ...(run.command_name
           ? {
               command: { name: run.command_name, text: run.command_text ?? "" },
