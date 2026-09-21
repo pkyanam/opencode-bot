@@ -109,6 +109,7 @@ export class OpenCode2Runtime {
 
   async waitForBrowserMcp(timeoutMs = 30_000, serverName = "computer_browser") {
     const deadline = Date.now() + timeoutMs;
+    let delayMs = 100;
     let last;
     do {
       last = await this.client.mcp.list({ location: { directory: this.directory } });
@@ -117,7 +118,11 @@ export class OpenCode2Runtime {
       if (browser?.status?.status === "error" || browser?.status?.status === "failed") {
         throw new Error(`${serverName} MCP failed to connect: ${JSON.stringify(browser.status)}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      // MCP startup is usually a few hundred milliseconds, but can be slow
+      // when Chromium is being launched. Back off between readiness reads so
+      // a cold start does not create a 4 req/s burst for the full timeout.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
     } while (Date.now() < deadline);
     throw new Error(`${serverName} MCP did not become ready within ${timeoutMs}ms: ${JSON.stringify(last)}`);
   }
