@@ -100,6 +100,13 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
   checkout.
 - **Manage workspace files.** Open Workspace → Files to browse folders, search,
   upload/download files, preview text, and organize the shared computer files.
+- **Manage storage.** Settings → Storage shows measured deployment R2 usage,
+  configures idle checkpoints, and lets you discard selected unprotected old
+  backups. The account-wide 10 GB-month free allowance is shared across
+  deployments and is not a dedicated quota or billing guarantee. Containers
+  also require Workers Paid plus compute, memory, and awake disk charges, so
+  the R2 meter is not a full deployment cost estimate. See [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
+  and [Containers pricing](https://developers.cloudflare.com/containers/platform/pricing/).
 
 ## Mobile preview
 

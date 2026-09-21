@@ -162,7 +162,7 @@ export class DesktopController {
     switch (action?.type) {
       case "move": {
         const { x, y } = normalizedPoint(action);
-        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1)))], undefined, this.display);
+        await this.runCommand("xdotool", ["mousemove", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1)))], undefined, this.display);
         return { ok: true };
       }
       case "click": {
@@ -171,7 +171,7 @@ export class DesktopController {
         if (!["left", "middle", "right"].includes(button)) throw httpError(400, "invalid mouse button");
         const clicks = action.clicks ?? 1;
         if (!Number.isInteger(clicks) || clicks < 1 || clicks > 2) throw httpError(400, "invalid click count");
-        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), "click", "--repeat", String(clicks), String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
+        await this.runCommand("xdotool", ["mousemove", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), "click", "--repeat", String(clicks), String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
         return { ok: true };
       }
       case "down":
@@ -179,7 +179,7 @@ export class DesktopController {
         const { x, y } = normalizedPoint(action);
         const button = action.button ?? "left";
         if (!["left", "middle", "right"].includes(button)) throw httpError(400, "invalid mouse button");
-        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), action.type === "down" ? "mousedown" : "mouseup", String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
+        await this.runCommand("xdotool", ["mousemove", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), action.type === "down" ? "mousedown" : "mouseup", String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
         if (action.type === "down") this.heldButtons.add(button); else this.heldButtons.delete(button);
         return { ok: true };
       }

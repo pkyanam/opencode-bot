@@ -41,6 +41,8 @@ export class ComputerStartup {
     return { ...this.value };
   }
 
+  peek(): StartupState | undefined { return this.value ? { ...this.value } : undefined; }
+
   invalidate() {
     if (!this.pending) this.value = undefined;
   }

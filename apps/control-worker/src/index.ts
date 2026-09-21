@@ -1,3 +1,4 @@
+import { listStorageObjects, planCheckpointRetention, deleteSelectedCheckpointObjects } from "../../../packages/computer-cloudflare/src/storage-management";
 import { clientPayload } from "./client-payload";
 import { Buffer } from "node:buffer";
 import { UpdateController } from "./update-controller";
@@ -709,6 +710,13 @@ export class Workspace {
         if (url.pathname === "/api/computer/readiness") return response({ state: "starting", reason: "app_updating", retryAfterMs: 5000 });
         if (computerDependent || !["GET", "HEAD"].includes(request.method))
           return response({ error: "The app is updating. You can follow its progress in Settings → Updates.", code: "app_updating" }, 503);
+      }
+      if (url.pathname === "/api/storage" || url.pathname.startsWith("/api/storage/")) {
+        if (!ownerAuthorized) throw new HttpError(403, "Owner access is required for storage management");
+        return await this.storageRoute(request, url);
+      }
+      if (!["GET", "HEAD"].includes(request.method) && /^\/api\/(files|attachments|providers|mcps|terminal|extensions)(?:\/|$)/.test(url.pathname) && !url.pathname.endsWith("/status")) {
+        if (typeof this.state.storage.put === "function") await this.state.storage.put("backup:dirtyAt", Date.now());
       }
       if (url.pathname === "/api/computer/readiness" && ["GET", "POST"].includes(request.method))
         return response(this.computerReadiness(request.method === "POST"));
@@ -2166,6 +2174,7 @@ export class Workspace {
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
     if (!run) {
+      await this.automaticCheckpoint();
       this.schedule();
       return;
     }
@@ -2440,6 +2449,66 @@ export class Workspace {
       runnerState: readiness.runnerState ?? null,
     };
   }
+  private async backupPolicy() {
+    return (await this.state.storage.get<any>("backup:policy")) ?? { automatic: true, intervalMinutes: 60, keepLatest: 2, budgetBytes: 2 * 1024 ** 3 };
+  }
+  private async protectedCheckpointKeys(): Promise<string[]> {
+    const pointer = await this.state.storage.get<any>("computer-checkpoint:shared");
+    const job = await this.state.storage.get<any>("app-update:job");
+    const keys = [pointer?.manifest?.checkpointKey];
+    if (job?.checkpointId && !["completed", "failed"].includes(job.phase)) keys.push(`checkpoints/shared/${String(job.checkpointId).replaceAll(":", "-")}.tar.gz`);
+    return keys.filter((key): key is string => typeof key === "string");
+  }
+  private async storageRoute(request: Request, url: URL): Promise<Response> {
+    if (!this.env.ARTIFACTS) throw new HttpError(409, "Deployment storage is unavailable");
+    if (request.method === "POST") {
+      if (this.maintenance) throw new HttpError(409, "Wait for Computer maintenance to finish");
+      const input = await body(request);
+      if (url.pathname === "/api/storage/policy") {
+        if (typeof input.automatic !== "boolean" || typeof input.intervalMinutes !== "number" || !Number.isInteger(input.intervalMinutes) || input.intervalMinutes < 15 || input.intervalMinutes > 1440 || typeof input.keepLatest !== "number" || !Number.isInteger(input.keepLatest) || input.keepLatest < 1 || input.keepLatest > 20 || typeof input.budgetBytes !== "number" || !Number.isSafeInteger(input.budgetBytes) || input.budgetBytes < 64 * 1024 ** 2 || input.budgetBytes > 100 * 1024 ** 3) throw new HttpError(400, "Choose an interval of 15–1440 minutes, 1–20 backups, and a storage budget of 64 MiB–100 GiB");
+        await this.state.storage.put("backup:policy", { automatic: input.automatic, intervalMinutes: input.intervalMinutes, keepLatest: input.keepLatest, budgetBytes: input.budgetBytes });
+      } else if (url.pathname === "/api/storage/cleanup") {
+        if (!Array.isArray(input.keys) || input.keys.length > 500 || input.keys.some((key: unknown) => typeof key !== "string")) throw new HttpError(400, "Select up to 500 old checkpoint objects");
+        this.maintenance = true;
+        try {
+          const protectedKeys = await this.protectedCheckpointKeys();
+          await deleteSelectedCheckpointObjects(this.env.ARTIFACTS, input.keys, { checkpointPrefix: "checkpoints/shared", protectedKeys });
+        } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Could not delete checkpoints"); }
+        finally { this.maintenance = false; }
+      } else throw new HttpError(404, "Storage operation not found");
+    } else if (request.method !== "GET" || url.pathname !== "/api/storage") throw new HttpError(405, "Method not allowed");
+    const listing = await listStorageObjects(this.env.ARTIFACTS, { checkpointPrefix: "checkpoints/shared", protectedKeys: await this.protectedCheckpointKeys() });
+    return response({ ...listing, objects: listing.objects.map(({ key, size, uploaded, category, protected: protectedObject }) => ({ key, size, uploaded, category, protected: protectedObject })), policy: await this.backupPolicy(), lastAutomaticCheckpointAt: await this.state.storage.get("backup:lastAutomaticAt"), lastError: await this.state.storage.get("backup:lastError") });
+  }
+  private async pruneCheckpoints(): Promise<void> {
+    if (!this.env.ARTIFACTS) return;
+    const protectedKeys = await this.protectedCheckpointKeys();
+    const listing = await listStorageObjects(this.env.ARTIFACTS, { checkpointPrefix: "checkpoints/shared", protectedKeys });
+    if (listing.truncated) return; // Never apply retention to an incomplete inventory.
+    const policy = await this.backupPolicy();
+    const plan = planCheckpointRetention(listing.objects, { checkpointPrefix: "checkpoints/shared", protectedKeys, keep: policy.keepLatest, maxBytes: policy.budgetBytes });
+    for (let i = 0; i < plan.delete.length; i += 500) await deleteSelectedCheckpointObjects(this.env.ARTIFACTS, plan.delete.slice(i, i + 500).map(object => object.key), { checkpointPrefix: "checkpoints/shared", protectedKeys });
+  }
+  private async automaticCheckpoint(): Promise<void> {
+    if (!this.env.ARTIFACTS || this.maintenance || typeof this.state.storage.get !== "function" || this.startup.peek()?.state !== "ready") return;
+    const policy = await this.backupPolicy();
+    if (!policy.automatic) return;
+    const pointer = await this.state.storage.get<any>("computer-checkpoint:shared");
+    const last = Date.parse(pointer?.committedAt ?? "") || 0;
+    const changed = this.one<any>("SELECT MAX(r.updated_at) AS at FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NULL");
+    const dirty = Math.max(Date.parse(changed?.at ?? "") || 0, await this.state.storage.get<number>("backup:dirtyAt") ?? 0);
+    const attempted = await this.state.storage.get<number>("backup:lastAttemptAt") ?? 0;
+    if (!dirty || dirty <= last || Date.now() - Math.max(last, attempted, dirty) < policy.intervalMinutes * 60_000) return;
+    if (this.one<any>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n) return;
+    await this.state.storage.put("backup:lastAttemptAt", Date.now());
+    try {
+      await this.computerCheckpoint();
+      await this.state.storage.put("backup:lastAutomaticAt", isoNow());
+      await this.state.storage.delete("backup:lastError");
+    } catch (error) {
+      await this.state.storage.put("backup:lastError", error instanceof Error ? error.message : "Automatic backup could not complete; the previous backup is retained.");
+    }
+  }
   private async computerCheckpoint(): Promise<any> {
     if (this.maintenance)
       throw new HttpError(409, "computer maintenance is in progress");
@@ -2464,6 +2533,7 @@ export class Workspace {
         0,
         readiness.runnerState?.instanceId,
       );
+      await this.pruneCheckpoints().catch(async () => { await this.state.storage.put("backup:lastError", "Backup saved; old backup cleanup will retry after the next backup."); });
       return {
         status: "committed",
         checkpoint: pointer.manifest,

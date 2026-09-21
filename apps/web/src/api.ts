@@ -158,6 +158,27 @@ export type UpdateStatus = {
   releaseUrl?: string;
   checkError?: string;
 };
+export type StorageObject = {
+  key: string;
+  size: number;
+  uploaded: string;
+  category: "checkpoint" | "artifact" | "other";
+  protected: boolean;
+};
+export type StoragePolicy = {
+  automatic: boolean;
+  intervalMinutes: number;
+  keepLatest: number;
+  budgetBytes: number;
+};
+export type StorageSummary = {
+  objects: StorageObject[];
+  totals: { bytes: number; checkpointBytes: number; otherBytes: number; objects: number };
+  truncated: boolean;
+  policy: StoragePolicy;
+  lastAutomaticCheckpointAt?: string;
+  lastError?: string;
+};
 export type Skill = {
   id: string;
   name: string;
@@ -631,6 +652,11 @@ export const api = {
       { method: "DELETE" },
     ),
   catalog,
+  storage: {
+    get: () => request<StorageSummary>("/api/storage"),
+    updatePolicy: (policy: StoragePolicy) => request<StorageSummary>("/api/storage/policy", { method: "POST", body: JSON.stringify(policy) }),
+    cleanup: (keys: string[]) => request<StorageSummary>("/api/storage/cleanup", { method: "POST", body: JSON.stringify({ keys }) }),
+  },
   mcp: {
     list: () => request<McpServerList>("/api/mcps"),
     resources: () => request<{ location?: string; resources: unknown[]; templates: unknown[] }>("/api/mcps/resources"),

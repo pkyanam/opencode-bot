@@ -29,6 +29,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { OpenCodeProviders } from "./opencode-providers";
 import { AppUpdates } from "./app-updates";
 import { McpSettings } from "./mcp-settings";
+import { StorageSettings } from "./storage-settings";
 
 type Node = {
   id: string;
@@ -202,6 +203,10 @@ export function SettingsModal({
             {identity?.role === "owner" && <TabsTrigger value="mcp">
               <Server size={16} />
               MCP
+            </TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="storage">
+              <Server size={16} />
+              Storage
             </TabsTrigger>}
             {identity?.role === "owner" && <TabsTrigger value="updates">
               <RefreshCw size={16} />
@@ -659,6 +664,9 @@ export function SettingsModal({
             </TabsContent>
             <TabsContent value="mcp">
               <McpSettings onSaved={() => { onSaved(); void action(async () => setCatalog(await api.catalog())); }} onOpenComputer={onOpenComputer} />
+            </TabsContent>
+            <TabsContent value="storage">
+              <StorageSettings />
             </TabsContent>
             <TabsContent value="updates">
               <AppUpdates />

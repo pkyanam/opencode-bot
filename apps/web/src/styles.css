@@ -1139,6 +1139,19 @@ button:disabled {
 .mcp-auth-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .mcp-method-picker { display: flex; align-items: end; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #38352f; }
 .mcp-method-picker .field-label { margin: 0; flex: 1; }
+.storage-settings { display: flex; flex-direction: column; gap: 12px; }
+.storage-settings h4 { margin: 0; color: #d7d1c6; font-size: 12px; }
+.storage-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.storage-policy, .storage-cleanup { display: flex; flex-direction: column; gap: 10px; padding: 11px; border: 1px solid #38352f; border-radius: 7px; }
+.checkbox-row { display: flex; gap: 8px; align-items: center; color: #c9c1b5; font-size: 11px; }
+.storage-policy-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.storage-policy-fields .field-label { display: flex; flex-direction: column; gap: 5px; }
+.storage-objects { display: flex; flex-direction: column; gap: 5px; max-height: 220px; overflow: auto; }
+.storage-object { display: flex; gap: 8px; align-items: flex-start; padding: 8px; border: 1px solid #302e28; border-radius: 5px; }
+.storage-object span { min-width: 0; }
+.storage-object strong, .storage-object small { display: block; overflow-wrap: anywhere; }
+.storage-object strong { color: #c9c1b5; font: 10px "DM Mono", monospace; }
+.storage-object small { color: #888277; font-size: 10px; margin-top: 3px; }
 .approval-detail small {
   display: block;
   color: #79736c;

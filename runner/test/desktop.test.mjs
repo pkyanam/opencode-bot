@@ -50,7 +50,7 @@ test("desktop control leases bound normalized input and release held keys", asyn
   assert.throws(() => desktop.acquireControl("other"), /already controlled/);
   await desktop.releaseControl(lease.token);
   assert.deepEqual(calls.slice(0, 4), [
-    { command: "xdotool", args: ["mousemove", "--sync", "500", "125", "click", "--repeat", "1", "1"], input: undefined, display: ":99" },
+    { command: "xdotool", args: ["mousemove", "500", "125", "click", "--repeat", "1", "1"], input: undefined, display: ":99" },
     { command: "xdotool", args: ["click", "--repeat", "1", "5"], input: undefined, display: ":99" },
     { command: "xdotool", args: ["keydown", "shift"], input: undefined, display: ":99" },
     { command: "xdotool", args: ["keyup", "shift"], input: undefined, display: ":99" },

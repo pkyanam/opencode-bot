@@ -43,7 +43,8 @@ import { ComputerManager } from '../packages/coordinator-cloudflare/src/index';
 import worker, { Workspace } from '../apps/control-worker/src/index';
 
 const databases: DatabaseSync[] = [];
-function fixture() {
+function fixture(withKv = false) {
+  const kv = new Map<string, unknown>();
   const db = new DatabaseSync(':memory:'); databases.push(db);
   const alarms: number[] = [];
   const queries: string[] = [];
@@ -60,6 +61,7 @@ function fixture() {
     deleteAlarm: async () => {},
     transactionSync: <T>(fn: () => T) => fn(),
   };
+  if (withKv) Object.assign(storage, { get: async (key: string) => kv.get(key), put: async (key: string, value: unknown) => { kv.set(key, value); }, delete: async (key: string) => kv.delete(key) });
   const env: any = { APP_TOKEN: 'test-owner-token', RUNNER_TOKEN: 'test-runner-token', SANDBOX: {} };
   const state: any = { storage, blockConcurrencyWhile: (fn: () => Promise<any>) => fn(), waitUntil: () => {} };
   let workspace = new Workspace(state, env);
@@ -75,7 +77,7 @@ function fixture() {
     const thread = await request('/api/threads', 'POST', { botId: bot.body.id, title: 'Example' });
     return { bot: bot.body, thread: thread.body };
   };
-  return { db, request, create, env, alarms, queries, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
+  return { db, request, create, env, alarms, queries, kv, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
 afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; });
 
@@ -883,4 +885,51 @@ describe('Computer control and native MCP proxy', () => {
     expect(result.body.servers[0].name).toBe('cloudflare');
     expect((await f.request('/api/mcps/execute-anything', 'POST', {})).status).toBe(404);
   });
+});
+
+
+describe('deployment storage management', () => {
+  it('measures storage without waking the computer and protects the current checkpoint', async () => {
+    const f = fixture(true);
+    f.kv.set('computer-checkpoint:shared', { manifest: { checkpointKey: 'checkpoints/shared/current.tar.gz' } });
+    const remove = vi.fn();
+    f.env.ARTIFACTS = { list: async () => ({ objects: [{ key: 'checkpoints/shared/current.tar.gz', size: 100 }, { key: 'checkpoints/shared/old.tar.gz', size: 50 }, { key: 'uploads/photo.png', size: 20 }], truncated: false }), delete: remove };
+    const result = await f.request('/api/storage');
+    expect(result.status).toBe(200);
+    expect(result.body.totals.bytes).toBe(170);
+    expect(result.body.objects[0].protected).toBe(true);
+    expect(remote.calls).toEqual([]);
+    expect((await f.request('/api/storage/cleanup', 'POST', { keys: ['checkpoints/shared/current.tar.gz'] })).status).toBe(400);
+    expect((await f.request('/api/storage/cleanup', 'POST', { keys: ['uploads/photo.png'] })).status).toBe(400);
+    expect(remove).not.toHaveBeenCalled();
+    expect((await f.request('/api/storage/cleanup', 'POST', { keys: ['checkpoints/shared/old.tar.gz'] })).status).toBe(200);
+    expect(remove).toHaveBeenCalledWith(['checkpoints/shared/old.tar.gz']);
+  });
+  it('validates policy and never starts a cold Computer for automatic backup', async () => {
+    const f = fixture(true);
+    f.env.ARTIFACTS = { list: async () => ({ objects: [], truncated: false }) };
+    expect((await f.request('/api/storage/policy', 'POST', { automatic: true, intervalMinutes: 0, keepLatest: 2, budgetBytes: 2 ** 30 })).status).toBe(400);
+    const policy = { automatic: true, intervalMinutes: 60, keepLatest: 2, budgetBytes: 2 ** 31 };
+    expect((await f.request('/api/storage/policy', 'POST', policy)).status).toBe(200);
+    expect(f.kv.get('backup:policy')).toEqual(policy);
+    await f.alarm();
+    expect(remote.calls).toEqual([]);
+  });
+});
+
+it('automatically commits a checkpoint only for changed, warm, idle workspaces', async () => {
+  const f = fixture(true);
+  f.env.ARTIFACTS = { list: async () => ({ objects: [], truncated: false }), delete: vi.fn() };
+  f.kv.set('backup:dirtyAt', Date.now() - 2 * 60 * 60_000);
+  const prepare = vi.spyOn(ComputerManager.prototype, 'prepare').mockResolvedValue({ state: 'ready', handle: {}, runnerState: { instanceId: 'warm' } } as any);
+  const checkpoint = vi.spyOn(ComputerManager.prototype, 'checkpoint').mockResolvedValue({ manifest: { id: 'automatic', durable: true }, runnerInstanceId: 'warm', committedAt: new Date().toISOString() } as any);
+  try {
+    await f.request('/api/computer/readiness');
+    await new Promise(resolve => setImmediate(resolve));
+    await f.alarm();
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+    expect(f.kv.get('backup:lastAutomaticAt')).toEqual(expect.any(String));
+    await f.alarm();
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+  } finally { prepare.mockRestore(); checkpoint.mockRestore(); }
 });

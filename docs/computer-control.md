@@ -36,6 +36,17 @@ Additional owned nodes still have their documented desktop-streaming limitations
 
 ## Preserve files before upgrading
 
+Settings → Storage measures the deployment's R2 objects and defaults automatic
+idle checkpoints to every 60 minutes, keeping the latest two within a 2 GiB
+budget. Selective cleanup requires confirmation and only deletes unprotected
+checkpoint objects; use Workspace → Files when you mean to delete workspace
+files. The R2 10 GB-month free allowance is account-wide across deployments,
+not a dedicated workspace quota or billing guarantee. Containers require
+Workers Paid ($5/month) plus compute, and memory/disk are charged while a
+container is awake, including idle time, so the R2 meter is not a deployment
+cost estimate. See [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
+and [Containers pricing](https://developers.cloudflare.com/containers/platform/pricing/).
+
 Cloudflare Sandbox disks are ephemeral. Checkpoints preserve application state,
 shared files, and the browser profile in R2. The Cloudflare provider uses multipart
 uploads and ranged restores for archives up to 2 GiB; adapters without those
