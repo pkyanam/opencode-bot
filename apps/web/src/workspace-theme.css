@@ -101,3 +101,19 @@
 .files-explorer .file-preview-head .file-preview-actions { flex-direction: row; align-items: center; }
 .files-explorer .files-search input { width: 100%; min-width: 0; }
 .files-explorer .files-actions { flex-wrap: wrap; justify-content: flex-end; }
+
+/* File documents use the same safe Markdown renderer as conversations. */
+.file-preview-head > div:first-child { min-width:0; }
+.file-preview-head strong { overflow-wrap:anywhere; }
+.files-explorer .file-preview-head .file-preview-actions { flex-shrink:0; gap:8px; }
+.file-preview-toggle { font:12px/1.5 inherit; min-width:64px; }
+.file-document-preview { padding:clamp(20px,3vw,40px); max-height:65vh; overflow:auto; }
+.file-document-preview .markdown-content { max-width:900px; margin-inline:auto; font-size:15px; line-height:1.8; overflow-wrap:anywhere; }
+.file-document-preview .markdown-content h1 { font-size:1.8em; }
+.file-document-preview .markdown-content h2 { font-size:1.4em; border-bottom:1px solid #35332d; padding-bottom:8px; }
+.file-document-preview .markdown-content img { max-width:100%; }
+.file-pdf-preview { display:block; width:100%; height:65vh; border:0; }
+.files-explorer .file-preview.file-preview-expanded { position:fixed; inset:20px; z-index:90; margin:0; display:flex; flex-direction:column; box-shadow:0 0 0 100vmax #000b; }
+.file-preview-expanded .file-document-preview,.file-preview-expanded .file-source-preview,.file-preview-expanded .file-pdf-preview { flex:1; max-height:none; min-height:0; }
+.file-preview-expanded .file-image-preview { min-height:0; object-fit:contain; flex:1; }
+@media(max-width:640px) { .file-preview-head { align-items:flex-start; gap:14px; flex-wrap:wrap; } .files-explorer .file-preview.file-preview-expanded { inset:8px; } }

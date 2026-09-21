@@ -14,13 +14,16 @@ import {
   Trash2,
   FolderPlus,
   X,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { api, type FileArtifact } from "../api";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./ui/dialog";
 import { Button } from "./ui/button";
+import { MarkdownContent } from "./markdown-content";
 
 const isText = (path: string) =>
-  /\.(txt|md|mdx|json|js|jsx|ts|tsx|css|html|yml|yaml|xml|sh|py|toml|log)$/i.test(
+  /\.(txt|md|markdown|mdx|json|jsonl|csv|js|jsx|ts|tsx|css|html|yml|yaml|xml|sh|py|toml|log|ini|conf|sql|rs|go)$/i.test(
     path,
   );
 const fmtSize = (value = 0) =>
@@ -36,6 +39,12 @@ export function FilesExplorer() {
   const [sort, setSort] = useState<"name" | "modified">("name");
   const [selected, setSelected] = useState<FileArtifact | null>(null);
   const [preview, setPreview] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [sourceView, setSourceView] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const markdown = /\.(md|markdown|mdx)$/i.test(selected?.path ?? "");
+  const pdf = /\.pdf$/i.test(selected?.path ?? "");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -96,27 +105,36 @@ export function FilesExplorer() {
   }, [items, current, query, sort]);
   const open = async (item: FileArtifact) => {
     previewController.current?.abort();
-    setImagePreview(""); setPreview("");
+    setImagePreview(""); setPreview(""); setPreviewError(""); setPreviewLoading(false); setSourceView(false);
     if (item.kind === "directory") {
       setSelected(null); setPath(item.path); setQuery(""); return;
     }
     setSelected(item);
     const controller = new AbortController();
     previewController.current = controller;
-    if ((item.size ?? 0) > 5 * 1024 * 1024) { setPreview("This file is too large to preview. Use Download to open it locally."); return; }
+    if ((item.size ?? 0) > 5 * 1024 * 1024) { setPreviewError("This file is too large to preview. Use Download to open it locally."); return; }
+    setPreviewLoading(true);
     try {
       if (isText(item.path)) {
         const text = await api.fileContent(item.path, controller.signal);
         if (!controller.signal.aborted) setPreview(text.length > 200_000 ? text.slice(0, 200_000) + "\n… Preview truncated. Download for the complete file." : text || "Empty file");
-      } else if (/\.(png|jpe?g|gif|webp)$/i.test(item.path)) {
+      } else if (/\.(png|jpe?g|gif|webp|avif|pdf)$/i.test(item.path)) {
         const blob = await api.fileDownload(item.path, controller.signal);
-        if (!controller.signal.aborted) setImagePreview(URL.createObjectURL(blob));
+        if (!controller.signal.aborted) setImagePreview(URL.createObjectURL(/\.pdf$/i.test(item.path) ? new Blob([blob], { type: "application/pdf" }) : blob));
       }
     } catch (e) {
-      if (!controller.signal.aborted) setPreview(e instanceof Error ? e.message : "Preview unavailable.");
+      if (!controller.signal.aborted) setPreviewError(e instanceof Error ? e.message : "Preview unavailable.");
+    } finally {
+      if (!controller.signal.aborted) setPreviewLoading(false);
     }
   };
   useEffect(() => () => previewController.current?.abort(), []);
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
   const download = async (item: FileArtifact) => {
     try {
       const blob = await api.fileDownload(item.path);
@@ -316,7 +334,7 @@ export function FilesExplorer() {
         )}
       </div>
       {selected && (
-        <div className="file-preview">
+        <div className={`file-preview${expanded ? " file-preview-expanded" : ""}`}>
           <div className="file-preview-head">
             <div>
               <strong>{selected.path}</strong>
@@ -325,6 +343,9 @@ export function FilesExplorer() {
               </small>
             </div>
             <div className="file-preview-actions">
+              {markdown && <button className="file-preview-toggle" onClick={() => setSourceView(!sourceView)} aria-pressed={sourceView}>{sourceView ? "Preview" : "Source"}</button>}
+              <button onClick={() => void download(selected)} aria-label="Download file" title="Download"><Download size={16} /></button>
+              <button onClick={() => setExpanded(!expanded)} aria-label={expanded ? "Collapse preview" : "Expand preview"} title={expanded ? "Collapse" : "Expand"}>{expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
               <button
                 onClick={() => {
                   setAction("rename");
@@ -338,25 +359,25 @@ export function FilesExplorer() {
                 <Trash2 size={15} />
               </button>
               <button
-                onClick={() => { previewController.current?.abort(); setSelected(null); setImagePreview(""); }}
+                onClick={() => { previewController.current?.abort(); setSelected(null); setImagePreview(""); setExpanded(false); }}
                 aria-label="Close preview"
               >
                 <X size={17} />
               </button>
             </div>
           </div>
-          {selected.kind === "directory" ? <p className="surface-empty">Folder in your shared workspace.</p> : imagePreview ? (
+          {previewLoading ? <div className="surface-empty" role="status"><LoaderCircle size={20} className="spin" /><p>Loading preview…</p></div> : previewError ? <p className="surface-empty" role="alert">{previewError}</p> : selected.kind === "directory" ? <p className="surface-empty">Folder in your shared workspace.</p> : imagePreview && pdf ? <object className="file-pdf-preview" data={imagePreview} type="application/pdf" aria-label={selected.path}><p>Your browser cannot display this PDF. <Button onClick={() => void download(selected)}>Download PDF</Button></p></object> : imagePreview ? (
             <img
               className="file-image-preview"
               src={imagePreview}
               alt={selected.path}
             />
           ) : preview ? (
-            <pre>{preview}</pre>
+            markdown && !sourceView ? <div className="file-document-preview"><MarkdownContent>{preview}</MarkdownContent></div> : <pre className="file-source-preview">{preview}</pre>
           ) : (
             <div className="surface-empty">
               <File size={22} />
-              <p>Preview is available for text files.</p>
+              <p>No inline preview for this file type. Download it to open locally.</p>
               <Button onClick={() => void download(selected)}>
                 <Download size={14} /> Download
               </Button>
