@@ -183,3 +183,25 @@ test("custom provider writes the documented v2 config schema atomically and keep
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('computer browser is directly exposed and attaches to the live desktop CDP browser', async () => {
+  const root=await mkdtemp(join(tmpdir(),'computer-browser-'));
+  const directory=join(root,'workspace');
+  const previousDisplay=process.env.DISPLAY;
+  try {
+    const runtime=new OpenCode2Runtime({root,directory,browser:true,
+      desktop:{start:async()=>{},display:':99'},
+      service:{ensure:async()=>({url:'http://127.0.0.1:4096'}),headers:()=>({})},
+      openCodeFactory:()=>({server:{info:async()=>({})},mcp:{list:async()=>({data:[{name:'computer_browser',status:{status:'connected'}}]})}})
+    });
+    await runtime.start();
+    for(const file of [join(root,'config/opencode/opencode.json'),join(directory,'opencode.json')]) {
+      const config=JSON.parse(await readFile(file,'utf8'));
+      const browser=config.mcp.servers.computer_browser;
+      assert.equal(browser.codemode,false);
+      assert.equal(browser.command[browser.command.indexOf('--cdp-endpoint')+1],'http://127.0.0.1:9222');
+      assert.equal(browser.command.includes('--headless'),false);
+      assert.equal(config.mcp.servers.browser,undefined);
+    }
+  } finally { if(previousDisplay===undefined)delete process.env.DISPLAY;else process.env.DISPLAY=previousDisplay;await rm(root,{recursive:true,force:true}); }
+});

@@ -15,6 +15,7 @@ import {
   HardDrive,
   KeyRound,
   LoaderCircle,
+  Maximize2,
   Menu,
   MessageSquare,
   Monitor,
@@ -1215,6 +1216,7 @@ function ComputerPreview({
 }) {
   const [frame, setFrame] = useState<string>();
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const previous = useRef<string | undefined>(undefined);
   const [reconnect, setReconnect] = useState(0);
   useEffect(() => {
@@ -1367,7 +1369,18 @@ function ComputerPreview({
               </span>
             </div>
             {frame ? (
-              <img src={frame} alt="Live view of the shared computer" />
+              <button
+                type="button"
+                className="computer-preview-expand"
+                onClick={() => setExpanded(true)}
+                aria-label="Expand live computer preview"
+                title="Expand live computer preview"
+              >
+                <img src={frame} alt="Live view of the shared computer" />
+                <span className="computer-preview-expand-icon" aria-hidden="true">
+                  <Maximize2 size={16} />
+                </span>
+              </button>
             ) : (
               <div className="preview-placeholder">
                 {error ? (
@@ -1390,6 +1403,20 @@ function ComputerPreview({
                 )}
               </div>
             )}
+            <Dialog open={expanded} onOpenChange={setExpanded}>
+              <DialogContent className="computer-preview-dialog">
+                <DialogTitle className="computer-preview-dialog-title">
+                  Live computer preview
+                </DialogTitle>
+                {frame && (
+                  <img
+                    src={frame}
+                    alt="Live view of the shared computer"
+                    className="computer-preview-expanded-frame"
+                  />
+                )}
+              </DialogContent>
+            </Dialog>
             <p>Shared by your bots. Close this panel to pause the preview.</p>
           </div>
         )

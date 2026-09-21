@@ -50,7 +50,7 @@ export class OpenCode2Runtime {
       const configPath = `${this.root}/config/opencode/opencode.json`;
       let config = await readConfig(configPath);
       config.mcp ??= {}; config.mcp.servers ??= {};
-      config.mcp.servers.browser = createPlaywrightMcpServer({
+      config.mcp.servers.computer_browser = { ...createPlaywrightMcpServer({
         command: process.env.PLAYWRIGHT_MCP_BIN ?? '/opt/opencode-bot/runner/node_modules/.bin/playwright-mcp',
         executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? '/opt/ms-playwright/chromium-1246/chrome-linux64/chrome',
         noSandbox: true,
@@ -59,7 +59,8 @@ export class OpenCode2Runtime {
           cdpEndpoint: process.env.OPENCODE_BOT_CDP_ENDPOINT ?? "http://127.0.0.1:9222",
           cdpTimeoutMs: 30_000,
         } : {}),
-      });
+      }), codemode: false };
+      if (config.mcp.servers.browser?.command?.some(part => String(part).includes("playwright-mcp"))) delete config.mcp.servers.browser;
       await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
       // Project configuration is location-scoped. Writing it beside the
       // workspace makes MCP discovery deterministic when the daemon's cwd is
@@ -67,7 +68,8 @@ export class OpenCode2Runtime {
       const projectConfigPath = `${this.directory}/opencode.json`;
       const projectConfig = await readConfig(projectConfigPath);
       projectConfig.mcp ??= {}; projectConfig.mcp.servers ??= {};
-      projectConfig.mcp.servers.browser = config.mcp.servers.browser;
+      projectConfig.mcp.servers.computer_browser = config.mcp.servers.computer_browser;
+      if (projectConfig.mcp.servers.browser?.command?.some(part => String(part).includes("playwright-mcp"))) delete projectConfig.mcp.servers.browser;
       await writeFile(projectConfigPath, JSON.stringify(projectConfig), { mode: 0o600 });
     }
     if (this.botTools) {
@@ -104,7 +106,7 @@ export class OpenCode2Runtime {
     return this.client;
   }
 
-  async waitForBrowserMcp(timeoutMs = 30_000, serverName = "browser") {
+  async waitForBrowserMcp(timeoutMs = 30_000, serverName = "computer_browser") {
     const deadline = Date.now() + timeoutMs;
     let last;
     do {

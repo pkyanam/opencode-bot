@@ -141,7 +141,7 @@ The current vertical slice includes:
   OpenCode permission replies;
 - bot instructions, memory/skills, interval routines with overlap suppression,
   and missed-tick coalescing;
-- authenticated artifact upload/download and a headed Playwright MCP browser visible in a live desktop pane;
+- authenticated artifact upload/download and a headed Playwright MCP browser visible in a live desktop pane; click its preview to expand it to the app window;
 - native OpenCode terminal with responsive sizing and the full native command UI;
 - searchable live model catalog, named conversations, chronological transcripts, and provider error details;
 - Settings → OpenCode → Provider connections key, OAuth, credential label/activation/removal, and
@@ -187,7 +187,14 @@ selection; those are design targets, not shipped features.
 
 ## Qualification and model access
 
-The current local suite reports **102 passing tests** covering real SQLite
+The `computer_browser` MCP integration controls the same headed Chromium
+instance displayed in the live preview. Its tools are directly available to
+each Bot; it does not require the OpenCode desktop app or its experimental
+browser connection. A live Scout request successfully navigated to
+`https://opencode.ai/`, verified its title, and displayed that page in the
+expanded computer stream.
+
+The current local suite reports **103 passing tests** covering real SQLite
 coordination, provider contracts, artifact paths, owned-node routing/receipts,
 setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
 That harness runs isolated OpenCode CLI 2.0.11 against a local fake
