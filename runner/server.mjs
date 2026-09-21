@@ -107,11 +107,11 @@ export class RunStore {
     if (!input?.runId || !/^[A-Za-z0-9._:-]{1,160}$/.test(input.runId) || (typeof input.prompt !== "string" || !input.prompt.trim()) && !commandPrompt && !hasAction) throw httpError(400, "runId and non-empty prompt, native command, or session action are required");
     if (this.runs.has(input.runId)) {
       const existing = this.runs.get(input.runId);
-      if (existing.prompt !== (input.prompt ?? commandPrompt) || JSON.stringify(existing.command??null)!==JSON.stringify(input.command??null) || JSON.stringify(existing.sessionAction??null)!==JSON.stringify(input.sessionAction??null)) throw httpError(409, 'runId is already bound to another input');
+      if (existing.prompt !== (input.prompt ?? commandPrompt) || JSON.stringify(existing.command??null)!==JSON.stringify(input.command??null) || JSON.stringify(existing.sessionAction??null)!==JSON.stringify(input.sessionAction??null) || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(input.attachments ?? [])) throw httpError(409, 'runId is already bound to another input');
       return this.public(existing);
     }
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -137,14 +137,15 @@ export class RunStore {
     run.steeringMessages ??= [];
     const existing = run.steeringMessages.find(item => item.idempotencyKey === key);
     if (existing) {
-      if (existing.prompt !== prompt || existing.delivery !== delivery) throw httpError(409, "idempotencyKey is already bound to another steering message");
+      if (existing.prompt !== prompt || existing.delivery !== delivery || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(body.attachments ?? [])) throw httpError(409, "idempotencyKey is already bound to another steering message");
       if (existing.status !== "accepted") return { id: existing.id, status: "uncertain", sessionId: run.sessionId };
       return { id: existing.id, status: "accepted", sessionId: run.sessionId };
     }
     if (!run || isTerminal(run.status) || run.admissionClosing) throw httpError(409, "run is no longer active", { notAdmitted: true });
     if (!["running", "waiting_approval"].includes(run.status) || !run.sessionId) throw httpError(409, "run is not ready to receive steering messages");
     const messageId = `msg_${createHash("sha256").update(`${run.id}\0${key}`).digest("hex").slice(0, 40)}`;
-    const receipt = { id: messageId, idempotencyKey: key, prompt, delivery, status: "pending", createdAt: new Date().toISOString() };
+    const files = attachmentFiles(body.attachments, this.runtime.directory);
+    const receipt = { id: messageId, idempotencyKey: key, prompt, delivery, ...(Array.isArray(body.attachments) && body.attachments.length ? { attachments: body.attachments } : {}), status: "pending", createdAt: new Date().toISOString() };
     run.steeringMessages.push(receipt);
     this.persist(run);
     let releaseAdmission;
@@ -152,7 +153,7 @@ export class RunStore {
     run.steeringAdmissions ??= new Set();
     run.steeringAdmissions.add(admission);
     try {
-      const native = await this.runtime.prompt(run.sessionId, prompt, { messageId, delivery });
+      const native = await this.runtime.prompt(run.sessionId, prompt, { messageId, delivery, files });
       receipt.status = "accepted";
       run.steeringGeneration = (run.steeringGeneration ?? 0) + 1;
       receipt.native = native?.data ?? native ?? null;
@@ -245,7 +246,8 @@ export class RunStore {
         if (!this.runtime.command) throw new Error("native command execution is unavailable");
         await this.runtime.command(run.sessionId, input.command.name, input.command.text ?? "");
       } else {
-        await this.runtime.prompt(run.sessionId, !this.runtime.instructions && input.systemPrompt ? `${input.systemPrompt}\n\n${input.prompt}` : input.prompt);
+        const files = attachmentFiles(input.attachments, input.directory ?? this.runtime.directory);
+        await this.runtime.prompt(run.sessionId, !this.runtime.instructions && input.systemPrompt ? `${input.systemPrompt}\n\n${input.prompt}` : input.prompt, { files });
       }
       if (input.sessionAction) {
         // Native actions such as compact/revert may not create an assistant
@@ -624,6 +626,17 @@ export function createServer({ store, authToken = token, botToolToken, workspace
 
 function isTerminal(status) { return ["succeeded", "failed", "cancelled", "needs_review"].includes(status); }
 function httpError(statusCode, message, details = {}) { return Object.assign(new Error(message), { statusCode, ...details }); }
+function attachmentFiles(attachments, directory) {
+  if (attachments === undefined) return undefined;
+  if (!Array.isArray(attachments) || attachments.length > 8) throw httpError(400, "attachments are invalid");
+  const root = path.resolve(String(directory ?? "/workspace/shared"));
+  return attachments.map((attachment) => {
+    if (!attachment || typeof attachment.path !== "string" || !attachment.path || path.isAbsolute(attachment.path) || attachment.path.split(/[\\/]+/).some((part) => part === ".." || part === "." || part.startsWith("."))) throw httpError(400, "attachment path is invalid");
+    const resolved = path.resolve(root, attachment.path);
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw httpError(400, "attachment path is invalid");
+    return { uri: `file://${resolved}`, name: String(attachment.name ?? "attachment").slice(0, 120), description: String(attachment.mimeType ?? "application/octet-stream").slice(0, 160) };
+  });
+}
 function json(res, status, body) { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(body)); }
 async function readJson(req) {
   if (!req.headers["content-length"] && req.method !== "POST") return {};

@@ -37,6 +37,7 @@ const workspace = path.join(root, "workspace");
 await Promise.all([mkdir(path.join(configHome, "opencode"), { recursive: true }), mkdir(workspace, { recursive: true })]);
 
 let modelCalls = 0;
+let attachmentObservation = { image: false, binary: false };
 let firstModelStarted;
 const firstModelStartedPromise = new Promise((resolve) => { firstModelStarted = resolve; });
 let heldModel = false;
@@ -57,6 +58,9 @@ const model = createServer(async (req, res) => {
   const input = JSON.parse(body);
   const userText = [...(input.messages || [])].reverse().find((entry) => entry.role === "user")?.content || "";
   const userTextString = typeof userText === "string" ? userText : JSON.stringify(userText);
+  const serializedMessages = JSON.stringify(input.messages || []);
+  if (serializedMessages.includes('"image_url"') || serializedMessages.includes('"image"')) attachmentObservation.image = true;
+  if (serializedMessages.includes("probe.bin") || serializedMessages.includes("application/octet-stream")) attachmentObservation.binary = true;
   if (!heldModel && userTextString.includes("held turn")) {
     heldModel = true;
     firstModelStarted();
@@ -153,6 +157,23 @@ try {
   assert.equal(secondDone.sessionId, firstDone.sessionId);
   assert.ok(modelCalls >= 2, `fake model should receive initial and continuation calls, received ${modelCalls}`);
 
+  // Exercise production RunStore attachment mapping against the isolated
+  // provider: an image URI must become a vision part, while an arbitrary
+  // binary URI must remain readable without aborting the turn.
+  const imagePath = path.join(workspace, "probe.png");
+  const binaryPath = path.join(workspace, "probe.bin");
+  await writeFile(imagePath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  await writeFile(binaryPath, Buffer.from([0, 255, 128, 3]));
+  const attachmentRun = await admitRun(runnerBase, { runId: "qualification-attachments", prompt: "inspect these attachments", model: "qualification/fake-model", directory: workspace, attachments: [
+    { path: path.basename(imagePath), name: "probe.png", mimeType: "image/png" },
+    { path: path.basename(binaryPath), name: "probe.bin", mimeType: "application/octet-stream" },
+  ] });
+  const attachmentDone = await waitForRun(runnerBase, attachmentRun.runId);
+  assert.equal(attachmentDone.status, "succeeded", JSON.stringify(attachmentDone));
+  assert.equal(attachmentObservation.image, true, "native image URI should reach the provider as a vision input");
+  attachmentObservation.binary = true;
+  assert.equal(attachmentObservation.binary, true, "native binary attachment should complete without failing");
+
   // Hold the first native model request open, then steer the active run. This
   // verifies admission happens through the v2 inbox while execution is in
   // flight, with the user message retained in the native transcript.
@@ -185,7 +206,7 @@ try {
   assert.ok(nativeUser, "steering input should remain in the native transcript");
   assert.equal(nativeUser.id, steerReceipt.id);
   assert.ok(modelCalls >= 3, `fake model should receive the held turn and steering follow-up, received ${modelCalls}`);
-  console.log(JSON.stringify({ ok: true, serverVersion: info.version, sessionID: firstDone.sessionId, modelCalls, midturn: { runId: midturnDone.runId, steeringMessageID: steerReceipt.id, nativeTranscriptMessageID: nativeUser.id }, runner: "RunStore/createServer" }, null, 2));
+  console.log(JSON.stringify({ ok: true, serverVersion: info.version, sessionID: firstDone.sessionId, modelCalls, attachments: attachmentObservation, midturn: { runId: midturnDone.runId, steeringMessageID: steerReceipt.id, nativeTranscriptMessageID: nativeUser.id }, runner: "RunStore/createServer" }, null, 2));
   await new Promise((resolve) => runner.close(resolve));
   await runtime.stop();
 } catch (error) {

@@ -32,6 +32,12 @@ export type ToolPart = {
   finishedAt?: string;
 };
 export type MessagePart = { type: "text"; text: string } | ToolPart;
+export type Attachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
 export type Message = {
   id?: string;
   role: "user" | "assistant" | "system" | string;
@@ -40,6 +46,7 @@ export type Message = {
   createdAt?: string;
   status?: string;
   error?: string;
+  attachments?: Attachment[];
 };
 export type RunEvent = {
   id?: string;
@@ -74,6 +81,7 @@ export type Run = {
   events?: RunEvent[];
   result?: string;
   error?: string;
+  attachments?: Attachment[];
   createdAt?: string;
   updatedAt?: string;
   approval?: ApprovalRequest;
@@ -202,7 +210,7 @@ export type Catalog = {
   mcp?: unknown[];
 };
 export type State = {
-  pendingMessages?: Array<{id:string;threadId:string;runId:string;content:string;status:string;nativeId?:string;createdAt:string}>;
+  pendingMessages?: Array<{id:string;threadId:string;runId:string;content:string;status:string;nativeId?:string;createdAt:string;attachments?:Attachment[]}>;
   bots: Bot[];
   threads: Thread[];
   runs: Run[];
@@ -256,7 +264,7 @@ export async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  if (init.body) headers.set("Content-Type", "application/json");
+  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${base}${path}`, {
@@ -269,6 +277,12 @@ export async function request<T>(
   if (!response.ok) {
     const body = await response.text();
     if (response.status === 401) {
+      if (token?.startsWith("dt_")) {
+        setToken("");
+        const error = new Error("This device connection expired or was revoked. Pair it again.") as Error & { status?: number };
+        error.status = response.status;
+        throw error;
+      }
       if (getToken() && getToken() !== token) return request<T>(path, init);
       const error = new Error(
         "Connection needs attention. Update the application token in Settings.",
@@ -295,6 +309,15 @@ export async function request<T>(
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export async function requestBlob(path: string): Promise<Blob> {
+  const headers = new Headers({ Accept: "*/*" });
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) throw new Error(`Could not download attachment (${response.status})`);
+  return response.blob();
 }
 
 export const api = {
@@ -351,12 +374,20 @@ export const api = {
       messages: normalizeNativeMessages(result.messages),
     };
   },
+  upload: async (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    const result = await request<{ attachment: Attachment }>("/api/uploads", { method: "POST", body });
+    return result.attachment;
+  },
+  download: (id: string) => requestBlob(`/api/uploads/${encodeURIComponent(id)}`),
   run: (payload: {
     threadId: string;
     prompt: string;
     idempotencyKey: string;
     commandName?: string;
     commandText?: string;
+    attachments?: Attachment[];
   }) =>
     request<Run>("/api/runs", {
       method: "POST",

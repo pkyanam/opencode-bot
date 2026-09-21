@@ -152,6 +152,7 @@ export class OpenCode2Runtime {
     const input = {
       sessionID: sessionId,
       text,
+      ...(Array.isArray(options.files) && options.files.length ? { files: options.files } : {}),
       ...(options.messageId ? { id: options.messageId } : {}),
       ...(options.resume !== undefined ? { resume: options.resume } : {}),
       ...(options.delivery ? { delivery: options.delivery } : {})
@@ -193,17 +194,21 @@ export class OpenCode2Runtime {
     let commands = { data: [] }, mcp = { data: [] };
     const deadline = Date.now() + 8_000;
     do {
-      [models, providers, agents, commands, mcp] = await Promise.all([
-        this.client.model.list(location),
-        this.client.provider.list(location),
-        this.client.agent.list(location),
-        this.client.command.list(location),
-        this.client.mcp.list(location),
-      ]);
+      // Models are the registry that signals that location hydration has
+      // completed. Retrying every registry while waiting causes repeated
+      // provider/MCP/command work during daemon startup; poll only the
+      // readiness endpoint, then read the remaining registries once.
+      models = await this.client.model.list(location);
       if ((models?.data?.length ?? 0) > 0) break;
       if (Date.now() >= deadline) break;
       await new Promise((resolve) => setTimeout(resolve, 250));
     } while (Date.now() < deadline);
+    [providers, agents, commands, mcp] = await Promise.all([
+      this.client.provider.list(location),
+      this.client.agent.list(location),
+      this.client.command.list(location),
+      this.client.mcp.list(location),
+    ]);
     return {
       runtime: { name: "opencode2", version: this.version, experimentalApi: true },
       location: directory,

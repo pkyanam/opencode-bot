@@ -62,6 +62,22 @@ test("catalog waits for lazy provider hydration and exposes native actions", asy
   assert.equal(reads > 1, true);
 });
 
+test("catalog hydration retries only the model readiness endpoint", async () => {
+  let modelReads = 0;
+  const calls = { provider: 0, agent: 0, command: 0, mcp: 0 };
+  const fake = {
+    model: { list: async () => ({ data: modelReads++ >= 2 ? [{ id: "ready" }] : [] }) },
+    provider: { list: async () => { calls.provider++; return { data: [] }; } },
+    agent: { list: async () => { calls.agent++; return { data: [] }; } },
+    command: { list: async () => { calls.command++; return { data: [] }; } },
+    mcp: { list: async () => { calls.mcp++; return { data: [] }; } },
+  };
+  const runtime = new OpenCode2Runtime({ client: fake });
+  await runtime.catalog();
+  assert.equal(modelReads, 3);
+  assert.deepEqual(calls, { provider: 1, agent: 1, command: 1, mcp: 1 });
+});
+
 test("native session actions map to v2 compact and revert APIs", async () => {
   const calls = [];
   const fake = {

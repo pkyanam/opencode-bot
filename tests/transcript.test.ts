@@ -33,6 +33,14 @@ it('preserves tool-only activity and interleaves text with the latest tool state
   expect(JSON.stringify(messages)).not.toContain('base64');
 });
 
+it('preserves canonical attachments on user records and native upload URIs', () => {
+  const id = 'att_0123456789abcdef0123456789abcdef';
+  const [message] = normalizeNativeMessages([{ id: 'user-file', type: 'user', text: 'Review this', attachments: [{ id, name: 'brief.pdf', mimeType: 'application/pdf', size: 42 }] }]);
+  expect(message.attachments).toEqual([{ id, name: 'brief.pdf', mimeType: 'application/pdf', size: 42 }]);
+  const [native] = normalizeNativeMessages([{ id: 'native-file', type: 'user', text: 'Image', content: [{ type: 'file', uri: `uploads/${id}/photo.png`, name: 'photo.png', mimeType: 'image/png', size: 7 }] }]);
+  expect(native.attachments?.[0]).toMatchObject({ id, name: 'photo.png', mimeType: 'image/png' });
+});
+
 it('bounds tool output and hides credential fields while retaining a useful error', () => {
   const [message]=normalizeNativeMessages([{id:'m',type:'assistant',content:[{type:'tool',id:'t',name:'request',state:{status:'error',input:{headers:{Authorization:'Bearer secret'},api_key:'secret',url:'https://example.com?token=hidden'},error:'Connection refused',content:[{type:'text',text:'x'.repeat(40000)}]}}]}]);
   const tool=message.parts?.[0];

@@ -1,3 +1,4 @@
+import { DeviceSettings, readClientIdentity, type ClientIdentity } from "./device-connection";
 import { useEffect, useState } from "react";
 import {
   Copy,
@@ -46,6 +47,8 @@ export function SettingsModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const [identity, setIdentity] = useState<ClientIdentity | null>(null);
+  useEffect(() => { void readClientIdentity().then(setIdentity).catch(() => {}); }, []);
   const [tab, setTab] = useState("connection");
   const [token, setValue] = useState(getToken());
   const [notice, setNotice] = useState("");
@@ -146,22 +149,23 @@ export function SettingsModal({
               <KeyRound size={16} />
               Connection
             </TabsTrigger>
-            <TabsTrigger value="nodes">
+            {identity?.role === "owner" && <TabsTrigger value="devices"><Monitor size={16} />Devices</TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="nodes">
               <Monitor size={16} />
               Computers
-            </TabsTrigger>
-            <TabsTrigger value="telegram">
+            </TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="telegram">
               <MessageSquare size={16} />
               Telegram
-            </TabsTrigger>
-            <TabsTrigger value="runtime">
+            </TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="runtime">
               <Server size={16} />
               OpenCode
-            </TabsTrigger>
-            <TabsTrigger value="updates">
+            </TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="updates">
               <RefreshCw size={16} />
               Updates
-            </TabsTrigger>
+            </TabsTrigger>}
           </TabsList>
           <div className="settings-body">
             {error && (
@@ -177,8 +181,7 @@ export function SettingsModal({
             <TabsContent value="connection">
               <h3>Connection</h3>
               <p>
-                The application token connects this browser to your control
-                server. It is saved on this device and shared across tabs.
+                {identity?.role === "client" ? `Connected as ${identity.deviceName ?? "a paired device"}. This device has its own credential; the owner can revoke it in Devices.` : "Your owner connection is saved in this browser. Use Devices to connect another browser without sharing this token."}
               </p>
               <label className="field-label" htmlFor="settings-token">
                 Application token
@@ -219,6 +222,7 @@ export function SettingsModal({
                 </button>
               </div>
             </TabsContent>
+            {identity?.role === "owner" && <TabsContent value="devices"><DeviceSettings /></TabsContent>}
             <TabsContent value="nodes">
               <div className="settings-section-head">
                 <h3>Computers</h3>

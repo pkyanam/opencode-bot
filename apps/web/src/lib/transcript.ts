@@ -1,4 +1,4 @@
-import type { Message, MessagePart, ToolPart } from "../api";
+import type { Attachment, Message, MessagePart, ToolPart } from "../api";
 
 const secretKey = /(?:authorization|password|passwd|secret|token|api[_-]?key|cookie|credential)/i;
 function redactText(value: string, limit = 16000): string {
@@ -43,8 +43,16 @@ export function normalizeNativeMessages(input: any[]): Message[] {
     .map((m): Message => {
       const parts: MessagePart[] = [];
       const toolPositions = new Map<string, number>();
+      const attachments: Attachment[] = [];
+      const addAttachment = (part: any) => {
+        const nativeAttachmentId = String(part?.id ?? part?.fileId ?? '').match(/^att_[0-9a-f-]{20,80}$/i)?.[0] ?? String(part?.url ?? part?.uri ?? part?.source ?? '').match(/(?:^|\/)uploads\/(att_[0-9a-f-]{20,80})(?:\/|$)/i)?.[1];
+        if (!nativeAttachmentId) return;
+        if (attachments.some(item => item.id === nativeAttachmentId)) return;
+        attachments.push({ id: nativeAttachmentId, name: String(part?.name ?? part?.filename ?? 'Attachment'), mimeType: String(part?.mimeType ?? part?.mime ?? 'application/octet-stream'), size: Number(part?.size ?? 0) || 0 });
+      };
+      for (const attachment of [...(m.attachments ?? []), ...(m.files ?? [])]) addAttachment(attachment);
       if (m.type === 'user') parts.push({type:'text', text:String(m.text ?? '')});
-      else for (const [index, part] of (m.content ?? []).entries()) {
+      else { for (const [index, part] of (m.content ?? []).entries()) {
         if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) parts.push({type:'text',text:part.text});
         if (part.type === 'tool') {
           const tool = toolPart(part, `${m.id}-tool-${index}`);
@@ -52,10 +60,12 @@ export function normalizeNativeMessages(input: any[]): Message[] {
           if (position === undefined) { toolPositions.set(tool.id, parts.length); parts.push(tool); }
           else parts[position] = tool;
         }
-      }
-      return { id:m.id, role:m.type, parts, content:parts.filter((part): part is {type:'text',text:string} => part.type==='text').map(part=>part.text).join('\n'), createdAt:timestamp(m.time?.created),
+        if (part.type === 'file' || part.type === 'image') addAttachment(part);
+      } }
+      if (m.type === 'user') for (const part of m.content ?? []) if (part.type === 'file' || part.type === 'image') addAttachment(part);
+      return { id:m.id, role:m.type, parts, ...(attachments.length ? {attachments} : {}), content:parts.filter((part): part is {type:'text',text:string} => part.type==='text').map(part=>part.text).join('\n'), createdAt:timestamp(m.time?.created),
         ...(m.error ? {error:typeof m.error==='string'?m.error:String(m.error.message??m.error.type??'OpenCode could not complete this request.')} : {}) };
-    }).filter(m => m.content.trim() || m.parts?.some(part=>part.type==='tool') || m.error);
+    }).filter(m => m.content.trim() || m.attachments?.length || m.parts?.some(part=>part.type==='tool') || m.error);
 }
 
 /** Public lifecycle notices belong beside chat/tool messages, never raw events. */

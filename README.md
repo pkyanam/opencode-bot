@@ -77,6 +77,11 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 - **Take it to Telegram.** Connect a BotFather bot, scan the pairing link, and
   receive formatted replies and progress. Local mode uses polling; Cloudflare
   uses HTTPS webhooks.
+- **Send the source material.** Attach images and files in web chat or Telegram.
+  Supported images reach the model; other files are available in its workspace.
+- **Pair another client.** Settings → Devices gives you a one-use code or QR.
+  Each trusted browser or client gets an independently revocable credential.
+  External agents can connect through the [authenticated MCP endpoint](docs/mcp.md).
 - **Keep talking.** Messages sent during a turn enter OpenCode’s native steering
   inbox; work for a busy computer stays queued. Stop works while awaiting approval.
 - **Update from Settings.** Connect deployment access once, then update the app
@@ -118,7 +123,7 @@ React + shadcn/ui · Cloudflare Workers · SQLite Durable Objects · Sandbox · 
 
 [Getting started](docs/getting-started.md) · [Architecture](docs/02-design.md) ·
 [Research](docs/01-research.md) · [Skills & plugins](docs/10-extensions.md) ·
-[Desktop plan](docs/06-desktop.md) · [Release pipeline](docs/releasing.md) · [Test evidence](tests/qualification/README.md)
+[Mobile client plan](docs/mobile-client.md) · [Desktop plan](docs/06-desktop.md) · [Release pipeline](docs/releasing.md) · [Test evidence](tests/qualification/README.md)
 
 [MIT licensed](LICENSE). Independent community project;
 [acknowledgments and trademarks](NOTICE.md).

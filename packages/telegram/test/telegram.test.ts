@@ -80,6 +80,37 @@ describe("TelegramService", () => {
     expect(routed).toHaveLength(1);
   });
 
+  it("downloads the highest-resolution Telegram media and routes it with an optional caption", async () => {
+    const store = new InMemoryTelegramStore();
+    const routed: any[] = [];
+    const api = fakeApi({
+      getFile: vi.fn(async (_token, fileId) => ({ file_path: `documents/${fileId}.pdf`, file_size: 4 })),
+      downloadFile: vi.fn(async () => new Uint8Array([1, 2, 3, 4]).buffer),
+    });
+    const service = new TelegramService({ store, api, onMessage: async (message) => { routed.push(message); return { runId: "run_media" }; } });
+    await service.configureBot({ botId: "bot_1", token: "bot-token-secret", webhookUrl: "https://example.test/hooks/telegram", webhookSecret: "secret_123456789" });
+    const link = await service.createPairingLink({ botId: "bot_1", ownerUserId: "owner", threadId: "thr" });
+    await service.handleWebhook("bot_1", await request({ update_id: 10, message: { from: { id: 42 }, chat: { id: 42 }, text: `/start ${link.deepLink.split("start=")[1]}` } }, "secret_123456789"));
+    const result = await service.handleWebhook("bot_1", await request({ update_id: 11, message: { from: { id: 42 }, chat: { id: 42 }, document: { file_id: "file_1", file_name: "report.pdf", mime_type: "application/pdf", file_size: 4 }, } }, "secret_123456789"));
+    expect(result).toMatchObject({ accepted: true, routed: true, runId: "run_media" });
+    expect(routed[0]).toMatchObject({ text: "Review the attached file.", attachments: [{ fileId: "file_1", name: "report.pdf", mimeType: "application/pdf", size: 4 }] });
+    expect(new Uint8Array(routed[0].attachments[0].bytes)).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  it("acknowledges oversized media without retrying the webhook and supplies a default caption", async () => {
+    const store = new InMemoryTelegramStore();
+    const api = fakeApi({ getFile: vi.fn(async () => ({ file_path: "documents/large.bin", file_size: 10 * 1024 * 1024 + 1 })), downloadFile: vi.fn(async () => new ArrayBuffer(0)) });
+    const routed: any[] = [];
+    const service = new TelegramService({ store, api, onMessage: async (message) => { routed.push(message); return { runId: "run_large" }; } });
+    await service.configureBot({ botId: "bot_1", token: "bot-token-secret", webhookUrl: "https://example.test/hooks/telegram", webhookSecret: "secret_123456789" });
+    const link = await service.createPairingLink({ botId: "bot_1", ownerUserId: "owner", threadId: "thr" });
+    await service.handleWebhook("bot_1", await request({ update_id: 30, message: { from: { id: 42 }, chat: { id: 42 }, text: `/start ${link.deepLink.split("start=")[1]}` } }, "secret_123456789"));
+    const result = await service.handleWebhook("bot_1", await request({ update_id: 31, message: { from: { id: 42 }, chat: { id: 42 }, caption: "", document: { file_id: "large", file_size: 10 * 1024 * 1024 + 1 } } }, "secret_123456789"));
+    expect(result).toMatchObject({ status: 200, accepted: true, reason: "unsupported_media" });
+    expect(routed).toHaveLength(0);
+    expect(api.sent.at(-1)?.text).toMatch(/too large/);
+  });
+
   it("delivers a terminal run result to the paired chat in Telegram-sized chunks", async () => {
     const store = new InMemoryTelegramStore();
     const api = fakeApi();

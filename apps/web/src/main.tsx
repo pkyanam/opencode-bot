@@ -1,7 +1,11 @@
+import { DeviceConnectionGate } from "./components/device-connection";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ExtensionDiscovery } from "./components/extension-discovery";
 import { mergeActivityMessages } from "./lib/transcript";
-import { Delegations } from "./components/delegations";
+import {
+  mergeDelegationTimeline,
+  type Delegation,
+} from "./lib/delegation-timeline";
 import { SettingsModal } from "./components/settings";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -51,6 +55,7 @@ import {
   isComputerWarmingUpError,
   MemoryItem,
   Message,
+  Attachment,
   Routine,
   Run,
   setToken,
@@ -62,6 +67,7 @@ import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { MarkdownContent } from "./components/markdown-content";
+import { AttachmentCards, ChatAttachments, uploadFiles } from "./components/chat-attachments";
 import { ToolActivity } from "./components/tool-activity";
 import { RunProgress } from "./components/run-progress";
 const NativeTerminal = React.lazy(() =>
@@ -70,6 +76,7 @@ const NativeTerminal = React.lazy(() =>
   })),
 );
 import "./styles.css";
+import "./workspace-theme.css";
 
 const isActive = (s?: string) =>
   [
@@ -115,6 +122,38 @@ const pendingApproval = (run?: Run): ApprovalRequest | undefined => {
   } as ApprovalRequest;
 };
 
+function DelegationCard({
+  item,
+  onNavigate,
+}: {
+  item: Delegation;
+  onNavigate: (botId: string, threadId: string) => void;
+}) {
+  return (
+    <details className="delegation-card" key={item.id}>
+      <summary>
+        <span>
+          <ArrowUpRight size={15} /> {item.targetBotName}
+        </span>
+        <span>{item.status.replaceAll("_", " ")}</span>
+      </summary>
+      <p>{item.prompt}</p>
+      {item.result && (
+        <MarkdownContent className="delegation-result">
+          {item.result}
+        </MarkdownContent>
+      )}
+      {item.error && <p role="alert">{item.error}</p>}
+      <button
+        className="soft-btn"
+        onClick={() => onNavigate(item.targetBotId, item.targetThreadId)}
+      >
+        Open {item.targetBotName}’s conversation <ArrowUpRight size={14} />
+      </button>
+    </details>
+  );
+}
+
 function App() {
   const [connectionRevision, setConnectionRevision] = useState(0);
   useEffect(() => {
@@ -143,6 +182,9 @@ function App() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentsUploading, setAttachmentsUploading] = useState(false);
+  const draftStore = useRef<Record<string, { prompt: string; attachments: Attachment[] }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
@@ -168,8 +210,12 @@ function App() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [liveMessages, setLiveMessages] = useState<Message[]>([]);
   const [threadSessionId, setThreadSessionId] = useState<string>();
+  const [delegations, setDelegations] = useState<Delegation[]>([]);
 
+  const refreshInFlight = useRef(false);
   const refresh = async (quiet = false) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     try {
       if (!quiet) setLoading(true);
       const next = await api.state();
@@ -182,6 +228,7 @@ function App() {
       if (!quiet)
         setError(e instanceof Error ? e.message : "Could not load workspace");
     } finally {
+      refreshInFlight.current = false;
       if (!quiet) setLoading(false);
     }
   };
@@ -236,11 +283,14 @@ function App() {
       if (!cancelled) retryTimer = window.setTimeout(pollReadiness, 3000);
     };
     void pollReadiness();
-    const id = window.setInterval(() => refresh(true), 4000);
+    const wake = () => { if (!document.hidden) void refresh(true); };
+    document.addEventListener("visibilitychange", wake);
+    const id = window.setInterval(wake, 4000);
     return () => {
       cancelled = true;
       window.clearTimeout(retryTimer);
       window.clearInterval(id);
+      document.removeEventListener("visibilitychange", wake);
     };
   }, [connectionRevision]);
   useEffect(() => {
@@ -296,6 +346,34 @@ function App() {
   const bot =
     state.bots.find((b) => b.id === (selectedBot ?? thread?.botId)) ??
     state.bots[0];
+  const composerKey = `${bot?.id ?? "none"}:${thread?.id ?? "new"}`;
+  const activeComposerKey = useRef(composerKey);
+  activeComposerKey.current = composerKey;
+  const uploadInFlight = useRef(false);
+  useEffect(() => {
+    const draft = draftStore.current[composerKey];
+    setPrompt(draft?.prompt ?? "");
+    setAttachments(draft?.attachments ?? []);
+  }, [composerKey]);
+  const saveDraft = (nextPrompt: string, nextAttachments = attachments) => {
+    draftStore.current[composerKey] = { prompt: nextPrompt, attachments: nextAttachments };
+  };
+  const reportAttachmentError = (message: string) => setError(message);
+  const applyAttachmentUpdate = (update: Attachment[] | ((current: Attachment[]) => Attachment[])) => {
+    const draft = draftStore.current[composerKey] ?? { prompt, attachments };
+    const next = typeof update === "function" ? update(draft.attachments) : update;
+    draftStore.current[composerKey] = { ...draft, attachments: next };
+    if (activeComposerKey.current === composerKey) setAttachments(next);
+  };
+  const acceptFiles = (files: File[]) => {
+    if (uploadInFlight.current) return;
+    uploadInFlight.current = true;
+    setAttachmentsUploading(true);
+    void uploadFiles(files, attachments, applyAttachmentUpdate, reportAttachmentError).finally(() => {
+      uploadInFlight.current = false;
+      setAttachmentsUploading(false);
+    });
+  };
   useEffect(() => {
     setComposerModel(bot?.model ?? "");
   }, [bot?.id, bot?.model]);
@@ -325,7 +403,7 @@ function App() {
     let cancelled = false;
     let inFlight = false;
     const load = async () => {
-      if (cancelled || inFlight) return;
+      if (cancelled || inFlight || document.hidden) return;
       inFlight = true;
       try {
         const result = await api.threadMessages(thread.id);
@@ -342,14 +420,44 @@ function App() {
       }
     };
     void load();
+    document.addEventListener("visibilitychange", load);
     const poll = latest && isActive(latest.status)
       ? window.setInterval(() => void load(), 2000)
       : undefined;
     return () => {
       cancelled = true;
       if (poll) window.clearInterval(poll);
+      document.removeEventListener("visibilitychange", load);
     };
   }, [thread?.id, thread?.nodeId, latest?.id, latest?.status, terminalOpen]);
+  useEffect(() => {
+    if (!thread?.id) {
+      setDelegations([]);
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+    const load = async () => {
+      if (cancelled || inFlight || document.hidden) return;
+      inFlight = true;
+      try {
+        const next = await request<Delegation[]>(
+          `/api/threads/${encodeURIComponent(thread.id)}/delegations`,
+        );
+        if (!cancelled) setDelegations(next);
+      } catch {
+        // Keep the last known handoff cards while reconnecting.
+      } finally { inFlight = false; }
+    };
+    void load();
+    document.addEventListener("visibilitychange", load);
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", load);
+    };
+  }, [thread?.id]);
   const messages = useMemo(
     () =>
       liveMessages.length
@@ -385,6 +493,7 @@ function App() {
       status: "queued",
       nativeId: undefined,
       createdAt: run.createdAt ?? new Date().toISOString(),
+      attachments: run.attachments,
     }));
   const pendingRecords = [...pendingInputs, ...queuedRunInputs].sort((a, b) =>
     a.createdAt.localeCompare(b.createdAt),
@@ -412,13 +521,14 @@ function App() {
           content: input.content,
           createdAt: input.createdAt,
           status: input.status,
+          attachments: input.attachments,
         }) satisfies Message,
     );
   const fallbackMessages =
     latest?.prompt &&
     !pendingRecords.some((input) => input.content === latest.prompt)
       ? [
-          { role: "user", content: latest.prompt },
+          { role: "user", content: latest.prompt, attachments: latest.attachments },
           ...(latest.result
             ? [{ role: "assistant", content: latest.result }]
             : []),
@@ -429,6 +539,7 @@ function App() {
     ...pendingTranscript,
   ];
   const transcript = mergeActivityMessages(baseTranscript, runs);
+  const conversation = mergeDelegationTimeline(transcript, delegations);
   const working = latest && isActive(latest.status);
   const latestStatus = (latest?.status ?? "").toLowerCase();
   const botWorking = Boolean(
@@ -439,9 +550,10 @@ function App() {
       }),
   );
   const nativeSessionLocked = terminalOpen || Boolean(working) || submitting;
-  const composerBusy = submitting;
+  const composerBusy = submitting || attachmentsUploading;
   const chatScroll = useRef<HTMLDivElement>(null);
   const followConversation = useRef(true);
+  const lastConversation = conversation.at(-1);
   useEffect(() => { followConversation.current = true; }, [thread?.id]);
   useEffect(() => {
     if (!followConversation.current) return;
@@ -449,7 +561,7 @@ function App() {
       if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [thread?.id, transcript.length, transcript.at(-1)?.content, latest?.updatedAt]);
+  }, [thread?.id, conversation.length, latest?.updatedAt, lastConversation?.kind === "message" ? lastConversation.message.content : lastConversation?.delegation.updatedAt]);
   const terminalSessionId =
     threadSessionId ?? thread?.sessionId ?? thread?.runnerSessionId;
 
@@ -458,11 +570,22 @@ function App() {
     await api.updateBot(bot.id, { model: composerModel });
   };
   const clearSubmittedPrompt = (text: string) => {
-    setPrompt((current) => (current.trim() === text ? "" : current));
+    if (activeComposerKey.current === composerKey) {
+      setPrompt((current) => (current.trim() === text ? "" : current));
+      setAttachments([]);
+    }
+    saveDraft("", []);
   };
   const submit = async () => {
     const text = prompt.trim();
-    if (!text || !bot || sendInFlight.current) return;
+    if ((!text && !attachments.length) || !bot || sendInFlight.current || attachmentsUploading) return;
+    if (attachments.length && text.startsWith("/")) {
+      setError("Send attachments with an ordinary message; native slash commands do not accept files.");
+      return;
+    }
+    let submittedDraftKey = composerKey;
+    const submittedAttachments = attachments;
+    const submittedPrompt = text || "Review the attached files.";
     followConversation.current = true;
     sendInFlight.current = true;
     setSubmitting(true);
@@ -470,7 +593,11 @@ function App() {
       const targetThread =
         thread ??
         (await api.thread({ botId: bot.id, title: "New conversation" }));
-      if (!thread) setSelectedThread(targetThread.id);
+      if (!thread) {
+        submittedDraftKey = `${bot.id}:${targetThread.id}`;
+        setState(current => ({ ...current, threads: current.threads.some(item => item.id === targetThread.id) ? current.threads : [targetThread, ...current.threads] }));
+        if (activeComposerKey.current === composerKey) setSelectedThread(targetThread.id);
+      }
       const slash = text.match(/^\/([\w.:-]+)(?:\s+([\s\S]*))?$/);
       if (slash) {
         const native = catalog.commands?.find(
@@ -482,15 +609,17 @@ function App() {
             await syncComposerModel();
             await api.run({
               threadId: targetThread.id,
-              prompt: text,
+              prompt: submittedPrompt,
               idempotencyKey: key(),
               commandName: native.name,
               commandText: slash[2] ?? "",
+              attachments: submittedAttachments,
             });
             await refresh(true);
           } catch (error) {
             setError(error instanceof Error ? error.message : "Command failed");
-            setPrompt((current) => (current.trim() ? current : text));
+            if (activeComposerKey.current === submittedDraftKey) { setPrompt(current => current.trim() ? current : text); setAttachments(submittedAttachments); }
+            draftStore.current[submittedDraftKey] = { prompt: text, attachments: submittedAttachments };
           }
           return;
         }
@@ -536,13 +665,15 @@ function App() {
         await syncComposerModel();
         await api.run({
           threadId: targetThread.id,
-          prompt: text,
+          prompt: submittedPrompt,
           idempotencyKey: key(),
+          attachments: submittedAttachments,
         });
         await refresh(true);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Could not start run");
-        setPrompt((current) => (current.trim() ? current : text));
+        if (activeComposerKey.current === submittedDraftKey) { setPrompt(current => current.trim() ? current : text); setAttachments(submittedAttachments); }
+        draftStore.current[submittedDraftKey] = { prompt: text, attachments: submittedAttachments };
       }
     } catch (e) {
       setError(
@@ -856,13 +987,12 @@ function App() {
           <FilesWorkspace />
         ) : (
           <main className="main">
-            {(computerWarming || catalogWarming) && (
+            {(computerWarming || catalogWarming) && !computerOpen && (
               <div className="computer-warmup" role="status">
                 <div>
-                  <strong>Your Computer is starting in the background</strong>
+                  <strong>Preparing your computer</strong>
                   <span>
-                    You can explore bots, skills, and Settings while it
-                    gets ready. Computer features will reconnect automatically.
+                    Explore your workspace while it starts. Your bots will be ready shortly.
                   </span>
                 </div>
                 <button className="soft-btn" onClick={() => setComputerOpen(true)}>
@@ -964,7 +1094,7 @@ function App() {
                 </div>
               ) : (
                 <>
-                  {!transcript.length && !latest && (
+                  {!conversation.length && !latest && (
                     <div className="onboarding">
                       <div className="onboarding-icon">
                         <BotIcon size={22} />
@@ -989,8 +1119,19 @@ function App() {
                       )}
                     </div>
                   )}
-                  {transcript.map((m, i) => (
-                    <MessageBubble key={m.id ?? i} message={m} bot={bot} />
+                  {conversation.map((item, i) => (
+                    item.kind === "message" ? (
+                      <MessageBubble key={item.message.id ?? i} message={item.message} bot={bot} />
+                    ) : (
+                      <DelegationCard
+                        key={`delegation-${item.delegation.id}`}
+                        item={item.delegation}
+                        onNavigate={(botId, threadId) => {
+                          setSelectedBot(botId);
+                          setSelectedThread(threadId);
+                        }}
+                      />
+                    )
                   ))}
                   {latest ? (
                     <RunProgress
@@ -1000,18 +1141,6 @@ function App() {
                       ) as import("./api").ToolPart[]}
                     />
                   ) : null}
-                  {thread && bot && (
-                    <Delegations
-                      key={thread.id}
-                      threadId={thread.id}
-                      botId={bot.id}
-                      bots={state.bots}
-                      onNavigate={(botId, threadId) => {
-                        setSelectedBot(botId);
-                        setSelectedThread(threadId);
-                      }}
-                    />
-                  )}
                   {pendingApproval(latest) && (
                     <ApprovalCard
                       request={pendingApproval(latest)!}
@@ -1023,11 +1152,20 @@ function App() {
             </div>
             {bot && (
               <div className="composer-wrap">
-                <div className="composer">
+                <div className="composer" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); acceptFiles([...event.dataTransfer.files]); }}>
                   <textarea
                     aria-label="Message your bot"
                     value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
+                    onChange={(e) => { setPrompt(e.target.value); saveDraft(e.target.value); }}
+                    onPaste={(event) => {
+                      const files = [...event.clipboardData.items].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
+                      if (files.length) {
+                        event.preventDefault();
+                        const pastedText = event.clipboardData.getData("text/plain");
+                        if (pastedText) { setPrompt((current) => { const next = current + pastedText; saveDraft(next); return next; }); }
+                        acceptFiles(files);
+                      }
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
@@ -1037,6 +1175,7 @@ function App() {
                     placeholder={`Message ${bot.name}…`}
                     disabled={!bot}
                   />
+                  <ChatAttachments attachments={attachments} onChange={applyAttachmentUpdate} onFiles={acceptFiles} uploading={attachmentsUploading} />
                   <div className="composer-foot">
                     <div className="composer-hints">
                       <span>
@@ -1058,7 +1197,7 @@ function App() {
                       className="send-btn"
                       onClick={submit}
                       disabled={
-                        !prompt.trim() || !bot || composerBusy
+                        (!prompt.trim() && !attachments.length) || !bot || composerBusy
                       }
                       aria-label="Send message"
                       title="Send message"
@@ -1489,11 +1628,18 @@ function ComputerPreview({
 }) {
   const [frame, setFrame] = useState<string>();
   const [error, setError] = useState("");
+  const [warming, setWarming] = useState(false);
+  const [visible, setVisible] = useState(!document.hidden);
+  useEffect(() => {
+    const update = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
   const [expanded, setExpanded] = useState(false);
   const previous = useRef<string | undefined>(undefined);
   const [reconnect, setReconnect] = useState(0);
   useEffect(() => {
-    if (!open || nodeId) return;
+    if (!open || nodeId || !visible) return;
     const controller = new AbortController();
     let cancelled = false;
     let retryTimer: number | undefined;
@@ -1502,6 +1648,7 @@ function ComputerPreview({
       30_000,
     );
     setError("");
+    setWarming(false);
     setFrame(undefined);
     const load = async () => {
       try {
@@ -1587,9 +1734,10 @@ function ComputerPreview({
         if (!cancelled) {
           const message =
             e instanceof Error ? e.message : "Computer preview unavailable";
+          setWarming(isComputerWarmingUpError(e));
           setError(
             isComputerWarmingUpError(e)
-              ? "Your Computer is still starting. The preview will reconnect automatically."
+              ? "Preparing the computer. You can keep exploring your workspace."
               : message,
           );
           setFrame(undefined);
@@ -1613,7 +1761,7 @@ function ComputerPreview({
       previous.current && URL.revokeObjectURL(previous.current);
       previous.current = undefined;
     };
-  }, [open, reconnect, nodeId]);
+  }, [open, reconnect, nodeId, visible]);
   return (
     <aside
       className={`computer-rail ${open ? "computer-rail-open" : "computer-rail-closed"}`}
@@ -1642,7 +1790,7 @@ function ComputerPreview({
             <div className="computer-preview-head">
               <span>LIVE PREVIEW</span>
               <span className="preview-state">
-                {error ? "Unavailable" : frame ? "Streaming" : "Connecting"}
+                {warming ? "Starting" : error ? "Reconnecting" : frame ? "Streaming" : "Connecting"}
               </span>
             </div>
             {frame ? (
@@ -1660,7 +1808,7 @@ function ComputerPreview({
               </button>
             ) : (
               <div className="preview-placeholder">
-                {error ? (
+                {warming ? (<><LoaderCircle size={17} className="spin" /><span>{error}</span></>) : error ? (
                   <>
                     <AlertCircle size={17} />
                     <span>{error}</span>
@@ -2058,6 +2206,7 @@ function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
         ) : message.content ? (
           <MarkdownContent className="message-text">{message.content}</MarkdownContent>
         ) : null}
+        <AttachmentCards attachments={message.attachments} />
         {message.error && (
           <div className="message-error" role="alert">
             <strong>Request failed</strong>
@@ -2918,6 +3067,6 @@ function shortModel(model?: string) {
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <DeviceConnectionGate><App /></DeviceConnectionGate>
   </React.StrictMode>,
 );

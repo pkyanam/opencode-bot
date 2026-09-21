@@ -39,6 +39,8 @@ import {
   ComputerManager,
   DurableObjectCheckpointStore,
 } from "../../../packages/coordinator-cloudflare/src/index";
+import { PairingError, PairingService } from "./pairing";
+import { createMcpHandler } from "./mcp";
 // Re-export the Cloudflare Sandbox Durable Object class for the `SANDBOX`
 // container binding declared in wrangler.jsonc.
 export { Sandbox } from "@cloudflare/sandbox";
@@ -58,6 +60,11 @@ type Env = {
   OPENCODE_API_KEY?: string;
   ARTIFACTS?: R2Bucket;
 };
+
+const MAX_CHAT_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS = 8;
+const MAX_CHAT_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
+const ATTACHMENT_ID = /^att_[0-9a-f-]{20,80}$/;
 
 const textEncoder = new TextEncoder();
 
@@ -126,6 +133,7 @@ export class Workspace {
   private updateController?: UpdateController;
   private computerProvider?: CloudflareComputerProvider;
   private computerCoordinator?: ComputerManager;
+  private pairingService?: PairingService;
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
@@ -137,6 +145,9 @@ export class Workspace {
   private telegramService?: TelegramService;
   private nodes() {
     return (this.nodeRegistry ??= new NodeRegistry(this.state.storage.sql));
+  }
+  private pairing() {
+    return (this.pairingService ??= new PairingService(this.state.storage.sql));
   }
   private assertAssignableNode(nodeId: string): void {
     const node = this.nodes().get(nodeId);
@@ -164,6 +175,9 @@ export class Workspace {
         const run = this.createRun({
           threadId: thread.id,
           prompt: message.text,
+          attachments: message.attachments?.length
+            ? await Promise.all(message.attachments.map((attachment) => this.uploadAttachment({ bytes: attachment.bytes, name: attachment.name, mimeType: attachment.mimeType })))
+            : undefined,
           idempotencyKey: message.idempotencyKey,
         });
         return { runId: run.id };
@@ -441,9 +455,11 @@ export class Workspace {
     sql.exec(
       `CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)`,
     );
+    try { sql.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch { /* already exists */ }
     sql.exec(
       `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, error TEXT, result TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, dispatch_attempts INTEGER NOT NULL DEFAULT 0, runner_session_id TEXT, runner_sequence INTEGER NOT NULL DEFAULT 0)`,
     );
+    try { sql.exec("ALTER TABLE runs ADD COLUMN attachments TEXT"); } catch { /* already exists */ }
     try {
       sql.exec("ALTER TABLE runs ADD COLUMN command_name TEXT");
     } catch {
@@ -526,6 +542,8 @@ export class Workspace {
       `CREATE TABLE IF NOT EXISTS delegation_continuations (source_run_id TEXT PRIMARY KEY, status TEXT NOT NULL, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
     sql.exec(`CREATE TABLE IF NOT EXISTS message_inputs (idempotency_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, native_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    try { sql.exec("ALTER TABLE message_inputs ADD COLUMN attachments TEXT"); } catch { /* already exists */ }
+    sql.exec(`CREATE TABLE IF NOT EXISTS chat_attachments (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL)`);
     sql.exec(
       `CREATE TABLE IF NOT EXISTS bot_creation_requests (run_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, bot_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, request_id))`,
     );
@@ -599,6 +617,7 @@ export class Workspace {
       events,
       ...(error ? { error } : {}),
       ...(row.result ? { result: row.result } : {}),
+      ...(row.attachments ? { attachments: parseJson(row.attachments, []) } : {}),
     };
   }
   private events(runId: string, limit?: number): any[] {
@@ -618,8 +637,69 @@ export class Workspace {
   async fetch(request: Request): Promise<Response> {
     this.init();
     const url = new URL(request.url);
+    const ownerAuthorized = Boolean(this.env.APP_TOKEN && bearer(request) && safeEqual(bearer(request)!, this.env.APP_TOKEN));
+    const internalAuthorized = Boolean(url.pathname.startsWith("/internal/") && this.env.RUNNER_TOKEN && bearer(request) && safeEqual(bearer(request)!, this.env.RUNNER_TOKEN));
+    const client = ownerAuthorized ? null : await this.pairing().authenticate(bearer(request));
+    const externallyAuthenticated = url.pathname === "/api/pairing/redeem" || url.pathname === "/api/nodes" || url.pathname.startsWith("/api/nodes/") || /^\/api\/integrations\/telegram\/webhook\/[^/]+$/.test(url.pathname);
+    if (!ownerAuthorized && !internalAuthorized && !client && !externallyAuthenticated)
+      return response({ error: "unauthorized" }, 401, { "www-authenticate": "Bearer" });
+    if (client && !clientRouteAllowed(request, url))
+      return response({ error: "client credential is not authorized for this operation" }, 403);
+    if (url.pathname === "/api/mcp") {
+      return createMcpHandler({
+        authorize: () => ownerAuthorized || Boolean(client),
+        serverVersion: packageInfo.version,
+        filterTools: (_request, tools) => ownerAuthorized ? tools : tools.filter(tool => CLIENT_MCP_TOOLS.has(tool.name)),
+        invoke: async ({ path, method, body: input }) => {
+          const headers = new Headers({ Authorization: request.headers.get("authorization") ?? "" });
+          const raw = typeof input === "string";
+          const multipart = input instanceof FormData;
+          if (input !== undefined && !multipart) headers.set("content-type", raw ? "text/plain; charset=utf-8" : "application/json");
+          // Re-enter the same routes with the caller's credential. Never elevate a paired device.
+          const result = await this.fetch(new Request(new URL(path, url), {
+            method, headers, ...(input === undefined ? {} : { body: raw || multipart ? input as BodyInit : JSON.stringify(input) }),
+          }));
+          const contentType = result.headers.get("content-type") ?? "";
+          const bytes = new Uint8Array(await result.arrayBuffer());
+          if (bytes.byteLength > 10 * 1024 * 1024) return { status: 413, body: { error: "Result exceeds 10 MiB; use the file download API." } };
+          if (contentType.includes("application/json")) {
+            try { return { status: result.status, body: JSON.parse(new TextDecoder().decode(bytes)) }; }
+            catch { return { status: 502, body: { error: "Invalid JSON from workspace operation." } }; }
+          }
+          return { status: result.status, body: contentType.startsWith("text/")
+            ? { text: new TextDecoder().decode(bytes), mimeType: contentType }
+            : { contentBase64: Buffer.from(bytes).toString("base64"), mimeType: contentType || "application/octet-stream" } };
+        },
+      })(request);
+    }
     const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/(status|preview)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
+      if (url.pathname === "/api/pairing/redeem" && request.method === "POST")
+        {
+          const length = Number(request.headers.get("content-length") ?? 0);
+          if (length > 8192 || textEncoder.encode(await request.clone().text()).byteLength > 8192) throw new HttpError(413, "request body too large");
+          return response(await this.pairing().redeem(await body(request), request.headers.get("cf-connecting-ip") ?? "unknown"), 201);
+        }
+      if (url.pathname === "/api/pairing/invites" && request.method === "POST") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(await this.pairing().createInvite(await body(request)), 201);
+      }
+      if (url.pathname === "/api/pairing/devices" && request.method === "GET") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response({ devices: this.pairing().listDevices() });
+      }
+      const deletePairingInvite = url.pathname.match(/^\/api\/pairing\/invites\/([^/]+)$/);
+      if (deletePairingInvite && request.method === "DELETE") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(this.pairing().deleteInvite(decodeURIComponent(deletePairingInvite[1])));
+      }
+      const revokePairing = url.pathname.match(/^\/api\/pairing\/devices\/([^/]+)\/revoke$/);
+      if (revokePairing && request.method === "POST") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(this.pairing().revokeDevice(decodeURIComponent(revokePairing[1])));
+      }
+      if ((url.pathname === "/api/pairing/session" || url.pathname === "/api/pairing/session/me") && request.method === "GET")
+        return response(client ? { role: "client", ...client } : { role: "owner" });
       if (url.pathname === "/api/updates" || url.pathname.startsWith("/api/updates/"))
         return await this.updateRoute(request, url);
       if (typeof this.state.storage.get === "function" && await this.updates(url).active()) {
@@ -707,6 +787,17 @@ export class Workspace {
         ["GET", "POST"].includes(request.method)
       )
         return await this.fileProxy(request, url);
+      if (url.pathname === "/api/uploads" && request.method === "POST")
+        return response(await this.uploadRequest(request), 201);
+      const uploadDownload = url.pathname.match(/^\/api\/uploads\/([^/]+)$/);
+      if (uploadDownload && request.method === "GET") {
+        const item = this.one<any>("SELECT path,name,mime_type,size FROM chat_attachments WHERE id=?", uploadDownload[1]);
+        if (!item) throw new HttpError(404, "attachment not found");
+        const transport = await this.transport();
+        const result = await transport.fetch(`/files/content?path=${encodeURIComponent(item.path)}`, { method: "GET" });
+        const headers = new Headers({ "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${item.name.replace(/[^A-Za-z0-9._-]/g, "_")}"`, "cache-control": "no-store" });
+        return new Response(result.body, { status: result.status, headers });
+      }
       if (url.pathname === "/api/bots" && request.method === "GET")
         return response(this.bots());
       if (url.pathname === "/api/bots" && request.method === "POST")
@@ -828,6 +919,7 @@ export class Workspace {
         return response(await this.approve(approval[1], await body(request)));
       throw new HttpError(404, "not found");
     } catch (error) {
+      if (error instanceof PairingError) return response({ error: error.message }, error.status);
       if (computerDependent && /timeout|timed out|container.*start|not.*running|port.*available/i.test(error instanceof Error ? error.message : String(error))) {
         this.startup.invalidate();
         const readiness = this.computerReadiness();
@@ -875,7 +967,7 @@ export class Workspace {
     ).map((r) => this.run(r));
   }
   private stateView(): any {
-    return { bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at})) };
+    return { bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at,attachments:parseJson(m.attachments,[])})) };
   }
   private routines(): any[] {
     return this.rows<any>("SELECT * FROM routines ORDER BY created_at").map(
@@ -1574,19 +1666,21 @@ export class Workspace {
   private admitMessage(input: any): any {
     if (this.maintenance) throw new HttpError(409, "computer maintenance is in progress");
     if (typeof input.prompt !== "string" || !input.prompt.trim() || typeof input.idempotencyKey !== "string" || !input.idempotencyKey || typeof input.threadId !== "string" || input.command || input.commandName || input.sessionAction) return this.createRun(input);
+    const attachments = this.canonicalAttachments(input.attachments);
     const existing = this.one<any>("SELECT * FROM message_inputs WHERE idempotency_key=?", input.idempotencyKey);
     if (existing) {
       if (existing.thread_id !== input.threadId || existing.prompt !== input.prompt) throw new HttpError(409, "idempotency key conflicts with an existing message");
+      if (parseJson(existing.attachments, []).map((item: any) => item.id).join(",") !== attachments.map((item: any) => item.id).join(",")) throw new HttpError(409, "idempotency key conflicts with an existing message");
       return { ...this.run(this.one("SELECT * FROM runs WHERE id=?", existing.run_id)), messageQueued: true };
     }
     if (this.one("SELECT id FROM runs WHERE idempotency_key=?", input.idempotencyKey)) return this.createRun(input);
     const active = this.one<any>("SELECT r.* FROM runs r JOIN threads t ON t.id=r.thread_id WHERE r.thread_id=? AND t.node_id IS NULL AND r.status IN ('running','waiting_approval') ORDER BY r.created_at LIMIT 1", input.threadId);
-    if (!active) return this.createRun(input);
+    if (!active) return this.createRun({ ...input, attachments });
     if (input.prompt.length > 16000) throw new HttpError(400, "message must contain at most 16000 characters");
     if (!/^[A-Za-z0-9._:-]{1,160}$/.test(input.idempotencyKey)) throw new HttpError(400, "invalid message idempotency key");
     const now=isoNow();
-    this.state.storage.sql.exec("INSERT INTO message_inputs (idempotency_key,thread_id,run_id,prompt,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", input.idempotencyKey,input.threadId,active.id,input.prompt,"pending",now,now);
-    this.state.storage.sql.exec("INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)", id("msg"),input.threadId,"user",input.prompt,now);
+    this.state.storage.sql.exec("INSERT INTO message_inputs (idempotency_key,thread_id,run_id,prompt,status,attachments,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", input.idempotencyKey,input.threadId,active.id,input.prompt,"pending",attachments.length ? json(attachments) : null,now,now);
+    this.state.storage.sql.exec("INSERT INTO messages (id,thread_id,role,content,attachments,created_at) VALUES (?,?,?,?,?,?)", id("msg"),input.threadId,"user",input.prompt,attachments.length ? json(attachments) : null,now);
     this.event(active.id,"message.queued",{id:input.idempotencyKey,delivery:"steer"});
     this.state.storage.setAlarm(Date.now()+100);
     return {...this.run(active),messageQueued:true};
@@ -1597,20 +1691,21 @@ export class Workspace {
       const run=this.one<any>("SELECT * FROM runs WHERE id=?",input.run_id);
       if(!run) continue;
       if(TERMINAL.has(run.status) && input.status==='pending'){
-        const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key},false);
+        const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key,attachments:parseJson(input.attachments,[])},false);
         this.state.storage.sql.exec("UPDATE message_inputs SET status='queued',run_id=?,updated_at=? WHERE idempotency_key=?",queued.id,isoNow(),input.idempotency_key);
         continue;
       }
       this.state.storage.sql.exec("UPDATE message_inputs SET status='dispatching',updated_at=? WHERE idempotency_key=?",isoNow(),input.idempotency_key);
       try {
         const transport=await this.transport();
-        const result=await transport.fetch(`/runs/${input.run_id}/messages`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({idempotencyKey:input.idempotency_key,prompt:input.prompt,delivery:"steer"})});
+        const inputAttachments = parseJson<any[]>(input.attachments, []);
+        const result=await transport.fetch(`/runs/${input.run_id}/messages`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({idempotencyKey:input.idempotency_key,prompt:input.prompt,delivery:"steer",...(inputAttachments.length ? { attachments: inputAttachments } : {})})});
         const receipt=await result.json() as any;
         if(result.ok && receipt.status==='accepted'){
           this.state.storage.sql.exec("UPDATE message_inputs SET status='accepted',native_id=?,updated_at=? WHERE idempotency_key=?",receipt.id??null,isoNow(),input.idempotency_key);
           this.event(input.run_id,"message.accepted",{id:input.idempotency_key,delivery:"steer"});
         }else if(result.status===409 && receipt.notAdmitted===true){
-          const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key},false);
+          const queued=this.createRun({threadId:input.thread_id,prompt:input.prompt,idempotencyKey:input.idempotency_key,attachments:parseJson(input.attachments,[])},false);
           this.state.storage.sql.exec("UPDATE message_inputs SET status='queued',run_id=?,updated_at=? WHERE idempotency_key=?",queued.id,isoNow(),input.idempotency_key);
         }else{
           this.state.storage.sql.exec("UPDATE message_inputs SET status='needs_review',updated_at=? WHERE idempotency_key=?",isoNow(),input.idempotency_key);
@@ -1665,24 +1760,28 @@ export class Workspace {
     }
     input = {
       ...input,
+      attachments: this.canonicalAttachments(input.attachments),
       prompt:
         input.prompt ||
+        (input.attachments?.length ? "Review the attached file." :
         (input.commandName
           ? `/${input.commandName} ${input.commandText ?? ""}`.trim()
           : input.sessionAction
             ? `/${input.sessionAction}`
-            : ""),
+            : "")),
     };
     if (!input.threadId || !input.prompt || !input.idempotencyKey)
       throw new HttpError(
         400,
         "threadId, prompt, and idempotencyKey are required",
       );
-    const thread = this.one(
-      "SELECT id FROM threads WHERE id = ?",
+    const thread = this.one<any>(
+      "SELECT id,node_id FROM threads WHERE id = ?",
       input.threadId,
     );
     if (!thread) throw new HttpError(404, "thread not found");
+    if (input.attachments.length && thread.node_id)
+      throw new HttpError(409, "Attachments for owned computer nodes are not supported yet; choose the Cloudflare computer.");
     const existing = this.one<any>(
       "SELECT * FROM runs WHERE idempotency_key = ?",
       String(input.idempotencyKey),
@@ -1696,6 +1795,7 @@ export class Workspace {
         (existing.session_action ?? "") !== (input.sessionAction ?? "") ||
         (existing.session_action_input ?? "") !==
           (input.sessionActionInput ? json(input.sessionActionInput) : "")
+        || parseJson(existing.attachments, []).map((item: any) => item.id).join(",") !== input.attachments.map((item: any) => item.id).join(",")
       )
         throw new HttpError(
           409,
@@ -1715,15 +1815,16 @@ export class Workspace {
     // the run receipt, but do not present it as a user-authored message.
     if (input.allowBotMessaging !== false && recordUserMessage)
       this.state.storage.sql.exec(
-        "INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)",
+        "INSERT INTO messages (id,thread_id,role,content,attachments,created_at) VALUES (?,?,?,?,?,?)",
         id("msg"),
         input.threadId,
         "user",
         String(input.prompt),
+        input.attachments?.length ? json(input.attachments) : null,
         now,
       );
     this.state.storage.sql.exec(
-      "INSERT INTO runs (id,thread_id,prompt,status,idempotency_key,created_at,updated_at,command_name,command_text,session_action,session_action_input,bot_messaging) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO runs (id,thread_id,prompt,status,idempotency_key,created_at,updated_at,command_name,command_text,session_action,session_action_input,bot_messaging,attachments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
       runId,
       input.threadId,
       String(input.prompt),
@@ -1736,6 +1837,7 @@ export class Workspace {
       input.sessionAction ?? null,
       input.sessionActionInput ? json(input.sessionActionInput) : null,
       input.allowBotMessaging === false ? 0 : 1,
+      input.attachments.length ? json(input.attachments) : null,
     );
     this.event(runId, "run.queued", { prompt: String(input.prompt) });
     this.state.storage.setAlarm(Date.now() + 100);
@@ -2386,6 +2488,58 @@ export class Workspace {
       headers: outHeaders,
     });
   }
+  private canonicalAttachments(input: unknown): any[] {
+    if (input === undefined) return [];
+    if (!Array.isArray(input) || input.length > MAX_CHAT_ATTACHMENTS)
+      throw new HttpError(400, "attachments must be an array of at most 8 items");
+    const result: any[] = [];
+    let totalBytes = 0;
+    for (const item of input) {
+      const attachmentId = typeof item === "string" ? item : item?.id;
+      if (typeof attachmentId !== "string" || !ATTACHMENT_ID.test(attachmentId))
+        throw new HttpError(400, "attachment id is invalid");
+      const row = this.one<any>("SELECT id,path,name,mime_type,size FROM chat_attachments WHERE id=?", attachmentId);
+      if (!row) throw new HttpError(404, "attachment not found");
+      totalBytes += Number(row.size);
+      if (totalBytes > MAX_CHAT_ATTACHMENTS_BYTES) throw new HttpError(413, "attachments are too large");
+      result.push({ id: row.id, path: row.path, name: row.name, mimeType: row.mime_type, size: Number(row.size) });
+    }
+    return result;
+  }
+  private async uploadAttachment(file: { bytes: ArrayBuffer; name: string; mimeType?: string }): Promise<any> {
+    if (file.bytes.byteLength < 1 || file.bytes.byteLength > MAX_CHAT_UPLOAD_BYTES)
+      throw new HttpError(413, "file too large");
+    let name = (file.name || "upload").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "upload";
+    if (name.startsWith(".")) name = `_${name}`;
+    const attachmentId = id("att");
+    const path = `uploads/${attachmentId}/${name}`;
+    const mimeType = typeof file.mimeType === "string" && file.mimeType.length <= 160 ? file.mimeType : "application/octet-stream";
+    const transport = await this.transport();
+    const result = await transport.fetch(`/files?path=${encodeURIComponent(path)}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream", "content-length": String(file.bytes.byteLength) },
+      body: file.bytes,
+    });
+    if (!result.ok) throw new HttpError(result.status >= 400 && result.status < 500 ? result.status : 502, "attachment upload failed");
+    this.state.storage.sql.exec("INSERT INTO chat_attachments(id,path,name,mime_type,size,created_at) VALUES(?,?,?,?,?,?)", attachmentId, path, name, mimeType, file.bytes.byteLength, isoNow());
+    return { id: attachmentId, name, mimeType, size: file.bytes.byteLength };
+  }
+  private async uploadRequest(request: Request): Promise<any> {
+    const length = Number(request.headers.get("content-length") ?? 0);
+    if (length > MAX_CHAT_UPLOAD_BYTES + 64 * 1024) throw new HttpError(413, "file too large");
+    let form: FormData;
+    try {
+      const raw = await request.arrayBuffer();
+      if (raw.byteLength > MAX_CHAT_UPLOAD_BYTES + 64 * 1024) throw new HttpError(413, "file too large");
+      form = await new Request(request.url, { method: "POST", headers: request.headers, body: raw }).formData();
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(400, "multipart form data is required");
+    }
+    const item = form.get("file");
+    if (!(item instanceof File)) throw new HttpError(400, "file is required");
+    return { attachment: await this.uploadAttachment({ bytes: await item.arrayBuffer(), name: item.name, mimeType: item.type }) };
+  }
   private async nativeMessages(threadId: string): Promise<Response> {
     if (this.maintenance)
       throw new HttpError(409, "computer maintenance is in progress");
@@ -2405,7 +2559,23 @@ export class Workspace {
     if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } });
     const payload = await result.json() as any;
     const internalPrompts = new Set(this.rows<any>("SELECT prompt FROM runs WHERE thread_id=? AND bot_messaging=0", threadId).map(run => run.prompt));
-    return response({ ...payload, messages: (payload.messages ?? []).filter((message: any) => !(message.type === "user" && internalPrompts.has(message.text))) });
+    const messages = (payload.messages ?? []).filter((message: any) => !(message.type === "user" && internalPrompts.has(message.text))).map((message: any) => ({
+      ...message,
+      files: Array.isArray(message.files) ? message.files.map((file: any) => {
+        const uri = String(file?.source?.uri ?? file?.uri ?? file?.id ?? "");
+        const match = uri.match(/(att_[0-9a-f-]{20,80})/i);
+        const row = match ? this.one<any>("SELECT id,path,name,mime_type,size FROM chat_attachments WHERE id=?", match[1]) : undefined;
+        return row ? { ...file, data: "", source: { type: "uri", uri: `file:///workspace/shared/${row.path}` }, id: row.id, name: row.name, mime: row.mime_type, mimeType: row.mime_type, size: Number(row.size) } : { ...file, data: "" };
+      }) : message.files,
+      content: Array.isArray(message.content) ? message.content.map((part: any) => {
+        if (!(part?.type === "file" || part?.type === "image")) return part;
+        const uri = String(part.uri ?? part.url ?? part.id ?? "");
+        const match = uri.match(/(att_[0-9a-f-]{20,80})/i);
+        const row = match ? this.one<any>("SELECT id,name,mime_type,size FROM chat_attachments WHERE id=?", match[1]) : undefined;
+        return row ? { ...part, data: "", id: row.id, name: row.name, mime: row.mime_type, mimeType: row.mime_type, size: Number(row.size) } : { ...part, ...(part.data !== undefined ? { data: "" } : {}) };
+      }) : message.content,
+    }));
+    return response({ ...payload, messages });
   }
   private botInstructions(thread: any): string {
     const memories = this.rows<any>(
@@ -2649,6 +2819,7 @@ export class Workspace {
       runId: run.id,
       threadId: run.thread_id,
       prompt: run.prompt,
+      ...(run.attachments ? { attachments: parseJson(run.attachments, []) } : {}),
       ...(run.command_name
         ? { command: { name: run.command_name, text: run.command_text ?? "" } }
         : {}),
@@ -3203,6 +3374,29 @@ export class Workspace {
 
 const TERMINAL = new Set(["succeeded", "failed", "needs_review", "cancelled"]);
 
+const CLIENT_MCP_TOOLS = new Set([
+  "bot_list", "bot_create", "bot_update", "bot_delete", "thread_list", "thread_create", "thread_update", "thread_delete", "thread_messages",
+  "run_list", "run_start", "run_get", "run_events", "run_cancel", "run_approve", "delegation_list", "delegation_create",
+  "skill_list", "skill_create", "skill_update", "skill_delete", "file_list", "file_read", "file_write", "upload_file", "attachment_read",
+  "computer_readiness", "computer_status", "pairing_session", "routine_list", "routine_create", "routine_update", "routine_delete",
+  "memory_list", "memory_add", "memory_delete", "catalog_get", "thread_bot_skills", "thread_assign_skills", "thread_action",
+]);
+
+function clientRouteAllowed(request: Request, url: URL): boolean {
+  if ((url.pathname === "/api/pairing/session" || url.pathname === "/api/pairing/session/me") && request.method === "GET") return true;
+  if (url.pathname === "/api/state" && request.method === "GET") return true;
+  if (/^\/api\/bots\/[^/]+\/telegram(?:\/|$)/.test(url.pathname)) return false;
+  if (/^\/api\/(bots|threads|runs|routines)(?:\/|$)/.test(url.pathname) || url.pathname === "/api/bots" || url.pathname === "/api/threads" || url.pathname === "/api/runs" || url.pathname === "/api/routines") return true;
+  if (/^\/api\/(files|catalog)(?:\/|$)/.test(url.pathname)) return true;
+  if (/^\/api\/uploads(?:\/|$)/.test(url.pathname)) return true;
+  if (/^\/api\/computer\/(readiness|status|preview)$/.test(url.pathname)) return true;
+  if (/^\/api\/terminal(?:\/|$)/.test(url.pathname)) return true;
+  // Trusted clients can manage workspace skills; installation/admin routes remain owner-only.
+  if (url.pathname === "/api/skills" || /^\/api\/skills\//.test(url.pathname)) return true;
+  if (/^\/api\/mcp(?:\/|$)/.test(url.pathname)) return true;
+  return false;
+}
+
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -3214,7 +3408,7 @@ const worker = {
         ? env.ASSETS.fetch(request)
         : new Response("control worker", { status: 404 });
     const credential = bearer(request);
-    const authorized = url.pathname.startsWith("/internal/")
+    const ownerAuthorized = url.pathname.startsWith("/internal/")
       ? Boolean(
           env.RUNNER_TOKEN &&
           credential &&
@@ -3223,11 +3417,13 @@ const worker = {
       : Boolean(
           env.APP_TOKEN && credential && safeEqual(credential, env.APP_TOKEN),
         );
+    const pairingPublic = url.pathname === "/api/pairing/redeem" && request.method === "POST";
+    const pairingClient = url.pathname === "/api/pairing/session" || url.pathname === "/api/pairing/session/me" || clientRouteAllowed(request, url);
     const alternateAuth =
       url.pathname === "/api/nodes" ||
       url.pathname.startsWith("/api/nodes/") ||
       /^\/api\/integrations\/telegram\/webhook\/[^/]+$/.test(url.pathname);
-    if (!authorized && !alternateAuth)
+    if (!ownerAuthorized && !alternateAuth && !pairingPublic && !pairingClient)
       return response({ error: "unauthorized" }, 401, {
         "www-authenticate": "Bearer",
       });
@@ -3237,7 +3433,7 @@ const worker = {
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     const idObject = env.WORKSPACE.idFromName("owner");
     await env.WORKSPACE.get(idObject).fetch(
-      new Request("https://workspace/internal/sweep", { method: "POST" }),
+      new Request("https://workspace/internal/sweep", { method: "POST", headers: env.RUNNER_TOKEN ? { Authorization: `Bearer ${env.RUNNER_TOKEN}` } : undefined }),
     );
   },
 };

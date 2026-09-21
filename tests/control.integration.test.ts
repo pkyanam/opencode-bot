@@ -12,6 +12,8 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           const run = { runId: input.runId, sessionId: input.sessionId ?? `session-${input.runId}`, status: 'running', events: [], final: '' };
           remote.runs.set(input.runId, run); return Response.json(run, { status: 202 });
         }
+        if (path.startsWith('/files?') && init.method === 'POST') return Response.json({ path: new URL(`http://runner${path}`).searchParams.get('path'), bytes: Number(new Headers(init.headers).get('content-length') ?? 0) }, { status: 201 });
+        if (path.startsWith('/files/content?') && init.method === 'GET') return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'application/octet-stream' } });
         if (/^\/runs\/[^/]+\/messages$/.test(path) && init.method === 'POST') {
           const input = JSON.parse(String(init.body)); remote.steerCalls.push(input);
           const configured = remote.steerResponses.shift() ?? { status: 200, body: { id: `native-${input.idempotencyKey}`, status: 'accepted' } };
@@ -198,7 +200,8 @@ describe('native command and session action admission', () => {
     const f = fixture(); const { thread } = await f.create();
     const active = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Work on the issue', idempotencyKey: 'active-run' });
     await f.alarm();
-    const input = { threadId: thread.id, prompt: 'Also check the tests', idempotencyKey: 'steer-1' };
+    f.db.prepare('INSERT INTO chat_attachments VALUES (?,?,?,?,?,?)').run('att_11111111-1111-1111-1111-111111111111', 'uploads/att_11111111-1111-1111-1111-111111111111/tests.txt', 'tests.txt', 'text/plain', 4, new Date().toISOString());
+    const input = { threadId: thread.id, prompt: 'Also check the tests', idempotencyKey: 'steer-1', attachments: [{ id: 'att_11111111-1111-1111-1111-111111111111' }] };
     const first = await f.request('/api/runs', 'POST', input);
     const replay = await f.request('/api/runs', 'POST', input);
     expect(first.status).toBe(202);
@@ -207,7 +210,7 @@ describe('native command and session action admission', () => {
     expect((await f.request('/api/state')).body.pendingMessages).toHaveLength(1);
 
     await f.alarm();
-    expect(remote.steerCalls).toEqual([{ idempotencyKey: 'steer-1', prompt: input.prompt, delivery: 'steer' }]);
+    expect(remote.steerCalls).toMatchObject([{ idempotencyKey: 'steer-1', prompt: input.prompt, delivery: 'steer', attachments: [{ id: 'att_11111111-1111-1111-1111-111111111111' }] }]);
     const state = (await f.request('/api/state')).body;
     expect(state.pendingMessages[0]).toMatchObject({ id: 'steer-1', runId: active.body.id, status: 'accepted', nativeId: 'native-steer-1' });
     expect((await f.request(`/api/runs/${active.body.id}/events`)).body.filter((event: any) => event.type === 'message.accepted')).toHaveLength(1);
@@ -300,6 +303,39 @@ it('keeps node pairing owner-only while admitting a single-use node credential',
   const listing=await f.request('/api/nodes');
   expect(listing.body.nodes[0].name).toBe('My Mac');
   expect(JSON.stringify(listing.body)).not.toContain(registered.body.nodeSecret);
+});
+
+it('keeps first-party client pairing scoped, revocable, and separate from owner auth', async () => {
+  const f = fixture();
+  expect((await f.request('/api/pairing/invites', 'POST', {}, null)).status).toBe(401);
+  const invite = await f.request('/api/pairing/invites', 'POST', { label: 'Browser' });
+  expect(invite.status).toBe(201);
+  const redeemed = await f.request('/api/pairing/redeem', 'POST', { secret: invite.body.qrSecret, deviceName: 'Browser', clientType: 'web' }, null);
+  expect(redeemed.status).toBe(201);
+  const deviceToken = redeemed.body.deviceToken;
+  expect((await f.request('/api/pairing/session/me', 'GET', undefined, deviceToken)).body.role).toBe('client');
+  expect((await f.request('/api/state', 'GET', undefined, deviceToken)).status).toBe(200);
+  expect((await f.request('/api/pairing/invites', 'POST', {}, deviceToken)).status).toBe(401);
+  const devices = await f.request('/api/pairing/devices');
+  expect(devices.body.devices[0]).toMatchObject({ deviceName: 'Browser', inviteId: invite.body.inviteId });
+  expect((await f.request(`/api/pairing/devices/${redeemed.body.deviceId}/revoke`, 'POST')).status).toBe(200);
+  expect((await f.request('/api/pairing/session/me', 'GET', undefined, deviceToken)).status).toBe(401);
+});
+
+it('stores uploads under generated attachment ids and resolves only canonical run attachments', async () => {
+  const f = fixture();
+  const form = new FormData();
+  form.append('file', new File([new Uint8Array([1, 2, 3])], 'report.pdf', { type: 'application/pdf' }));
+  const uploadRequest = new Request('https://bot.test/api/uploads', { method: 'POST', headers: { Authorization: 'Bearer test-owner-token' }, body: form });
+  const uploadedResponse = await worker.fetch(uploadRequest, f.env);
+  const uploaded = await uploadedResponse.json() as any;
+  expect(uploadedResponse.status).toBe(201);
+  expect(uploaded.attachment.id).toMatch(/^att_/);
+  const { thread } = await f.create();
+  const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Review the file', idempotencyKey: 'upload-run', attachments: [{ id: uploaded.attachment.id, path: 'forged', name: 'fake', mimeType: 'text/plain', size: 1 }] });
+  expect(run.status).toBe(202);
+  expect(run.body.attachments).toEqual([{ id: uploaded.attachment.id, path: expect.stringContaining('uploads/'), name: 'report.pdf', mimeType: 'application/pdf', size: 3 }]);
+  expect((await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'bad', idempotencyKey: 'bad-attachment', attachments: [{ id: 'att_00000000-0000-0000-0000-000000000000' }] })).status).toBe(404);
 });
 
 it('admits Telegram webhooks only through their own secret validation',async()=>{

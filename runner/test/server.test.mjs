@@ -42,6 +42,26 @@ test("duplicate run admission is idempotent", async () => {
   await assert.rejects(store.start({ runId: 'same', prompt: 'different' }), { statusCode: 409 });
 });
 
+test("run attachments become native file prompt parts", async () => {
+  const fake = new FakeRuntime();
+  fake.promptCalls = [];
+  fake.prompt = async (session, prompt, options) => { fake.promptCalls.push({ session, prompt, options }); return { id: "in_attachment" }; };
+  const store = new RunStore(fake);
+  await store.start({ runId: "attachment-run", prompt: "inspect", directory: "/workspace/shared", attachments: [{ path: "uploads/att_1/report.pdf", name: "report.pdf", mimeType: "application/pdf" }] });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(fake.promptCalls[0].options.files, [{ uri: "file:///workspace/shared/uploads/att_1/report.pdf", name: "report.pdf", description: "application/pdf" }]);
+});
+
+test("active-turn attachment steering preserves files through native admission", async () => {
+  const fake = new FakeRuntime();
+  fake.promptCalls = [];
+  fake.prompt = async (session, prompt, options) => { fake.promptCalls.push({ session, prompt, options }); return { id: "in_steer_attachment" }; };
+  const store = new RunStore(fake);
+  store.runs.set("active-attachment", { id: "active-attachment", status: "running", sessionId: "ses_active", events: [], final: "", steeringMessages: [] });
+  await store.steer(store.get("active-attachment"), { idempotencyKey: "steer-attachment", prompt: "inspect", delivery: "steer", attachments: [{ path: "uploads/att_1/x.png", name: "x.png", mimeType: "image/png" }] });
+  assert.deepEqual(fake.promptCalls[0].options.files, [{ uri: "file:///workspace/shared/uploads/att_1/x.png", name: "x.png", description: "image/png" }]);
+});
+
 test("native steering is authenticated, durably idempotent, and uses a native message id", async () => {
   const fake = new FakeRuntime();
   fake.promptCalls = [];

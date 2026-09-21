@@ -1,0 +1,61 @@
+/* Warm, quiet surfaces; serif only where the workspace introduces itself. */
+:root { --bg: #141512; --panel: #1b1c18; --panel-2: #24251f; --line: #34362e; --muted: #a09f92; --soft: #c8c6b9; --cream: #eeeadd; --orange: #eeeadd; color: var(--cream); background: var(--bg); color-scheme: dark; }
+.app-shell, .topbar, .main { background: var(--bg); }
+.topbar { height: 60px; padding: 0 24px; border-color: var(--line); }
+.brand-wordmark { width: 170px; height: 32px; opacity: .94; }
+.workspace { height: calc(100dvh - 60px); }
+.sidebar { background: #191a16; width: 246px; padding: 26px 16px 18px; border-color: var(--line); }
+.side-label, .eyebrow { font-size: 10px; letter-spacing: .12em; color: var(--muted); }
+.new-chat { min-height: 40px; background: #e4e0d4; color: #24251f; border-color: #e4e0d4; }
+.bot-row, .thread-row { border-radius: 4px; }
+.bot-row.active, .thread-row.active { background: #2a2c24; }
+.bot-avatar, .bot-avatar-mini, .avatar, .message-avatar { background: #2c2e26; color: #d5d0bd; border-color: #414437; box-shadow: none; }
+.sidebar-tools, .sidebar-footer, .side-section, .computer-rail, .computer-rail-toggle { border-color: var(--line); }
+.footer-action { line-height: 1.5; }
+.conversation-head { padding: 20px 32px; min-height: 88px; border-color: var(--line); }
+.conversation-head h1 { font-size: 17px; font-weight: 500; letter-spacing: -.3px; }
+.crumb { color: var(--muted); font-size: 10px; gap: 10px; }
+.head-actions .soft-btn { background: transparent; border-color: var(--line); }
+.chat-scroll { padding: 36px max(28px, calc((100% - 850px) / 2)) 18px; scrollbar-gutter: stable; }
+.onboarding { max-width: 490px; align-items: flex-start; text-align: left; padding: clamp(25px, 8vh, 90px) 0; margin: auto; }
+.onboarding-icon { width: 44px; height: 44px; box-shadow: none; margin-bottom: 8px; opacity: .88; }
+.onboarding h2 { font: 400 clamp(30px, 3vw, 40px)/1.16 Georgia, 'Times New Roman', serif; letter-spacing: -.035em; margin: 22px 0 16px; color: var(--cream); }
+.onboarding p { max-width: 390px; font-size: 14px; color: var(--muted); line-height: 1.8; }
+.onboarding .primary-btn { margin-top: 24px; }
+.primary-btn { background: #e4e0d4; color: #24251f; border-color: #e4e0d4; box-shadow: none; }
+.primary-btn:hover { background: #f2eee3; color: #171812; }
+.soft-btn { background: transparent; color: var(--soft); border-color: var(--line); }
+.soft-btn:hover, .icon-btn:hover { background: #2b2d24; color: var(--cream); }
+.composer { background: #20211c; border-color: #414437; box-shadow: 0 6px 28px #0000000d; border-radius: 6px; }
+.composer textarea { color: var(--cream); min-height: 80px; }
+.composer textarea::placeholder { color: #949586; }
+.composer-note { color: #989989; font-size: 10px; }
+.message-text { font-size: 14px; line-height: 1.85; }
+.message-meta { gap: 12px; }
+.tool-activity { border-color: #303229; }
+.computer-rail { background: #191a16; }
+.preview-placeholder { background: var(--bg); border-color: var(--line); color: var(--muted); min-height: 210px; }
+.computer-preview-head { color: var(--muted); font-size: 9px; letter-spacing: .07em; }
+.computer-warmup { background: #20221b; border-color: #3b3f30; color: var(--cream); border-radius: 4px; }
+.computer-warmup span { color: var(--muted); }
+.ui-dialog-content, .modal { background: #1b1c18; border-color: #3c3e33; box-shadow: 0 22px 90px #0006; }
+.ui-dialog-overlay { background: #080906b8; backdrop-filter: blur(3px); }
+.settings-nav { flex-wrap: wrap; gap: 3px 15px; }
+.settings-input, .text-input { background: #151610; border-color: #3b3e32; color: var(--cream); }
+.settings-input:focus, .text-input:focus, .composer:focus-within { border-color: #858b70; outline-color: #858b70; }
+.settings-section-head h3 { font-weight: 500; }
+.extension-sources a > div, .extension-sources a > span { flex: 1; }
+.extension-sources a { justify-content: flex-start; }
+.extension-sources a > svg:last-child { margin-left: auto; }
+.extension-repository, .extension-skill { background: transparent; border-color: var(--line); }
+@media (max-width: 760px) {
+ .topbar { padding: 0 16px; height: 56px; }
+ .brand-wordmark { width: 152px; }
+ .workspace { height: calc(100dvh - 56px); }
+ .conversation-head { padding: 16px 20px; }
+ .chat-scroll { padding: 24px 20px 16px; }
+ .onboarding { padding: 30px 0; }
+ .head-actions { flex-wrap: wrap; }
+ .settings-nav { gap: 4px 10px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }

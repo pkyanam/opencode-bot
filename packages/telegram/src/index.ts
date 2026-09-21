@@ -128,6 +128,8 @@ export type TelegramApi = {
   ): Promise<{ messageId?: number }>;
   editMessageText?(token: string, input: { chatId: string; messageId: number; text: string; parseMode?: "HTML" }): Promise<void>;
   sendChatAction?(token: string, input: { chatId: string; action: "typing" }): Promise<void>;
+  getFile?(token: string, fileId: string): Promise<{ file_path?: string; file_size?: number }>;
+  downloadFile?(token: string, filePath: string): Promise<ArrayBuffer>;
 };
 
 export type TelegramPairingLink = {
@@ -148,6 +150,15 @@ export type TelegramMessageContext = {
   /** Stable key for the control worker's idempotencyKey field. */
   idempotencyKey: string;
   update: TelegramUpdate;
+  attachments?: TelegramAttachment[];
+};
+
+export type TelegramAttachment = {
+  fileId: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+  bytes: ArrayBuffer;
 };
 
 export type TelegramMessageRouteResult = { runId?: string } | void;
@@ -201,6 +212,9 @@ export type TelegramUpdate = {
     from?: { id: number; is_bot?: boolean; username?: string };
     chat?: { id: number | string; type?: string; title?: string };
     text?: string;
+    caption?: string;
+    photo?: Array<{ file_id: string; width?: number; height?: number; file_size?: number }>;
+    document?: { file_id: string; file_name?: string; mime_type?: string; file_size?: number };
   };
   [key: string]: unknown;
 };
@@ -220,6 +234,7 @@ export type TelegramWebhookOutcome = {
     | "expired_pairing"
     | "unpaired_chat"
     | "empty_message"
+    | "unsupported_media"
     | "handler_error";
 };
 
@@ -241,6 +256,7 @@ export type RunCompletion = {
 export type TelegramProgressResult = { sent: boolean; edited: boolean; throttled?: boolean };
 
 const MAX_WEBHOOK_BODY = 1_000_000;
+const MAX_TELEGRAM_FILE = 10 * 1024 * 1024;
 const MAX_TELEGRAM_MESSAGE = 4096;
 const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
 const DEFAULT_COMMANDS: TelegramCommand[] = [
@@ -255,6 +271,10 @@ export class TelegramApiError extends Error {
   constructor(public readonly method: string, public readonly status: number, public readonly retryAfter?: number, public readonly notModified = false) {
     super(`Telegram API ${method} failed (${status})`);
   }
+}
+
+class TelegramAttachmentError extends Error {
+  constructor(message: string) { super(message); this.name = "TelegramAttachmentError"; }
 }
 
 function nowIso(now: number): string {
@@ -373,6 +393,16 @@ function parseCommand(text: string, botUsername: string): { name: string; input:
   return { name: match[1].toLowerCase(), input: match[3] ?? "" };
 }
 
+function telegramMedia(message: TelegramUpdate["message"]): { fileId: string; name: string; mimeType: string; size?: number } | null {
+  const document = message?.document;
+  if (document?.file_id)
+    return { fileId: document.file_id, name: document.file_name || "document", mimeType: document.mime_type || "application/octet-stream", size: document.file_size };
+  const photos = Array.isArray(message?.photo) ? message.photo.filter(item => item && typeof item.file_id === "string") : [];
+  if (!photos.length) return null;
+  const photo = photos.reduce((best, item) => ((item.file_size ?? 0) > (best.file_size ?? 0) || ((item.file_size ?? 0) === (best.file_size ?? 0) && (item.width ?? 0) * (item.height ?? 0) > (best.width ?? 0) * (best.height ?? 0))) ? item : best);
+  return { fileId: photo.file_id, name: "photo.jpg", mimeType: "image/jpeg", size: photo.file_size };
+}
+
 /** Minimal default Bot API client. It intentionally never includes a token in errors. */
 export function createTelegramApi(fetchImpl: typeof fetch = fetch, baseUrl = "https://api.telegram.org"): TelegramApi {
   const endpoint = baseUrl.replace(/\/$/, "");
@@ -445,6 +475,38 @@ export function createTelegramApi(fetchImpl: typeof fetch = fetch, baseUrl = "ht
     },
     async sendChatAction(token, input) {
       await call<boolean>(token, "sendChatAction", { chat_id: input.chatId, action: input.action });
+    },
+    async getFile(token, fileId) {
+      return call<{ file_path?: string; file_size?: number }>(token, "getFile", { file_id: fileId });
+    },
+    async downloadFile(token, filePath) {
+      let response: Response;
+      try {
+        const pathToken = encodeURIComponent(token).replaceAll("%3A", ":");
+        const path = filePath.split("/").map(encodeURIComponent).join("/");
+        response = await fetchImpl(`${endpoint}/file/bot${pathToken}/${path}`, { signal: AbortSignal.timeout(20_000) });
+      } catch {
+        throw new Error("Telegram file download is unavailable");
+      }
+      if (!response.ok || !response.body) throw new Error("Telegram file download failed");
+      const declared = Number(response.headers.get("content-length") ?? 0);
+      if (declared > MAX_TELEGRAM_FILE) throw new TelegramAttachmentError("Telegram attachment exceeds upload limit");
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          total += next.value.byteLength;
+          if (total > MAX_TELEGRAM_FILE) throw new TelegramAttachmentError("Telegram attachment exceeds upload limit");
+          chunks.push(next.value);
+        }
+      } finally { await reader.cancel().catch(() => undefined); }
+      const output = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+      return output.buffer;
     },
   };
 }
@@ -702,6 +764,17 @@ export class TelegramService {
     return this.processUpdate(botId, config, update);
   }
 
+  private async downloadMedia(token: string, media: { fileId: string; name: string; mimeType: string; size?: number }): Promise<TelegramAttachment[]> {
+    if (!this.api.getFile || !this.api.downloadFile) throw new Error("Telegram media downloads are unavailable");
+    if (media.size !== undefined && media.size > MAX_TELEGRAM_FILE) throw new TelegramAttachmentError("Telegram attachment exceeds upload limit");
+    const file = await this.api.getFile(token, media.fileId);
+    if (!file.file_path || (file.file_size !== undefined && file.file_size > MAX_TELEGRAM_FILE)) throw new TelegramAttachmentError("Telegram attachment exceeds upload limit");
+    const bytes = await this.api.downloadFile(token, file.file_path);
+    if (bytes.byteLength < 1 || bytes.byteLength > MAX_TELEGRAM_FILE) throw new TelegramAttachmentError("Telegram attachment exceeds upload limit");
+    const name = media.name === "document" && file.file_path.includes("/") ? file.file_path.split("/").pop()! : media.name;
+    return [{ fileId: media.fileId, name, mimeType: media.mimeType, size: bytes.byteLength, bytes }];
+  }
+
   /** Shared authenticated-update pipeline used by webhooks and getUpdates. */
   private async processUpdate(botId: string, config: TelegramBotConfig, update: TelegramUpdate): Promise<TelegramWebhookOutcome> {
     if (!(await this.options.store.claimUpdate(botId, update.update_id)))
@@ -710,7 +783,8 @@ export class TelegramService {
       const message = update.message;
       const from = message?.from;
       const chat = message?.chat;
-      const text = typeof message?.text === "string" ? message.text : "";
+      const media = telegramMedia(message);
+      const text = typeof message?.text === "string" ? message.text : (typeof message?.caption === "string" && message.caption.trim() ? message.caption : (media ? "Review the attached file." : ""));
       if (!from || from.is_bot === true || !chat || !text.trim())
         return { status: 200, accepted: true, reason: "empty_message" };
       const telegramUserId = normalizeId(from.id);
@@ -780,6 +854,7 @@ export class TelegramService {
         return { status: 200, accepted: true, routed: false };
       }
       if (!this.onMessage) return { status: 200, accepted: true, routed: false };
+      const attachments = media ? await this.downloadMedia(config.token, media) : undefined;
       const result = await this.onMessage({
         botId,
         ownerUserId: binding.ownerUserId,
@@ -791,11 +866,17 @@ export class TelegramService {
         updateId: update.update_id,
         idempotencyKey: `telegram:${botId}:${update.update_id}`,
         update,
+        ...(attachments?.length ? { attachments } : {}),
       });
       if (result && typeof result.runId === "string" && result.runId.length > 0)
         await this.options.store.putRunDelivery({ runId: result.runId, botId, chatId, telegramUserId, createdAt: nowIso(this.now()) });
       return { status: 200, accepted: true, routed: true, runId: result?.runId };
-    } catch {
+    } catch (error) {
+      if (error instanceof TelegramAttachmentError) {
+        const chatId = update.message?.chat ? normalizeId(update.message.chat.id) : "";
+        if (chatId) await this.safeSend(config, chatId, "That attachment is too large or unsupported. Please send a file up to 10 MiB.");
+        return { status: 200, accepted: true, reason: "unsupported_media" };
+      }
       if (this.options.store.releaseUpdate) await this.options.store.releaseUpdate(botId, update.update_id);
       return { status: 500, accepted: false, reason: "handler_error" };
     }
