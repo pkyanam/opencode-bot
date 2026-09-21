@@ -146,8 +146,13 @@ The current vertical slice includes:
 - searchable live model catalog, named conversations, chronological transcripts, and provider error details;
 - Settings → OpenCode → Provider connections key, OAuth, credential label/activation/removal, and
   custom OpenAI-compatible endpoint configuration;
-- explicit Bot-to-Bot delegation that creates a recipient thread/run and
-  returns its completed result as context for the source Bot's next request;
+- callable bot messaging through the runner MCP tools `list_bots`,
+  `send_message`, and `get_replies`; these address independent persistent
+  workspace Bots, not OpenCode subagents. A recipient is queued after the
+  sender's current turn and its reply automatically continues the source
+  conversation;
+- secure GitHub-flavored Markdown rendering for user, assistant, and bot
+  handoff messages, with raw HTML disabled and unsafe link protocols removed;
 - Telegram configuration, expiring QR deep links, account pairing/revocation,
   and durable text reply receipts; live text delivery has been qualified with a
   user-created BotFather bot;
@@ -182,7 +187,7 @@ selection; those are design targets, not shipped features.
 
 ## Qualification and model access
 
-The current local suite reports **93 passing tests** covering real SQLite
+The current local suite reports **102 passing tests** covering real SQLite
 coordination, provider contracts, artifact paths, owned-node routing/receipts,
 setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
 That harness runs isolated OpenCode CLI 2.0.11 against a local fake
@@ -203,10 +208,19 @@ run. This qualifies text delivery and tool-backed completion for that run; live
 command handling such as `/new` still needs its own qualification. Automated
 Telegram tests continue to use a mocked Bot API.
 
-Bot-to-Bot delegation is explicitly qualified as a one-way request: the
-delegation header creates a recipient thread and run, and the completed result
-is supplied as context to the source Bot's next request. It does not create an
-autonomous Bot-to-Bot messaging loop. The qualification record also retains an isolated Big Pickle request that
+Callable Bot messaging is implemented as a bounded handoff: `list_bots`
+discovers independent persistent workspace Bots, `send_message` queues a
+message for after the sender's current turn, and `get_replies` reads receipts
+already available to the source conversation. A turn permits at most eight
+requests; ancestry metadata prevents loops, and a continuation summary cannot
+send another Bot message. The recipient's completed reply automatically
+continues the source conversation. A live check on September 21, 2026 used Scout with Cloudflare Workers AI
+(`glm-5.3-flash`) to message Llama using OpenCode’s free Muse model. Llama
+answered under its own identity, then Scout automatically relayed that reply
+in the original conversation. No OpenCode subagent or manual handoff button
+was used. Nested handoffs and Telegram continuation routing have automated
+coverage; a live nested/Telegram handoff check is still pending. The
+qualification record also retains an isolated Big Pickle request that
 received `403 FreeTierError` from the direct Zen path without an account
 credential. That is a scoped observation about that model/request path, not a
 blanket statement that every free model is unavailable.

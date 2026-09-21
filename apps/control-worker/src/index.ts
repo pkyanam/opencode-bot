@@ -432,6 +432,11 @@ export class Workspace {
     } catch {
       /* already exists */
     }
+    try {
+      sql.exec("ALTER TABLE runs ADD COLUMN bot_messaging INTEGER NOT NULL DEFAULT 1");
+    } catch {
+      /* already exists */
+    }
     sql.exec(
       `CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id, sequence))`,
     );
@@ -457,6 +462,13 @@ export class Workspace {
     );
     sql.exec(
       `CREATE TABLE IF NOT EXISTS delegations (id TEXT PRIMARY KEY, source_bot_id TEXT NOT NULL, source_thread_id TEXT NOT NULL, target_bot_id TEXT NOT NULL, target_thread_id TEXT NOT NULL, target_run_id TEXT NOT NULL, prompt TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    );
+    try { sql.exec("ALTER TABLE delegations ADD COLUMN source_run_id TEXT"); } catch { /* already exists */ }
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS delegation_requests (run_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, error TEXT, delegation_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, request_id))`,
+    );
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS delegation_continuations (source_run_id TEXT PRIMARY KEY, status TEXT NOT NULL, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
     sql.exec(
       `CREATE INDEX IF NOT EXISTS events_run_seq ON events(run_id, sequence)`,
@@ -1068,16 +1080,26 @@ export class Workspace {
       throw new HttpError(404, "conversation not found");
     return this.rows<any>(
       `SELECT d.*, sb.name AS source_bot_name, tb.name AS target_bot_name,
-        tt.title AS target_thread_title, r.status AS run_status,
-        r.result AS run_result, r.error AS run_error, r.updated_at AS run_updated_at
+        tt.title AS target_thread_title,
+        CASE WHEN cr.id IS NOT NULL THEN cr.status ELSE r.status END AS run_status,
+        COALESCE(cr.result,r.result) AS run_result,
+        COALESCE(cr.error,r.error) AS run_error, r.updated_at AS run_updated_at
        FROM delegations d
        JOIN bots sb ON sb.id=d.source_bot_id
        JOIN bots tb ON tb.id=d.target_bot_id
        JOIN threads tt ON tt.id=d.target_thread_id
        JOIN runs r ON r.id=d.target_run_id
+       LEFT JOIN delegation_continuations dc ON dc.source_run_id=d.target_run_id
+       LEFT JOIN runs cr ON cr.id=dc.continuation_run_id
        WHERE d.source_thread_id=? ORDER BY d.created_at DESC`,
       threadId,
     ).map((row) => this.delegationView(row));
+  }
+  private botDirectory(excludeBotId?: string): Array<{ id: string; name: string }> {
+    return this.rows<any>("SELECT id,name FROM bots ORDER BY created_at").map((bot) => ({
+      id: bot.id,
+      name: bot.name,
+    })).filter((bot) => bot.id !== excludeBotId);
   }
   private createDelegation(sourceThreadId: string, input: any): any {
     const source = this.one<any>(
@@ -1101,19 +1123,20 @@ export class Workspace {
       throw new HttpError(400, "delegation target must be a different bot");
     const target = this.one<any>("SELECT * FROM bots WHERE id=?", targetBotId);
     if (!target) throw new HttpError(404, "target bot not found");
-    // Delegation is explicit, but an accidental A -> B -> A chain is still
-    // refused. Walk only the bounded durable ancestry; this never schedules
-    // another delegation on its own.
-    let ancestorThreadId = sourceThreadId;
+    // Automatic loop detection follows the current run chain. A fresh user
+    // message in a previously delegated conversation starts a new chain.
+    const sourceRunId = typeof input.sourceRunId === "string" ? input.sourceRunId : undefined;
+    if (sourceRunId && !this.one("SELECT id FROM runs WHERE id=? AND thread_id=?", sourceRunId, sourceThreadId)) throw new HttpError(400, "source run does not belong to this conversation");
+    let ancestorId = sourceRunId ?? sourceThreadId;
     for (let depth = 0; depth < 16; depth += 1) {
-      const ancestor = this.one<any>(
-        "SELECT source_bot_id,source_thread_id FROM delegations WHERE target_thread_id=? ORDER BY created_at DESC LIMIT 1",
-        ancestorThreadId,
-      );
+      const ancestor = this.one<any>(sourceRunId
+        ? "SELECT source_bot_id,source_run_id FROM delegations WHERE target_run_id=? LIMIT 1"
+        : "SELECT source_bot_id,source_thread_id FROM delegations WHERE target_thread_id=? ORDER BY created_at DESC LIMIT 1", ancestorId);
       if (!ancestor) break;
-      if (ancestor.source_bot_id === targetBotId)
-        throw new HttpError(400, "delegation would create a bot loop");
-      ancestorThreadId = ancestor.source_thread_id;
+      if (ancestor.source_bot_id === targetBotId) throw new HttpError(400, "delegation would create a bot loop");
+      if (depth === 15) throw new HttpError(400, "bot messaging chain limit reached");
+      ancestorId = sourceRunId ? ancestor.source_run_id : ancestor.source_thread_id;
+      if (!ancestorId) break;
     }
     const existing = this.one<any>(
       "SELECT * FROM delegations WHERE idempotency_key=?",
@@ -1147,9 +1170,9 @@ export class Workspace {
     const sourceLabel = `${source.source_bot_name} / ${source.title}`;
     const targetThread = this.createThread({
       botId: targetBotId,
-      title: `Delegation from ${sourceLabel}`,
+      title: `From ${sourceLabel}`,
     });
-    const delegatedPrompt = `[Delegation from bot "${source.source_bot_name}" in conversation "${source.title}"]\n\n${prompt}`;
+    const delegatedPrompt = `[Message from bot "${source.source_bot_name}" in conversation "${source.title}"]\n\n${prompt}`;
     const targetRun = this.createRun({
       threadId: targetThread.id,
       prompt: delegatedPrompt,
@@ -1158,7 +1181,7 @@ export class Workspace {
     const delegationId = id("delegation");
     const now = isoNow();
     this.state.storage.sql.exec(
-      "INSERT INTO delegations (id,source_bot_id,source_thread_id,target_bot_id,target_thread_id,target_run_id,prompt,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO delegations (id,source_bot_id,source_thread_id,target_bot_id,target_thread_id,target_run_id,prompt,idempotency_key,created_at,updated_at,source_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
       delegationId,
       source.bot_id,
       sourceThreadId,
@@ -1169,6 +1192,7 @@ export class Workspace {
       idempotencyKey,
       now,
       now,
+      sourceRunId ?? null,
     );
     return this.delegationView(
       this.one<any>(
@@ -1304,16 +1328,19 @@ export class Workspace {
     const runId = id("run");
     const commandName = input.commandName ? String(input.commandName) : null;
     const commandText = input.commandText ? String(input.commandText) : null;
+    // Continuations are internal control-plane turns. Keep their prompt in
+    // the run receipt, but do not present it as a user-authored message.
+    if (input.allowBotMessaging !== false)
+      this.state.storage.sql.exec(
+        "INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)",
+        id("msg"),
+        input.threadId,
+        "user",
+        String(input.prompt),
+        now,
+      );
     this.state.storage.sql.exec(
-      "INSERT INTO messages (id,thread_id,role,content,created_at) VALUES (?,?,?,?,?)",
-      id("msg"),
-      input.threadId,
-      "user",
-      String(input.prompt),
-      now,
-    );
-    this.state.storage.sql.exec(
-      "INSERT INTO runs (id,thread_id,prompt,status,idempotency_key,created_at,updated_at,command_name,command_text,session_action,session_action_input) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO runs (id,thread_id,prompt,status,idempotency_key,created_at,updated_at,command_name,command_text,session_action,session_action_input,bot_messaging) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
       runId,
       input.threadId,
       String(input.prompt),
@@ -1325,6 +1352,7 @@ export class Workspace {
       commandText,
       input.sessionAction ?? null,
       input.sessionActionInput ? json(input.sessionActionInput) : null,
+      input.allowBotMessaging === false ? 0 : 1,
     );
     this.event(runId, "run.queued", { prompt: String(input.prompt) });
     this.state.storage.setAlarm(Date.now() + 100);
@@ -1590,6 +1618,7 @@ export class Workspace {
     await this.pollTelegram();
     await this.deliverTelegramResults();
     await this.fireRoutines();
+    await this.advancePendingContinuations();
     run = this.one<any>(
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
@@ -1677,6 +1706,7 @@ export class Workspace {
       this.one<{ n: number }>(
         "SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling')",
       )?.n
+      || this.one<{ n: number }>("SELECT COUNT(*) AS n FROM delegation_continuations WHERE status='pending'")?.n
     )
       this.state.storage.setAlarm(Date.now() + 3000);
     this.schedule();
@@ -1903,13 +1933,10 @@ export class Workspace {
     const result = await transport.fetch(
       `/sessions/${encodeURIComponent(thread.runner_session_id)}/messages`,
     );
-    return new Response(result.body, {
-      status: result.status,
-      headers: {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-      },
-    });
+    if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } });
+    const payload = await result.json() as any;
+    const internalPrompts = new Set(this.rows<any>("SELECT prompt FROM runs WHERE thread_id=? AND bot_messaging=0", threadId).map(run => run.prompt));
+    return response({ ...payload, messages: (payload.messages ?? []).filter((message: any) => !(message.type === "user" && internalPrompts.has(message.text))) });
   }
   private botInstructions(thread: any): string {
     const memories = this.rows<any>(
@@ -1928,6 +1955,10 @@ export class Workspace {
       "SELECT name FROM bots WHERE id=?",
       thread.bot_id,
     );
+    const peers = this.botDirectory()
+      .filter((bot) => bot.id !== thread.bot_id)
+      .map((bot) => `${bot.name} (${bot.id})`)
+      .join(", ");
     const completedDelegations = this.rows<any>(
       `SELECT tb.name AS target_bot_name, d.prompt, r.status, r.result, r.error
        FROM delegations d JOIN bots tb ON tb.id=d.target_bot_id JOIN runs r ON r.id=d.target_run_id
@@ -1945,6 +1976,7 @@ export class Workspace {
         ? `Your name is ${identity.name}. You are this user’s persistent bot, powered by OpenCode. Use your configured name when asked who you are.`
         : "",
       thread.instructions,
+      `Bot communication is available through the runner MCP server named \`bots\`. Use \`list_bots\` to inspect peers, \`send_message\` to queue work for a peer, and \`get_replies\` to inspect requests and completed results. These are independent persistent bots, not OpenCode subagents. For requests involving another named workspace bot, use these messaging tools rather than subagent mode. After sending, end your turn with a short natural acknowledgment (for example, "I’m asking Llama."). The recipient runs after your turn and its reply automatically resumes this conversation; never ask the user to send another message to retrieve it. Do not poll in a loop, display internal bot/request IDs, or claim a reply before it arrives. Available peers: ${peers || "none"}.`,
       memories ? `Relevant bot memory:\n${memories}` : "",
       selectedSkills
         ? `Assigned skills (workspace instruction bundles):\n${selectedSkills}`
@@ -2163,6 +2195,9 @@ export class Workspace {
       systemPrompt: this.botInstructions(thread),
       title: thread.title,
       directory: "/workspace/shared",
+      botDirectory: this.botDirectory(thread.bot_id),
+      delegationHistory: this.delegations(thread.id),
+      allowBotMessaging: Number(run.bot_messaging ?? 1) !== 0,
     };
   }
   private async dispatchOwned(run: any, nodeId: string): Promise<void> {
@@ -2354,6 +2389,116 @@ export class Workspace {
     if (!result.ok) throw new Error(`runner status HTTP ${result.status}`);
     return { status: "found", value: await result.json() };
   }
+  private async reconcileDelegationRequests(run: any, remote: any): Promise<void> {
+    if (Number(run.bot_messaging ?? 1) === 0 || remote.status !== "succeeded") return;
+    const requests = Array.isArray(remote.delegationRequests)
+      ? remote.delegationRequests.slice(0, 8)
+      : [];
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index] && typeof requests[index] === "object" ? requests[index] : {};
+      const requestId = typeof request.id === "string" && request.id.trim()
+        ? request.id.trim().slice(0, 160)
+        : `invalid-${index}`;
+      if (this.one("SELECT request_id FROM delegation_requests WHERE run_id=? AND request_id=?", run.id, requestId)) continue;
+      const now = isoNow();
+      this.state.storage.sql.exec(
+        "INSERT INTO delegation_requests (run_id,request_id,status,created_at,updated_at) VALUES (?,?,?,?,?)",
+        run.id, requestId, "pending", now, now,
+      );
+      try {
+        if (requestId.startsWith("invalid-") || typeof request.targetBotId !== "string" || typeof request.prompt !== "string")
+          throw new HttpError(400, "delegation request requires id, targetBotId, and prompt");
+        const delegation = this.createDelegation(run.thread_id, {
+          targetBotId: request.targetBotId,
+          prompt: request.prompt,
+          idempotencyKey: `tool:${run.id}:${requestId}`,
+          sourceRunId: run.id,
+        });
+        this.state.storage.sql.exec(
+          "UPDATE delegation_requests SET status='accepted',delegation_id=?,updated_at=? WHERE run_id=? AND request_id=?",
+          delegation.id, isoNow(), run.id, requestId,
+        );
+        this.event(run.id, "delegation.queued", { requestId, delegationId: delegation.id, targetBotId: request.targetBotId });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.state.storage.sql.exec(
+          "UPDATE delegation_requests SET status='rejected',error=?,updated_at=? WHERE run_id=? AND request_id=?",
+          message, isoNow(), run.id, requestId,
+        );
+        this.event(run.id, "delegation.rejected", { requestId, error: message });
+      }
+    }
+    await this.maybeContinueAfterDelegations(run.id);
+    this.state.storage.setAlarm(Date.now() + 1000);
+  }
+  private async maybeContinueAfterDelegations(sourceRunId: string): Promise<void> {
+    const source = this.one<any>("SELECT * FROM runs WHERE id=?", sourceRunId);
+    if (!source || Number(source.bot_messaging ?? 1) === 0 || !TERMINAL.has(source.status)) return;
+    const requests = this.rows<any>("SELECT * FROM delegation_requests WHERE run_id=?", sourceRunId);
+    const accepted = requests.filter((request) => request.status === "accepted" && request.delegation_id);
+    if (!requests.length || accepted.some((request) => !this.one("SELECT id FROM delegations WHERE id=?", request.delegation_id))) return;
+    const existing = this.one<any>("SELECT * FROM delegation_continuations WHERE source_run_id=?", sourceRunId);
+    if (existing?.status === "created") return;
+    if (!existing) {
+      const now = isoNow();
+      this.state.storage.sql.exec("INSERT INTO delegation_continuations (source_run_id,status,created_at,updated_at) VALUES (?,?,?,?)", sourceRunId, "pending", now, now);
+    }
+    const unfinished = this.one<any>(
+      `SELECT r.status FROM delegation_requests q JOIN delegations d ON d.id=q.delegation_id JOIN runs r ON r.id=d.target_run_id
+       WHERE q.run_id=? AND q.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review') LIMIT 1`,
+      sourceRunId,
+    );
+    if (unfinished) return;
+    // A delegated bot may itself have queued peer work. Wait for that bot's
+    // continuation, so the parent receives its completed answer rather than
+    // the intermediate "queued" response.
+    for (const request of accepted) {
+      const delegation = this.one<any>("SELECT target_run_id FROM delegations WHERE id=?", request.delegation_id);
+      if (!delegation) return;
+      const continuation = this.one<any>(
+        "SELECT dc.status,cr.status AS run_status FROM delegation_continuations dc LEFT JOIN runs cr ON cr.id=dc.continuation_run_id WHERE dc.source_run_id=?",
+        delegation.target_run_id,
+      );
+      if (continuation && (continuation.status !== "created" || !TERMINAL.has(String(continuation.run_status)))) return;
+    }
+    const active = this.one("SELECT id FROM runs WHERE thread_id=? AND status IN ('queued','provisioning','running','waiting_approval','cancelling')", source.thread_id);
+    if (active) return;
+    const results = this.delegations(source.thread_id)
+      .filter((delegation) => accepted.some((request) => request.delegation_id === delegation.id))
+      .map((delegation) => `[${delegation.targetBotName}; ${delegation.status}] ${delegation.result ?? delegation.error ?? ""}`)
+      .join("\n\n");
+    const rejected = requests
+      .filter((request) => request.status === "rejected")
+      .map((request) => `[Delegation rejected] ${request.error ?? "invalid request"}`)
+      .join("\n");
+    const continuation = this.createRun({
+      threadId: source.thread_id,
+      prompt: `Continue the original task using these completed peer results. Summarize what they found and finish the task; do not delegate further in this turn.\n\n${results}${rejected ? `\n\n${rejected}` : ""}`,
+      idempotencyKey: `tool-continuation:${sourceRunId}`,
+      allowBotMessaging: false,
+    });
+    // Carry the originating Telegram route onto the internal continuation.
+    // Reset delivery state: the source receipt may already have been sent.
+    const telegramDelivery = this.one<any>(
+      "SELECT bot_id,chat_id,telegram_user_id FROM telegram_run_deliveries WHERE run_id=?",
+      sourceRunId,
+    );
+    if (telegramDelivery)
+      this.state.storage.sql.exec(
+        "INSERT OR REPLACE INTO telegram_run_deliveries (run_id,bot_id,chat_id,telegram_user_id,created_at,status) VALUES (?,?,?,?,?,?)",
+        continuation.id,
+        telegramDelivery.bot_id,
+        telegramDelivery.chat_id,
+        telegramDelivery.telegram_user_id,
+        isoNow(),
+        "pending",
+      );
+    this.state.storage.sql.exec("UPDATE delegation_continuations SET status='created',continuation_run_id=?,updated_at=? WHERE source_run_id=?", continuation.id, isoNow(), sourceRunId);
+  }
+  private async advancePendingContinuations(): Promise<void> {
+    for (const row of this.rows<any>("SELECT source_run_id FROM delegation_continuations WHERE status='pending' LIMIT 8"))
+      await this.maybeContinueAfterDelegations(row.source_run_id);
+  }
   private async dispatch(run: any): Promise<void> {
     const now = isoNow();
     const claimed = this.state.storage.sql.exec(
@@ -2403,6 +2548,9 @@ export class Workspace {
         systemPrompt,
         title: thread.title,
         directory: "/workspace/shared",
+        botDirectory: this.botDirectory(thread.bot_id),
+        delegationHistory: this.delegations(thread.id),
+        allowBotMessaging: Number(run.bot_messaging ?? 1) !== 0,
       }),
     });
     if (!result.ok) {
@@ -2524,6 +2672,7 @@ export class Workspace {
         this.event(run.id, "cancel.forward_error", { error: String(error) });
       }
     }
+    await this.reconcileDelegationRequests(run, remote);
   }
 }
 

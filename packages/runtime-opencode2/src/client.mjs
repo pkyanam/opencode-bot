@@ -25,6 +25,7 @@ export class OpenCode2Runtime {
     // Optional headed desktop broker. It is deliberately injected so the
     // runtime remains usable in headless tests and non-Cloudflare computers.
     this.desktop = options.desktop;
+    this.botTools = options.botTools;
     this._eventsStarted = false;
     this.browser = options.browser ?? process.env.OPENCODE_BOT_BROWSER === "1";
   }
@@ -69,6 +70,14 @@ export class OpenCode2Runtime {
       projectConfig.mcp.servers.browser = config.mcp.servers.browser;
       await writeFile(projectConfigPath, JSON.stringify(projectConfig), { mode: 0o600 });
     }
+    if (this.botTools) {
+      for (const configPath of [`${this.root}/config/opencode/opencode.json`, `${this.directory}/opencode.json`]) {
+        const config = await readConfig(configPath);
+        config.mcp ??= {}; config.mcp.servers ??= {};
+        config.mcp.servers.bots = { type: 'local', command: this.botTools.command, environment: this.botTools.env, codemode: false, timeout: { startup: 30000, catalog: 30000, execution: 15000 } };
+        await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+      }
+    }
     this.endpoint = await this.service.ensure({
       file: this.serviceFile,
       version: this.version,
@@ -91,22 +100,23 @@ export class OpenCode2Runtime {
     });
     await this.client.server.info();
     if (this.browser && this.client.mcp?.list) await this.waitForBrowserMcp();
+    if (this.botTools && this.client.mcp?.list) await this.waitForBrowserMcp(30_000, "bots");
     return this.client;
   }
 
-  async waitForBrowserMcp(timeoutMs = 30_000) {
+  async waitForBrowserMcp(timeoutMs = 30_000, serverName = "browser") {
     const deadline = Date.now() + timeoutMs;
     let last;
     do {
       last = await this.client.mcp.list({ location: { directory: this.directory } });
-      const browser = last?.data?.find((server) => server.name === "browser");
+      const browser = last?.data?.find((server) => server.name === serverName);
       if (browser?.status?.status === "connected") return last;
       if (browser?.status?.status === "error" || browser?.status?.status === "failed") {
-        throw new Error(`browser MCP failed to connect: ${JSON.stringify(browser.status)}`);
+        throw new Error(`${serverName} MCP failed to connect: ${JSON.stringify(browser.status)}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     } while (Date.now() < deadline);
-    throw new Error(`browser MCP did not become ready within ${timeoutMs}ms: ${JSON.stringify(last)}`);
+    throw new Error(`${serverName} MCP did not become ready within ${timeoutMs}ms: ${JSON.stringify(last)}`);
   }
 
   async createSession({ sessionId, title, model, agent, directory } = {}) {

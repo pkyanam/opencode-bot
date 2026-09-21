@@ -2,6 +2,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { OpenCode2Runtime, eventText, eventType } from "../packages/runtime-opencode2/src/client.mjs";
 import { dispatchArtifactRequest } from './artifacts.mjs';
 import { DesktopController } from './desktop.mjs';
@@ -67,10 +68,30 @@ export class RunStore {
       return this.public(existing);
     }
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     void this.execute(run, input);
     return this.public(run);
+  }
+
+  botTool(name, args = {}) {
+    const run = [...this.runs.values()].find(item => !isTerminal(item.status));
+    if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
+    if (name === 'list_bots') return { bots: run.botDirectory ?? [] };
+    if (name === 'get_replies') return { replies: run.delegationHistory ?? [], pending: run.delegationRequests ?? [] };
+    if (name !== 'send_message') throw httpError(404, 'Unknown bot tool');
+    if (!run.allowBotMessaging) throw httpError(409, 'This turn is receiving replies. Summarize them for the user instead of sending more messages.');
+    if (typeof args.targetBotId !== 'string' || !(run.botDirectory ?? []).some(bot=>bot.id===args.targetBotId)) throw httpError(400, 'Choose an exact target ID from list_bots');
+    if (typeof args.prompt !== 'string' || !args.prompt.trim() || args.prompt.length > 16000) throw httpError(400, 'Message must contain between 1 and 16000 characters');
+    run.delegationRequests ??= [];
+    const existing = run.delegationRequests.find(item=>item.targetBotId===args.targetBotId && item.prompt===args.prompt.trim());
+    if (existing) return { ...existing, status:'queued', instruction:'End this turn to let the recipient respond. Its reply automatically continues this conversation.' };
+    if (run.delegationRequests.length >= 8) throw httpError(429, 'Maximum eight bot messages per turn');
+    const request = { id:randomUUID(), targetBotId:args.targetBotId, prompt:args.prompt.trim() };
+    run.delegationRequests.push(request);
+    this.emit(run, 'bot.message.queued', request);
+    this.persist(run);
+    return { ...request, status:'queued', instruction:'End this turn to let the recipient respond. Its reply automatically continues this conversation.' };
   }
 
   async execute(run, input) {
@@ -215,7 +236,7 @@ export class RunStore {
   }
 
   emit(run, type, data) { run.events.push({ seq: run.events.length + 1, type, data }); this.persist(run); }
-  public(run) { return { runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
+  public(run) { return { delegationRequests: run.delegationRequests ?? [], runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
   load() {
     fs.mkdirSync(this.stateDir, { recursive: true });
     for (const file of fs.readdirSync(this.stateDir).filter((name) => name.endsWith(".json"))) {
@@ -256,7 +277,7 @@ function loadStableInstanceId(filename) {
   return value;
 }
 
-export function createServer({ store, authToken = token, workspace = process.env.WORKSPACE_DIRECTORY ?? '/workspace/shared', desktop, terminalRoutes } = {}) {
+export function createServer({ store, authToken = token, botToolToken, workspace = process.env.WORKSPACE_DIRECTORY ?? '/workspace/shared', desktop, terminalRoutes } = {}) {
   if (!authToken) throw new Error('RUNNER_TOKEN is required');
   const terminals = terminalRoutes ?? createTerminalRoutes({
     resolveConnection: async (sessionId) => {
@@ -282,6 +303,11 @@ export function createServer({ store, authToken = token, workspace = process.env
   return http.createServer(async (req, res) => {
     try {
       if (req.url === "/health" && req.method === "GET") return json(res, 200, { ok: true, service: "opencode2-runner", instanceId: store.instanceId });
+      if (req.url === '/bot-tools' && req.method === 'POST') {
+        if (!botToolToken || req.headers.authorization !== `Bearer ${botToolToken}`) return json(res,401,{error:'unauthorized'});
+        const input = await readJson(req);
+        return json(res,200,store.botTool(input.name,input.arguments));
+      }
       if (authToken && req.headers.authorization !== `Bearer ${authToken}`) return json(res, 401, { error: "unauthorized" });
       if (new URL(req.url, 'http://runner').pathname.startsWith('/files')) {
         if (store.paused && req.method !== 'GET') return json(res, 409, { error: 'runner is quiesced' });
@@ -402,6 +428,7 @@ async function readJson(req) {
 if (isEntrypoint && process.env.NODE_ENV !== "test") {
   const root = process.env.RUNTIME_ROOT ?? "/workspace/state";
   const desktop = process.env.OPENCODE_BOT_DESKTOP === "0" ? undefined : new DesktopController();
-  const runtime = new OpenCode2Runtime({ root, directory: process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared", desktop });
-  createServer({ store: new RunStore(runtime, { stateDir: path.join(root, "runs") }), desktop }).listen(port, process.env.RUNNER_HOST ?? "127.0.0.1", () => console.log(`runner listening on ${port}`));
+  const botToolToken = randomUUID();
+  const runtime = new OpenCode2Runtime({ botTools: { command: [process.execPath, fileURLToPath(new URL("./bot-mcp.mjs", import.meta.url))], env: { BOT_TOOLS_URL: `http://127.0.0.1:${port}/bot-tools`, BOT_TOOLS_TOKEN: botToolToken } }, root, directory: process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared", desktop });
+  createServer({ store: new RunStore(runtime, { stateDir: path.join(root, "runs") }), desktop, botToolToken }).listen(port, process.env.RUNNER_HOST ?? "127.0.0.1", () => console.log(`runner listening on ${port}`));
 }

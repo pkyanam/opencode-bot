@@ -323,6 +323,101 @@ it('creates explicit cross-bot delegations with durable idempotency and feeds co
   expect(remote.submitted.at(-1).systemPrompt).toContain('The smallest fix is to guard the empty input.');
 });
 
+it('reconciles runner bot requests exactly once and resumes the source after the child finishes', async () => {
+  const f = fixture();
+  const source = await f.request('/api/bots', 'POST', { name: 'Source', model: 'test/model' });
+  const target = await f.request('/api/bots', 'POST', { name: 'Target', model: 'test/model' });
+  const thread = await f.request('/api/threads', 'POST', { botId: source.body.id, title: 'Tool handoff' });
+  const run = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Investigate', idempotencyKey: 'tool-source' });
+  await f.alarm();
+  const remoteRun = remote.runs.get(run.body.id);
+  remoteRun.delegationRequests = [{ id: 'request-1', targetBotId: target.body.id, prompt: 'Find the cause.' }];
+  remoteRun.status = 'succeeded'; remoteRun.final = 'Queued peer work.';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  expect((await f.request(`/api/threads/${thread.body.id}/delegations`)).body).toHaveLength(1);
+  expect((await f.request('/api/state')).body.threads).toHaveLength(2);
+  await f.alarm();
+  const child = [...remote.runs.values()].find((item: any) => item.runId !== run.body.id)!;
+  child.status = 'succeeded'; child.final = 'The cause is a missing guard.';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  expect(remote.submitted.filter((item: any) => item.idempotencyKey === undefined && item.allowBotMessaging === false)).toHaveLength(1);
+  expect(remote.submitted.at(-1)).toMatchObject({ allowBotMessaging: false });
+  const before = remote.submitted.length;
+  for (let i = 0; i < 5; i++) await f.alarm();
+  expect(remote.submitted).toHaveLength(before);
+});
+
+it('records invalid and ancestor bot requests without retrying or creating a loop', async () => {
+  const f = fixture();
+  const source = await f.request('/api/bots', 'POST', { name: 'Source', model: 'test/model' });
+  const target = await f.request('/api/bots', 'POST', { name: 'Target', model: 'test/model' });
+  const thread = await f.request('/api/threads', 'POST', { botId: source.body.id, title: 'Cycle check' });
+  const run = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Delegate', idempotencyKey: 'cycle-source' });
+  await f.alarm();
+  const remoteRun = remote.runs.get(run.body.id);
+  remoteRun.delegationRequests = [{ id: 'to-target', targetBotId: target.body.id, prompt: 'Try it.' }, { id: 'bad', targetBotId: source.body.id, prompt: 'Self.' }];
+  remoteRun.status = 'succeeded';
+  await f.alarm();
+  await f.alarm();
+  const child = [...remote.runs.values()].find((item: any) => item.runId !== run.body.id)!;
+  child.delegationRequests = [{ id: 'back-to-source', targetBotId: source.body.id, prompt: 'Loop.' }];
+  child.status = 'succeeded';
+  await f.alarm();
+  const delegations = (await f.request(`/api/threads/${thread.body.id}/delegations`)).body;
+  expect(delegations).toHaveLength(1);
+  const submitted = remote.submitted.length;
+  for (let i = 0; i < 5; i++) await f.alarm();
+  expect(remote.submitted.length).toBe(submitted + 1);
+  for (let i = 0; i < 5; i++) await f.alarm();
+  expect(remote.submitted.length).toBe(submitted + 1);
+});
+
+it('waits for nested bot continuations and uses the nested final answer', async () => {
+  const f = fixture();
+  const a = await f.request('/api/bots', 'POST', { name: 'A', model: 'test/model' });
+  const b = await f.request('/api/bots', 'POST', { name: 'B', model: 'test/model' });
+  const c = await f.request('/api/bots', 'POST', { name: 'C', model: 'test/model' });
+  const thread = await f.request('/api/threads', 'POST', { botId: a.body.id, title: 'Nested' });
+  const root = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Start', idempotencyKey: 'nested-a' });
+  await f.alarm();
+  const ar = remote.runs.get(root.body.id); ar.delegationRequests = [{ id: 'a-b', targetBotId: b.body.id, prompt: 'Ask C.' }]; ar.status = 'succeeded';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  const bDelegation = (await f.request(`/api/threads/${thread.body.id}/delegations`)).body[0];
+  const br = remote.runs.get(bDelegation.targetRunId); br.delegationRequests = [{ id: 'b-c', targetBotId: c.body.id, prompt: 'Find answer.' }]; br.status = 'succeeded'; br.final = 'B intermediate';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  const all = [...remote.runs.values()];
+  const cr = all.find((item: any) => item.runId !== root.body.id && item.runId !== bDelegation.targetRunId && item.allowBotMessaging !== false)!;
+  cr.status = 'succeeded'; cr.final = 'C final answer';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  const bInput = remote.submitted.find((item: any) => item.allowBotMessaging === false && item.threadId === bDelegation.targetThreadId)!;
+  const bContinuation = bInput && remote.runs.get(bInput.runId);
+  expect(bContinuation).toBeDefined();
+  expect(remote.submitted.some((item: any) => item.allowBotMessaging === false && item.threadId === thread.body.id)).toBe(false);
+  bContinuation.status = 'succeeded'; bContinuation.final = 'B completed answer';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  const aContinuation = remote.submitted.find((item: any) => item.allowBotMessaging === false && item.threadId === thread.body.id)!;
+  expect(aContinuation).toMatchObject({ allowBotMessaging: false });
+  expect(aContinuation.prompt).toContain('B completed answer');
+  expect(aContinuation.prompt).not.toContain('B intermediate');
+});
+
+it('copies Telegram routing metadata to an internal continuation as a fresh pending receipt', async () => {
+  const f = fixture();
+  const source = await f.request('/api/bots', 'POST', { name: 'TG source', model: 'test/model' });
+  const target = await f.request('/api/bots', 'POST', { name: 'TG target', model: 'test/model' });
+  const thread = await f.request('/api/threads', 'POST', { botId: source.body.id, title: 'TG' });
+  const root = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Start', idempotencyKey: 'tg-root' });
+  await f.alarm();
+  f.db.prepare("INSERT INTO telegram_run_deliveries (run_id,bot_id,chat_id,telegram_user_id,created_at,status) VALUES (?,?,?,?,?,?)").run(root.body.id, source.body.id, 'chat-7', 'user-9', new Date().toISOString(), 'sent');
+  const rr = remote.runs.get(root.body.id); rr.delegationRequests = [{ id: 'tg-1', targetBotId: target.body.id, prompt: 'Reply.' }]; rr.status = 'succeeded';
+  for (let i = 0; i < 5; i++) await f.alarm();
+  const child = [...remote.runs.values()].find((item: any) => item.runId !== root.body.id)!; child.status = 'succeeded'; child.final = 'Done';
+  await f.alarm(); await f.alarm();
+  const continuation = remote.submitted.find((item: any) => item.allowBotMessaging === false)!;
+  const receipt = f.db.prepare('SELECT * FROM telegram_run_deliveries WHERE run_id=?').get(continuation.runId) as any;
+  expect(receipt).toMatchObject({ bot_id: source.body.id, chat_id: 'chat-7', telegram_user_id: 'user-9', status: 'pending' });
+});
+
 it('Telegram /new preserves bot configuration and binds subsequent messages to the new thread', async () => {
   const f=fixture(); const {bot,thread}=await f.create();
   const original=globalThis.fetch;
@@ -352,4 +447,20 @@ it('Telegram /new preserves bot configuration and binds subsequent messages to t
     expect(remote.submitted.at(-1).systemPrompt).toContain('Cite primary sources.');
     expect(calls.find(c=>c.method==='setMyCommands').input.commands.some((c:any)=>c.command==='new')).toBe(true);
   } finally { globalThis.fetch=original; }
+});
+
+it('lets a fresh user request message a previous source bot without inheriting the old loop ancestry', async () => {
+  const f=fixture();
+  const a=(await f.request('/api/bots','POST',{name:'A',model:'test/model'})).body;
+  const b=(await f.request('/api/bots','POST',{name:'B',model:'test/model'})).body;
+  const thread=(await f.request('/api/threads','POST',{botId:a.id,title:'A conversation'})).body;
+  const handoff=(await f.request(`/api/threads/${thread.id}/delegations`,'POST',{targetBotId:b.id,prompt:'Introduce yourself',idempotencyKey:'initial-a-b'})).body;
+  await f.alarm(); remote.runs.get(handoff.targetRunId).status='succeeded'; await f.alarm();
+  const fresh=(await f.request('/api/runs','POST',{threadId:handoff.targetThreadId,prompt:'Tell A hello from the user',idempotencyKey:'fresh-b-a'})).body;
+  await f.alarm();
+  const run=remote.runs.get(fresh.id); run.status='succeeded'; run.delegationRequests=[{id:'fresh-reverse',targetBotId:a.id,prompt:'Hello from the user'}];
+  await f.alarm();
+  const replies=(await f.request(`/api/threads/${handoff.targetThreadId}/delegations`)).body;
+  expect(replies).toHaveLength(1);
+  expect(replies[0]).toMatchObject({targetBotId:a.id,prompt:'Hello from the user'});
 });

@@ -55,6 +55,7 @@ import {
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
+import { MarkdownContent } from "./components/markdown-content";
 const NativeTerminal = React.lazy(() =>
   import("./components/native-terminal").then((module) => ({
     default: module.NativeTerminal,
@@ -132,7 +133,6 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showBot, setShowBot] = useState(false);
-  const [showDelegation, setShowDelegation] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const sendInFlight = useRef(false);
   const [editingBot, setEditingBot] = useState<Bot>();
@@ -279,6 +279,16 @@ function App() {
       : [];
   const working = latest && isActive(latest.status);
   const composerLocked = terminalOpen || working || submitting;
+  const chatScroll = useRef<HTMLDivElement>(null);
+  const followConversation = useRef(true);
+  useEffect(() => { followConversation.current = true; }, [thread?.id]);
+  useEffect(() => {
+    if (!followConversation.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [thread?.id, transcript.length, transcript.at(-1)?.content, latest?.updatedAt]);
   const terminalSessionId =
     threadSessionId ?? thread?.sessionId ?? thread?.runnerSessionId;
 
@@ -289,6 +299,7 @@ function App() {
   const submit = async () => {
     const text = prompt.trim();
     if (!text || !bot || composerLocked || sendInFlight.current) return;
+    followConversation.current = true;
     sendInFlight.current = true;
     setSubmitting(true);
     try {
@@ -682,14 +693,6 @@ function App() {
                 >
                   <Command size={15} /> Commands <kbd>/</kbd>
                 </button>
-                {thread && bot && state.bots.length > 1 && (
-                  <button
-                    className="soft-btn"
-                    onClick={() => setShowDelegation(true)}
-                  >
-                    <ArrowUpRight size={15} /> Delegate
-                  </button>
-                )}
                 {bot && (
                   <button
                     className="soft-btn"
@@ -712,7 +715,10 @@ function App() {
                 </button>
               </div>
             )}
-            <div className="chat-scroll">
+            <div className="chat-scroll" ref={chatScroll} onScroll={(event) => {
+              const element = event.currentTarget;
+              followConversation.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+            }}>
               {loading && !state.threads.length ? (
                 <div className="loading-state">
                   <LoaderCircle className="spin" size={22} />
@@ -762,8 +768,6 @@ function App() {
                       threadId={thread.id}
                       botId={bot.id}
                       bots={state.bots}
-                      open={showDelegation}
-                      onClose={() => setShowDelegation(false)}
                       onNavigate={(botId, threadId) => {
                         setSelectedBot(botId);
                         setSelectedThread(threadId);
@@ -1724,7 +1728,7 @@ function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
           {message.createdAt && <span>{fmtTime(message.createdAt)}</span>}
         </div>
         {message.content && (
-          <div className="message-text">{message.content}</div>
+          <MarkdownContent className="message-text">{message.content}</MarkdownContent>
         )}
         {message.error && (
           <div className="message-error" role="alert">

@@ -8,8 +8,9 @@
   },
   "dependencies": {
     "@lydell/node-pty": "1.1.0",
-    "@opencode/client": "2.0.11",
+    "@modelcontextprotocol/sdk": "1.27.1",
     "@opencode/cli": "2.0.11",
+    "@opencode/client": "2.0.11",
     "@playwright/mcp": "0.0.82",
     "playwright": "1.64.0-alpha-1789764292000"
   },

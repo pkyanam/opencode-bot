@@ -164,8 +164,9 @@ chat prompt submission, background RunStore execution, live/reconciled run
 events, approval replies, authenticated artifact upload/download, a headed
 Chromium MJPEG desktop pane, a native OpenCode terminal, a provider setup
 surface, and a Cloudflare computer adapter. Owned-node pairing, bot/thread
-affinity, cancellation and approval forwarding, explicit Bot-to-Bot delegation,
-and completed-run receipt reconciliation are implemented; remote owned-node
+affinity, cancellation and approval forwarding, callable messaging between
+independent persistent workspace Bots, and completed-run receipt reconciliation
+are implemented; remote owned-node
 terminal/desktop access and live native transcript browsing are unavailable.
 The next parity work should be ordered as:
 
@@ -178,16 +179,26 @@ The next parity work should be ordered as:
 3. Extend Bot profiles, routines, schedules/time zones, run history, search,
    and notifications with the remaining product behavior described by Grok
    Bot, rather than generic “agent settings.”
-4. Keep Bot-to-Bot delegation explicit and one-way: the delegation header
-   creates a recipient thread/run, and its completed result becomes context for
-   the source Bot's next request. It must not create autonomous messaging
-   loops. Group conversations and richer per-Bot memory remain future work
-   while filesystem/browser credentials stay shared only within the chosen
-   owner computer.
-5. Add OpenCode context/diff/revert, command/skill discovery, and MCP status
+4. Keep callable Bot messaging bounded and explicit. The runner exposes
+   `list_bots`, `send_message`, and `get_replies` for independent persistent
+   workspace Bots; these are separate from OpenCode's `subagent` capability.
+   `send_message` queues the recipient after the sender's current turn and
+   automatically continues the source conversation when the reply completes.
+   Limit each turn to eight requests, carry ancestry metadata to reject loops,
+   and prevent a continuation summary from sending another Bot message.
+   Group conversations and richer per-Bot memory remain future work while
+   filesystem/browser credentials stay shared only within the chosen owner
+   computer. A live Cloudflare Workers AI Scout → free Muse Llama → Scout
+   handoff passed; nested and Telegram continuation routing have automated
+   coverage. Fresh user turns start new chains, so a historical handoff does
+   not prevent a later message back to its sender.
+5. Render user, assistant, and handoff text with secure GitHub-flavored
+   Markdown: raw HTML is disabled, unsafe URL protocols are dropped, and long
+   code/table content remains readable on narrow screens.
+6. Add OpenCode context/diff/revert, command/skill discovery, and MCP status
    as focused UI panels. Compact, native terminal actions, and provider setup
    already have application paths.
-6. Add the hardened multi-user computer provider with separate microVM or
+7. Add the hardened multi-user computer provider with separate microVM or
    equivalent isolation, independent policy review, network controls, and
    durable checkpoint replacement.
 

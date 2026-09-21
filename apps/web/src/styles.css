@@ -1985,6 +1985,87 @@ a:focus-visible {
   font-size: 14px;
   line-height: 1.8;
 }
+.markdown-content {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote,
+.markdown-content pre,
+.markdown-content .markdown-table-wrap { margin: 0 0 0.8em; }
+.markdown-content ul,
+.markdown-content ol { padding-left: 1.4em; }
+.markdown-content li + li { margin-top: 0.25em; }
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  color: var(--cream);
+  line-height: 1.25;
+  margin: 1.05em 0 0.45em;
+}
+.markdown-content h1 { font-size: 1.35em; }
+.markdown-content h2 { font-size: 1.2em; }
+.markdown-content h3,
+.markdown-content h4 { font-size: 1.05em; }
+.markdown-content a {
+  color: #e6a27f;
+  text-decoration: underline;
+  text-decoration-color: #845b49;
+  text-underline-offset: 2px;
+}
+.markdown-content a:hover { color: #ffd0b6; }
+.markdown-content blockquote {
+  border-left: 3px solid #675247;
+  color: var(--soft);
+  padding-left: 1em;
+}
+.markdown-content code {
+  background: #292722;
+  border: 1px solid #39352e;
+  border-radius: 4px;
+  color: #f0c4a9;
+  font-size: 0.9em;
+  padding: 0.12em 0.35em;
+}
+.markdown-content pre {
+  background: #171613;
+  border: 1px solid #35332d;
+  border-radius: 7px;
+  overflow-x: auto;
+  padding: 0.85em 1em;
+}
+.markdown-content pre code {
+  background: transparent;
+  border: 0;
+  color: #e4e0d6;
+  display: block;
+  font-size: 0.88em;
+  padding: 0;
+  white-space: pre;
+}
+.markdown-table-wrap { max-width: 100%; overflow-x: auto; }
+.markdown-content table {
+  border-collapse: collapse;
+  min-width: 100%;
+  text-align: left;
+}
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #3a3831;
+  padding: 0.45em 0.7em;
+  vertical-align: top;
+}
+.markdown-content th { background: #292722; color: var(--cream); }
+.markdown-content hr {
+  border: 0;
+  border-top: 1px solid #39372f;
+  margin: 1em 0;
+}
 .message-meta strong {
   font-size: 12px;
 }
