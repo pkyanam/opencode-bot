@@ -320,6 +320,18 @@ export async function requestBlob(path: string): Promise<Blob> {
   return response.blob();
 }
 
+// Readiness and the settings surfaces can ask for the catalog at the same
+// time (for example when a warming computer becomes ready). Share the active
+// request so one readiness transition produces one native catalog fetch.
+let catalogInFlight: Promise<Catalog> | undefined;
+const catalog = () => {
+  if (catalogInFlight) return catalogInFlight;
+  catalogInFlight = request<Catalog>("/api/catalog").finally(() => {
+    catalogInFlight = undefined;
+  });
+  return catalogInFlight;
+};
+
 export const api = {
   state: () => request<State>("/api/state"),
   bot: (payload: {
@@ -508,7 +520,7 @@ export const api = {
     request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
       `/api/files?path=${encodeURIComponent(path)}`,
     ),
-  catalog: () => request<Catalog>("/api/catalog"),
+  catalog,
   preview: async (signal?: AbortSignal) => {
     const token = getToken();
     const headers = new Headers({
