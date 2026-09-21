@@ -11,6 +11,8 @@
 
 # OpenCode Bot
 
+[Website](https://pkyanam.github.io/opencode-bot/) · [Setup guide](docs/getting-started.md) · [Releases](https://github.com/pkyanam/opencode-bot/releases)
+
 Give your bots a name, a job, and a computer. Chat in the browser or Telegram,
 watch them work, and let them ask each other for help. Powered by
 [OpenCode 2](https://opencode.ai/v2/docs/), hosted on your own Cloudflare account.
