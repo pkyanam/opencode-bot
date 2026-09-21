@@ -33,6 +33,7 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
   },
 }));
 vi.mock('@cloudflare/sandbox', () => ({ Sandbox: class {} }));
+import { ComputerManager } from '../packages/coordinator-cloudflare/src/index';
 import worker, { Workspace } from '../apps/control-worker/src/index';
 
 const databases: DatabaseSync[] = [];
@@ -73,6 +74,20 @@ function fixture() {
 afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.messages=[]; });
 
 describe('durable control-plane integration with real SQLite', () => {
+  it('exposes the checkpoint and permits restore while runtime recovery is required', async () => {
+    const pointer = { manifest: { id: 'saved-checkpoint', createdAt: '2026-09-21T12:00:00Z' }, computerId: 'shared', runnerInstanceId: 'old-instance' };
+    const prepare = vi.spyOn(ComputerManager.prototype, 'prepare').mockResolvedValue({ handle: { status: { state: 'ready' } }, state: 'restore_required', committedCheckpoint: pointer } as any);
+    const restore = vi.spyOn(ComputerManager.prototype, 'restore').mockResolvedValue(pointer as any);
+    try {
+      const f = fixture();
+      const status = await f.request('/api/computer/status');
+      expect(status.status).toBe(200);
+      expect(status.body).toMatchObject({ readiness: 'restore_required', checkpoint: { id: 'saved-checkpoint' } });
+      const recovered = await f.request('/api/computer/restore', 'POST', {});
+      expect(recovered.status).toBe(200);
+      expect(restore).toHaveBeenCalledWith('shared', pointer);
+    } finally { prepare.mockRestore(); restore.mockRestore(); }
+  });
   it('fails closed without the owner token and handles malformed JSON shapes', async () => {
     const f = fixture();
     expect((await f.request('/api/state', 'GET', undefined, null)).status).toBe(401);

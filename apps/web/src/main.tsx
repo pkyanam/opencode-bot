@@ -2525,6 +2525,7 @@ function ComputerModal({
     try {
       setBusy(true);
       setStatus(await api.checkpoint());
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create checkpoint");
     } finally {
@@ -2546,6 +2547,7 @@ function ComputerModal({
           status?.checkpoint?.id ?? status?.lastCheckpoint?.id,
         ),
       );
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not restore checkpoint");
     } finally {
@@ -2614,7 +2616,7 @@ function ComputerModal({
               </span>
             </>
           ) : (
-            <span>No checkpoint has been committed yet.</span>
+            <span>{!status ? (loading ? "Loading checkpoint information…" : "Checkpoint information could not be loaded. Retry to check for a saved checkpoint.") : "No checkpoint has been committed yet."}</span>
           )}
         </div>
         <p className="modal-copy">

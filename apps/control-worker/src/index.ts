@@ -673,7 +673,7 @@ export class Workspace {
         },
       })(request);
     }
-    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/(status|preview)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
+    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/preview|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
       if (url.pathname === "/api/pairing/redeem" && request.method === "POST")
         {
