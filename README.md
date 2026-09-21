@@ -87,8 +87,8 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 ## First public preview
 
 This is a personal, single-owner app. Bots sharing a computer share its files,
-browser, and credentials. Additional-node desktop streaming and deletion,
-extension installation, and native desktop packaging are still in development.
+browser, and credentials. Desktop streaming, deletion, and extension installation for additional nodes,
+along with native desktop packaging, are still in development.
 
 Sandbox disk is ephemeral. Use **Computer → Checkpoint** while idle to preserve
 it in R2; compressed checkpoints currently have a 32 MiB limit. Keep your owner

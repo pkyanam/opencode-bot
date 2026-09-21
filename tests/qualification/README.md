@@ -16,7 +16,9 @@ OPENCODE2_BIN="$tmp/node_modules/.bin/opencode2" node tests/qualification/openco
 
 It verifies `/api/info`, creates a session with a configured
 `@opencode/ai/providers/openai-compatible` provider, completes two prompts,
-and checks that the second prompt continues the same session. The fake model
+and checks that the second prompt continues the same session. It also sends a
+message while a turn is active and verifies native steering admission, its stable
+message ID, and completion of the follow-up. The fake model
 only listens on loopback and returns deterministic SSE responses.
 
 The separate [credential-free model record](free-model.md) captures an app-level
