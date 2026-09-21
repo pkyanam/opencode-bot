@@ -1224,7 +1224,7 @@ export class Workspace {
   private async extensionTree(repoId: string, pathValue?: string): Promise<any> {
     const row = this.extensionRepo(repoId), repo = parseGitHubRepositoryUrl(row.url), tree = await listRepositoryTree(repo);
     const prefix = pathValue ? safeRelativePath(pathValue).replace(/\/$/, "") : "";
-    return { repository: extensionRepositoryView(row), path: prefix, entries: tree.filter((entry) => !prefix || entry.path === prefix || entry.path.startsWith(`${prefix}/`)).slice(0, 500) };
+    return { repository: extensionRepositoryView(row), path: prefix, entries: tree.filter((entry) => !prefix || entry.path === prefix || entry.path.startsWith(`${prefix}/`)) };
   }
   private async extensionPreview(repoId: string, pathValue: string): Promise<any> {
     const row = this.extensionRepo(repoId), repo = parseGitHubRepositoryUrl(row.url), skillDirectory = skillDirectoryFromPath(pathValue), tree = await listRepositoryTree(repo), files = normalizeTreeFiles(tree, skillDirectory), content = await fetchRepositoryFile(repo, safeRelativePath(pathValue));

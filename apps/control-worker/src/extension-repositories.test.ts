@@ -24,3 +24,10 @@ describe("extension repository validation", () => {
   });
 });
 
+
+it('parses public archive listings without including links or hidden traversal paths', async () => {
+  const {parseRepositoryArchive}=await import('./extension-repositories');
+  const entry=(name:string,type='0')=>{const bytes=Buffer.alloc(512);bytes.write(name,0);bytes.write('00000000000',124);bytes.write(type,156);return bytes;};
+  const tree=parseRepositoryArchive(Buffer.concat([entry('repo-main/skills/example/SKILL.md'),entry('repo-main/skills/example/link','2'),entry('repo-main/../escape'),Buffer.alloc(512)]));
+  expect(tree.map(file=>file.path)).toEqual(['skills/example/SKILL.md']);
+});
