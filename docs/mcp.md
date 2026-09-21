@@ -117,6 +117,35 @@ files and credentials.
 
 ## Tools and attachments
 
+## MCP services in the web app
+
+For the shared OpenCode runtime, open **Settings → MCP services** or type
+`/mcps` (`/mcp` is an alias). The panel reads the installed runtime catalog and
+shows each service's current status. It offers connect/disconnect and OAuth
+methods that the runtime advertises; it does not claim to expose every native
+`opencode mcp` subcommand. Use **Native OpenCode** for adding/removing services,
+resource browsing, or other TUI/CLI-only operations.
+
+When a service needs OAuth, choose **Sign in** and select a method if the
+runtime reports more than one. Use **Sign in on Computer** for services whose
+callback must reach the headed shared browser. Take control only while the
+Computer is idle, choose **Open login in Computer**, finish the login there,
+then choose **Return to bot** before resuming work. The login URL is kept only
+in the open settings flow. Never paste passwords, API keys, or MFA codes into
+the bot conversation.
+
+The web command menu combines the live native session command catalog, supported
+session actions, and workspace shortcuts. It is not a prompt-based wrapper for
+the complete native command menu; commands absent from the catalog belong in
+Native OpenCode.
+
+The corresponding authenticated web API routes are `GET /api/mcps`,
+`POST /api/mcps/connect`, `POST /api/mcps/disconnect`, and the OAuth lifecycle
+routes `POST /api/mcps/oauth/start`, `/status`, `/complete`, and `/cancel`.
+Their payloads use the native integration and method identifiers returned in
+the MCP catalog; clients should not guess method IDs or treat a service's
+display name as an integration identifier.
+
 Use `tools/list` to discover the current catalog for your credential. It covers
 bots, conversations, native actions, runs and approvals, peer handoffs, memory,
 routines, skills, files and uploads, computer readiness/checkpoints, extension

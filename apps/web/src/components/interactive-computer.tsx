@@ -118,10 +118,11 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
         setStatus("error");
         setError(e instanceof Error ? e.message : "Computer input failed.");
       }
+      await release(true);
     } finally {
       draining.current = false;
     }
-  }, []);
+  }, [release]);
 
   const enqueue = useCallback((input: ComputerInput, pointerMove = false) => {
     if (!leaseRef.current) return;
@@ -147,7 +148,7 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
     }
     queue.current.push({ input, pointerMove, lease: leaseRef.current });
     void drain();
-  }, [drain]);
+  }, [drain, release]);
 
   const acquire = async () => {
     if (leaseRef.current || status === "acquiring") return;
@@ -192,7 +193,7 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
       } catch (e) {
         setStatus("error");
         setError(e instanceof Error ? e.message : "Computer control lease expired.");
-        await release();
+        await release(true);
       }
     }, LEASE_HEARTBEAT_MS);
     return () => window.clearInterval(timer);
@@ -231,11 +232,9 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
   };
   const openLogin = () => {
     if (!leaseRef.current || !initialUrl) return;
-    enqueue({ type: "key", phase: "down", key: "l", code: "KeyL", ctrlKey: true });
-    enqueue({ type: "key", phase: "up", key: "l", code: "KeyL", ctrlKey: true });
+    enqueue({ type: "key", action: "press", key: "Control+L" });
     enqueue({ type: "text", text: initialUrl });
-    enqueue({ type: "key", phase: "down", key: "Enter", code: "Enter" });
-    enqueue({ type: "key", phase: "up", key: "Enter", code: "Enter" });
+    enqueue({ type: "key", action: "press", key: "Enter" });
   };
 
   return (

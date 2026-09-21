@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "vitest";
 import { CloudflareComputerProvider, type CloudflareSandboxBinding } from "../src/index.js";
 
-function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; resumeFailure?: boolean } = {}) {
+function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; sdkStream?: boolean; resumeFailure?: boolean } = {}) {
   let starts = 0;
   const calls = options.calls ?? [];
   const process = {
@@ -30,7 +30,18 @@ function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number;
     stop: async () => undefined,
     destroy: async () => undefined,
     exec: async (command: string) => { options.execs?.push(command); return { success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archiveStatBytes ?? options.archive?.byteLength ?? 0) : command.startsWith("sha256sum") ? `${"a".repeat(64)}  archive\n` : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }; },
+    ...(options.sdkStream ? { readFileStream: async () => {
+      const archive = options.archive ?? new Uint8Array();
+      const encoded = Buffer.from(archive).toString("base64");
+      const wire = [
+        `data: ${JSON.stringify({ type: "metadata", mimeType: "application/gzip", size: archive.byteLength, isBinary: true, encoding: "base64" })}\n\n`,
+        `data: ${JSON.stringify({ type: "chunk", data: encoded })}\n\n`,
+        `data: ${JSON.stringify({ type: "complete" })}\n\n`,
+      ].join("");
+      return new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(wire)); controller.close(); } });
+    } } : {}),
     readFile: async (_path: string, readOptions?: { encoding?: string }) => {
+      if (options.sdkStream && readOptions?.encoding === "none") throw new Error("encoding none requires rpc transport");
       if (readOptions?.encoding === "none" && options.streamArchive) {
         if (options.streamReads) options.streamReads.value += 1;
         const archive = options.archive;
@@ -198,7 +209,7 @@ it("stops consuming a raw stream at the configured checkpoint bound", async () =
 
 it("uploads large checkpoints with bounded multipart parts and aborts failed uploads", async () => {
   const archive = new Uint8Array(6 * 1024 * 1024 + 17);
-  const sandbox = fakeSandbox({ archive, streamArchive: true });
+  const sandbox = fakeSandbox({ archive, streamArchive: true, sdkStream: true });
   const uploaded: Uint8Array[] = [];
   let aborted = false;
   const bucket = {
@@ -228,7 +239,7 @@ it("uploads large checkpoints with bounded multipart parts and aborts failed upl
       abort: async () => { aborted = true; },
     }),
   };
-  const second = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => fakeSandbox({ archive, streamArchive: true }) as never, checkpointBucket: failing as never });
+  const second = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => fakeSandbox({ archive, streamArchive: true, sdkStream: true }) as never, checkpointBucket: failing as never });
   await second.ensure({ computerId: "multipart-fail", runnerToken: "secret" });
   await assert.rejects(() => second.checkpoint("multipart-fail", 1), /R2 unavailable/);
   assert.equal(aborted, true);

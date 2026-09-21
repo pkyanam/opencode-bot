@@ -515,40 +515,42 @@ async function multipartUpload(
   });
   const parts: Array<{ partNumber: number; etag: string }> = [];
   try {
-    const streamed = await sandbox.readFile(archiveName, { encoding: "none" });
-    if (streamed.size !== size) throw new Error("Checkpoint archive changed while uploading");
-    const reader = streamed.content.getReader();
-    let pending = new Uint8Array(0);
+    let partBuffer = new Uint8Array(CHECKPOINT_PART_BYTES);
+    let partLength = 0;
     let partNumber = 1;
-    try {
-      for (;;) {
-        const next = await reader.read();
-        if (next.done) break;
-        const merged = new Uint8Array(pending.byteLength + next.value.byteLength);
-        merged.set(pending);
-        merged.set(next.value, pending.byteLength);
-        let offset = 0;
-        while (merged.byteLength - offset >= CHECKPOINT_PART_BYTES) {
-          const part = merged.slice(offset, offset + CHECKPOINT_PART_BYTES);
-          const uploaded = await upload.uploadPart(partNumber, part);
+    let streamedBytes = 0;
+    for await (const chunk of sandboxArchiveChunks(sandbox, archiveName)) {
+      streamedBytes += chunk.byteLength;
+      if (streamedBytes > size) throw new Error("Checkpoint archive changed while uploading");
+      let offset = 0;
+      while (offset < chunk.byteLength) {
+        const copied = Math.min(CHECKPOINT_PART_BYTES - partLength, chunk.byteLength - offset);
+        partBuffer.set(chunk.subarray(offset, offset + copied), partLength);
+        partLength += copied;
+        offset += copied;
+        if (partLength === CHECKPOINT_PART_BYTES) {
+          const uploaded = await upload.uploadPart(partNumber, partBuffer);
           const etag = uploaded.etag ?? uploaded.ETag;
           if (!etag) throw new Error(`Checkpoint multipart upload returned no ETag for part ${partNumber}`);
           parts.push({ partNumber, etag });
           partNumber += 1;
-          offset += CHECKPOINT_PART_BYTES;
+          partBuffer = new Uint8Array(CHECKPOINT_PART_BYTES);
+          partLength = 0;
         }
-        pending = merged.slice(offset);
       }
-    } finally {
-      reader.releaseLock();
     }
-    if (pending.byteLength > 0 || parts.length === 0) {
-      const uploaded = await upload.uploadPart(partNumber, pending);
+    if (streamedBytes !== size) throw new Error("Checkpoint archive changed while uploading");
+    if (partLength > 0 || parts.length === 0) {
+      const uploaded = await upload.uploadPart(partNumber, partBuffer.subarray(0, partLength));
       const etag = uploaded.etag ?? uploaded.ETag;
       if (!etag) throw new Error(`Checkpoint multipart upload returned no ETag for part ${partNumber}`);
       parts.push({ partNumber, etag });
     }
     await upload.complete(parts);
+    if (bucket.head) {
+      const completed = await bucket.head(key);
+      if (!completed || completed.size !== size) throw new Error("Completed checkpoint size does not match archive");
+    }
   } catch (error) {
     await upload.abort().catch(() => undefined);
     throw error;
@@ -582,6 +584,68 @@ async function rangedRestore(
   }
 }
 
+async function* sandboxArchiveChunks(sandbox: Sandbox<unknown>, archiveName: string): AsyncGenerator<Uint8Array> {
+  const streamReader = (sandbox as unknown as { readFileStream?: (path: string) => Promise<ReadableStream<Uint8Array>> }).readFileStream;
+  if (streamReader) {
+    for await (const chunk of decodeSandboxFileStream(await streamReader.call(sandbox, archiveName))) yield chunk;
+    return;
+  }
+  const streamed = await sandbox.readFile(archiveName, { encoding: "none" });
+  const reader = streamed.content.getReader();
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Decode the Sandbox SDK's SSE file stream without buffering the wire payload. */
+async function* decodeSandboxFileStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let metadata: { isBinary?: boolean; encoding?: string } | undefined;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+      for (;;) {
+        const boundary = buffer.indexOf("\n\n");
+        if (boundary < 0) break;
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+        if (!data) continue;
+        const event = JSON.parse(data) as { type?: string; isBinary?: boolean; encoding?: string; data?: string; error?: string };
+        if (event.type === "metadata") { metadata = event; continue; }
+        if (event.type === "chunk") {
+          if (!metadata) throw new Error("Checkpoint stream returned chunk before metadata");
+          if (!metadata.isBinary || metadata.encoding !== "base64") throw new Error("Checkpoint archive stream returned text instead of binary data");
+          const binary = atob(event.data ?? "");
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          yield bytes;
+          continue;
+        }
+        if (event.type === "error") throw new Error(`Checkpoint file streaming error: ${event.error ?? "unknown error"}`);
+        if (event.type === "complete") {
+          if (!metadata) throw new Error("Checkpoint stream completed without metadata");
+          return;
+        }
+      }
+    }
+    throw new Error("Checkpoint file stream ended unexpectedly");
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 async function archiveSize(sandbox: Sandbox<unknown>, archiveName: string): Promise<number> {
   const result = await sandbox.exec(`stat -c %s ${shellQuote(archiveName)}`);
   if (!result.success) throw new Error(`Could not measure checkpoint archive: ${result.stderr || result.stdout}`);
@@ -591,6 +655,20 @@ async function archiveSize(sandbox: Sandbox<unknown>, archiveName: string): Prom
 }
 
 async function readArchiveBytes(sandbox: Sandbox<unknown>, archiveName: string, maxBytes: number): Promise<Uint8Array> {
+  const streamReader = (sandbox as unknown as { readFileStream?: (path: string) => Promise<ReadableStream<Uint8Array>> }).readFileStream;
+  if (streamReader) {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of sandboxArchiveChunks(sandbox, archiveName)) {
+      total += chunk.byteLength;
+      if (total > maxBytes) throw new Error(`Checkpoint archive is ${total} bytes; maximum is ${maxBytes}`);
+      chunks.push(chunk);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  }
   // Raw RPC streams avoid the transient base64 and decoded JS strings. Some
   // Sandbox transports do not support `none`, so retain the bounded fallback.
   try {
@@ -631,6 +709,30 @@ async function readArchiveBytes(sandbox: Sandbox<unknown>, archiveName: string, 
   if (decodedLength > maxBytes) throw new Error(`Checkpoint archive is ${decodedLength} bytes; maximum is ${maxBytes}`);
   const bytes = Uint8Array.from(atob(bytesResult.content), (char) => char.charCodeAt(0));
   if (bytes.byteLength > maxBytes) throw new Error(`Checkpoint archive is ${bytes.byteLength} bytes; maximum is ${maxBytes}`);
+  return bytes;
+}
+
+async function readStreamBytes(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > maxBytes) throw new Error(`Checkpoint archive is ${total} bytes; maximum is ${maxBytes}`);
+      chunks.push(part.value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   return bytes;
 }
 

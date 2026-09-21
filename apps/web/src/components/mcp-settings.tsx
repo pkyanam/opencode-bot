@@ -52,23 +52,23 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
       setBusy("");
     }
   };
-  const startAuth = async (server: McpServer) => {
+  const startAuth = async (server: McpServer, selectedMethodID?: string) => {
     const integrationID = server.integrationID;
     const methods = integrations.find((item) => item.id === integrationID)?.methods?.filter((method) => /oauth/i.test(method.type ?? "")) ?? [];
     if (!integrationID || !methods.length) {
       setError("This service did not expose a supported login method. Use Native OpenCode → /mcps.");
       return;
     }
-    if (methods.length > 1 && !methodPicker) { setMethodPicker({ server: server.name, integrationID, methods }); return; }
+    if (methods.length > 1 && !selectedMethodID) { setMethodPicker({ server: server.name, integrationID, methods }); return; }
     if (methods.length > 1 && methodPicker?.server === server.name) { setMethodPicker(undefined); }
-    const methodID = methods[0].id;
+    const methodID = selectedMethodID ?? methods[0].id;
     setBusy(server.name); setError(""); setNotice("");
     try {
       const result = await api.mcp.authStart({ integrationID, methodID });
       const attempt = result.attempt;
       if (!attempt?.attemptID) throw new Error("The service did not return a login attempt.");
       setAuth({ server: server.name, integrationID, methodID, attemptID: attempt.attemptID, url: attempt.url, instructions: attempt.instructions });
-      setNotice("Copy the login URL into the headed Computer browser, or open it explicitly below. Then check its status here.");
+      setNotice("Open the login link below, or sign in using your Computer. Then check its status here.");
     } catch (e) { setError(e instanceof Error ? e.message : "Could not start service login"); }
     finally { setBusy(""); }
   };
@@ -112,7 +112,7 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
             <div className="settings-actions">
               {state === "connected" ? <button className="soft-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.disconnect(server.name), "MCP service disconnected.")}><Unplug size={13} />Disconnect</button> : state === "needs_auth" ? <button className="primary-btn" disabled={isBusy} onClick={() => void startAuth(server)}>{isBusy && <LoaderCircle size={13} className="spin" />}Sign in</button> : <button className="primary-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.connect(server.name), "MCP service connection started.")}>{isBusy && <LoaderCircle size={13} className="spin" />}Connect</button>}
             </div>
-            {methodPicker?.server === server.name && <div className="mcp-method-picker"><label className="field-label" htmlFor={`mcp-method-${server.name}`}>Login method</label><select id={`mcp-method-${server.name}`} className="settings-input" value={methodPicker.methods[0]?.id ?? ""} onChange={(event) => setMethodPicker({ ...methodPicker, methods: [{ ...methodPicker.methods.find((method) => method.id === event.target.value)!, ...methodPicker.methods.filter((method) => method.id !== event.target.value) }] })}>{methodPicker.methods.map((method) => <option key={method.id} value={method.id}>{method.label ?? method.id}</option>)}</select><button className="primary-btn" onClick={() => void startAuth(server)}>Continue</button></div>}
+            {methodPicker?.server === server.name && <div className="mcp-method-picker"><label className="field-label" htmlFor={`mcp-method-${server.name}`}>Login method</label><select id={`mcp-method-${server.name}`} className="settings-input" value={methodPicker.methods[0]?.id ?? ""} onChange={(event) => setMethodPicker({ ...methodPicker, methods: [methodPicker.methods.find((method) => method.id === event.target.value)!, ...methodPicker.methods.filter((method) => method.id !== event.target.value)] })}>{methodPicker.methods.map((method) => <option key={method.id} value={method.id}>{method.label ?? method.id}</option>)}</select><button className="primary-btn" onClick={() => void startAuth(server, methodPicker.methods[0]?.id)}>Continue</button></div>}
           </div>;
         })}
       </div> : <p className="settings-muted">No MCP services are configured.</p>}

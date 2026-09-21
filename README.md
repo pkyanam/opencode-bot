@@ -77,6 +77,10 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 - **OpenCode underneath.** Model and provider setup, API keys, native commands,
   and a built-in terminal. Browse GitHub skill repositories, inspect and install
   skills with their supporting files, or manage pinned npm plugins under Skills.
+- **Connect MCP services.** Settings → MCP services, `/mcps`, and `/mcp` expose
+  the installed runtime's service status and supported connect/sign-in flows.
+  See [sign-in and Computer control](docs/computer-control.md). The web command
+  menu is a curated runtime catalog; use Native OpenCode for the full TUI/CLI.
 - **Take it to Telegram.** Connect a BotFather bot, scan the pairing link, and
   receive formatted replies and progress. Local mode uses polling; Cloudflare
   uses HTTPS webhooks.
