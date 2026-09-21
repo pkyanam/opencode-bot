@@ -7,6 +7,7 @@ import { assertSourceCommit, downloadReleaseArchive, githubReleaseUrl, validateM
 
 const bytes = Buffer.from("archive");
 const manifest = { schemaVersion: 1, version: "v0.1.1", commit: "a".repeat(40), platform: "linux/amd64", opencodeVersion: "2.0.11", sandboxVersion: "0.12.9", imageArchive: { file: "computer-image.tar.gz", sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length } };
+const directManifest = { schemaVersion: 2, version: "v0.1.1", commit: "a".repeat(40), platform: "linux/amd64", opencodeVersion: "2.0.11", sandboxVersion: "0.12.9", image: { reference: `docker.io/preethamk/opencode-bot@sha256:${"a".repeat(64)}` } };
 
 describe("release verification", () => {
   it("accepts the pinned manifest and rejects source mismatches", () => {
@@ -14,6 +15,13 @@ describe("release verification", () => {
     expect(() => validateManifest({ ...manifest, platform: "darwin/arm64" })).toThrow(/platform/);
     expect(() => validateManifest({ ...manifest, imageArchive: { ...manifest.imageArchive, sha256: "0".repeat(64) } })).not.toThrow();
     expect(() => assertSourceCommit(manifest, resolve(import.meta.dirname, ".."))).toThrow(/does not match/);
+  });
+
+  it("accepts only the immutable Docker Hub image for schema 2", () => {
+    expect(validateManifest(directManifest).image.reference).toMatch(/^docker\.io\/preethamk\/opencode-bot@sha256:/);
+    expect(() => validateManifest({ ...directManifest, image: { reference: "docker.io/preethamk/opencode-bot:latest" } })).toThrow(/pinned/);
+    expect(() => validateManifest({ ...directManifest, image: { reference: `evil.example/opencode-bot@sha256:${"a".repeat(64)}` } })).toThrow(/pinned/);
+    expect(() => validateManifest({ ...directManifest, image: { reference: `docker.io/preethamk/opencode-bot@sha256:${"a".repeat(63)}b` } })).not.toThrow();
   });
 
   it("checks archive size and digest", () => {

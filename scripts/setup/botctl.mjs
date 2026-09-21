@@ -201,12 +201,14 @@ async function applyDaemonless(config) {
   process.env.CLOUDFLARE_ACCOUNT_ID = account;
   if (manifest.opencodeVersion !== (config.opencodeVersion ?? "2.0.11") || `@cloudflare/sandbox@${manifest.sandboxVersion}` !== (config.sandboxPackage ?? "@cloudflare/sandbox@0.12.9")) throw new Error("release runtime versions do not match deployment configuration");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const archive = resolve(stateDir, manifest.imageArchive.file);
-  if (!existsSync(archive)) {
-    console.log(`Downloading the verified computer image for ${manifest.version}. This may take several minutes.`);
-    await downloadReleaseArchive(manifest, archive);
+  if (manifest.schemaVersion === 1) {
+    const archive = resolve(stateDir, manifest.imageArchive.file);
+    if (!existsSync(archive)) {
+      console.log(`Downloading the verified computer image for ${manifest.version}. This may take several minutes.`);
+      await downloadReleaseArchive(manifest, archive);
+    }
+    verifyArchive(archive, manifest.imageArchive);
   }
-  verifyArchive(archive, manifest.imageArchive);
   validateDeploymentConfig(config);
   const list = checks(); printChecks(list);
   if (list.some((item) => !item.ok && item.name !== "Wrangler")) throw new Error("required prerequisite failed; fix doctor output before applying");
@@ -223,8 +225,14 @@ async function applyDaemonless(config) {
   runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
   runRequired("web build", "npm", ["run", "build"], { inherit: true }); journal(state, "build", "complete");
   ensureBucket(config, state); journal(state, "r2", "complete");
-  console.log("Uploading the prebuilt computer image to your Cloudflare account. Docker is not required.");
-  const published = await publishImage(manifest, config);
+  let published;
+  if (manifest.schemaVersion === 2) {
+    published = { image: manifest.image.reference };
+    console.log("Cloudflare will pull the released computer image directly from Docker Hub.");
+  } else {
+    console.log("Uploading the prebuilt computer image to your Cloudflare account. Docker is not required.");
+    published = await publishImage(manifest, config);
+  }
   const deploymentConfig = writeDeploymentConfig(config, published.image);
   console.log("Deploying the application to Cloudflare.");
   const deployed = runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", deploymentConfig]);

@@ -10,14 +10,15 @@ deployment contract and cost model, see [Cloudflare setup](03-cloudflare-setup.m
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash
 ```
 
-The installer downloads a release manifest, checks out its exact Git commit,
-and verifies the computer archive’s SHA-256 before uploading it. The installer
+The installer downloads a release manifest and checks out its exact Git commit.
+Schema 2 manifests pin the computer image by Docker Hub digest; Cloudflare
+pulls that public image directly during deployment. The installer
 uses `~/.local/share/opencode-bot` and installs Node 24 locally if
 needed, leaving the system Node installation alone. An existing Homebrew can supply missing Git. On other systems, install Git
 through the OS package manager when prompted. Windows users should run inside
-WSL2. Installation does not need Docker: GitHub builds the image, and a pinned,
-checksum-verified `crane` tool uploads it to your Cloudflare registry without a
-container daemon. Temporary registry credentials are discarded after upload.
+WSL2. Installation does not need Docker, a local image build, a local image
+download, or Docker Hub credentials. Docker Hub credentials are CI maintainer
+secrets only.
 
 It selects a sole Cloudflare account automatically; with several accounts it
 asks which to use. For unattended setup, supply `CLOUDFLARE_API_TOKEN` and
@@ -78,7 +79,7 @@ uncertain cases require manual recovery.
 ## Cloudflare deployment
 
 For a normal installation, use the release installer above. Its generated
-`.opencode-bot/wrangler.deploy.json` refers to the uploaded image. The tracked
+`.opencode-bot/wrangler.deploy.json` refers to the pinned Docker Hub image. The tracked
 `wrangler.jsonc` keeps the Dockerfile for local development only.
 
 The checked-in setup program is conservative. `doctor` and `plan` are

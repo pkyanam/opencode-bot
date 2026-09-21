@@ -1,7 +1,7 @@
-export declare const RELEASE_VERSION: string;
 export declare const CRANE_VERSION: string;
 export declare const CRANE_SHA256: Record<string, string>;
 export declare const MANIFEST_SCHEMA: number;
+export declare const DIRECT_IMAGE_SCHEMA: number;
 export declare function validateManifest(manifest: Record<string, any>, options?: { version?: string }): Record<string, any>;
 export declare function githubReleaseUrl(version: string, file: string): string;
 export declare function sha256File(file: string): string;
@@ -10,4 +10,3 @@ export declare function downloadReleaseArchive(manifest: Record<string, any>, de
 export declare function currentCommit(cwd: string): string;
 export declare function assertSourceCommit(manifest: Record<string, any>, cwd: string): void;
 export declare function craneAsset(): { url: string; sha256: string };
-export declare function prepareCrane(binDir: string, downloader?: typeof downloadReleaseArchive): Record<string, any>;

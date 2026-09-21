@@ -22,7 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.s
 ```
 
 The installer downloads the app, checks prerequisites, signs in to Cloudflare,
-uploads the release’s prebuilt computer image to your account, creates the
+and deploys the release’s pinned prebuilt computer image directly from Docker
+Hub. Cloudflare pulls the image; the installer never downloads, builds, or
+uploads a local image and never needs Docker Hub credentials. It creates the
 Worker, database, Sandbox computer, and R2 bucket, then opens your workspace.
 macOS and Linux are supported; on Windows, use WSL2. **Docker is not required
 for installation.** You'll need a Cloudflare account with

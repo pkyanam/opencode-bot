@@ -11,15 +11,18 @@ export const CRANE_SHA256 = {
   "darwin/arm64": "210da17a7269a9904a9b6797efbf97f4b1e5567c0962f168d1489a7bd375f14a"
 };
 export const MANIFEST_SCHEMA = 1;
+export const DIRECT_IMAGE_SCHEMA = 2;
 
 export function validateManifest(manifest, { version } = {}) {
-  if (!manifest || manifest.schemaVersion !== MANIFEST_SCHEMA) throw new Error("unsupported release manifest schema");
+  if (!manifest || ![MANIFEST_SCHEMA, DIRECT_IMAGE_SCHEMA].includes(manifest.schemaVersion)) throw new Error("unsupported release manifest schema");
   if ((version && manifest.version !== version) || !/^v\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error(`release manifest version must be ${version ?? "a semver tag"}`);
   if (!/^[0-9a-f]{40}$/.test(manifest.commit)) throw new Error("release manifest commit must be a 40 character SHA");
   if (manifest.platform !== "linux/amd64") throw new Error("release archive platform must be linux/amd64");
   if (manifest.opencodeVersion !== "2.0.11" || manifest.sandboxVersion !== "0.12.9") throw new Error("release runtime versions do not match this installer");
-  if (!manifest.imageArchive || manifest.imageArchive.file !== "computer-image.tar.gz" || !/^[0-9a-f]{64}$/.test(manifest.imageArchive.sha256) || !Number.isSafeInteger(manifest.imageArchive.size) || manifest.imageArchive.size <= 0 || manifest.imageArchive.size >= 2147483648) throw new Error("invalid image archive metadata");
   if (![manifest.opencodeVersion, manifest.sandboxVersion].every(value => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value))) throw new Error("invalid runtime versions");
+  if (manifest.schemaVersion === DIRECT_IMAGE_SCHEMA) {
+    if (!/^docker\.io\/preethamk\/opencode-bot@sha256:[0-9a-f]{64}$/.test(manifest.image?.reference ?? "")) throw new Error("schema 2 image reference must be the pinned Docker Hub image");
+  } else if (!manifest.imageArchive || manifest.imageArchive.file !== "computer-image.tar.gz" || !/^[0-9a-f]{64}$/.test(manifest.imageArchive.sha256) || !Number.isSafeInteger(manifest.imageArchive.size) || manifest.imageArchive.size <= 0 || manifest.imageArchive.size >= 2147483648) throw new Error("invalid image archive metadata");
   return manifest;
 }
 
@@ -94,4 +97,3 @@ export function craneAsset() {
   if (!names[key]) throw new Error(`unsupported crane platform ${key}`);
   return { url: `https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${names[key]}.tar.gz`, sha256: CRANE_SHA256[key] };
 }
-

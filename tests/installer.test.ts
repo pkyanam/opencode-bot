@@ -23,7 +23,7 @@ function fixture() {
   writeFileSync(log, "");
   executable(join(bin, "node"), `exec '${process.execPath}' "$@"`);
   executable(join(bin, "npm"), `printf 'npm %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"`);
-  executable(join(bin, "curl"), `url="$2"; out="$4"; case "$url" in *release-manifest.json) printf '{"schemaVersion":1,"version":"v0.1.1","commit":"1111111111111111111111111111111111111111"}\\n' > "$out" ;; *) printf 'node archive' > "$out" ;; esac`);
+  executable(join(bin, "curl"), `url="$2"; out="$4"; case "$url" in *release-manifest.json) if [ "\${OCBOT_TEST_MANIFEST_SCHEMA:-1}" = 2 ]; then printf '{"schemaVersion":2,"version":"v0.1.1","commit":"1111111111111111111111111111111111111111","image":{"reference":"docker.io/preethamk/opencode-bot@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\\n' > "$out"; else printf '{"schemaVersion":1,"version":"v0.1.1","commit":"1111111111111111111111111111111111111111"}\\n' > "$out"; fi ;; *) printf 'node archive' > "$out" ;; esac`);
   executable(join(bin, "npx"), `
     printf 'npx %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"
     case "$*" in *--json) printf '[{"id":"acct","name":"Test Account"}]' ;; esac
@@ -60,6 +60,12 @@ describe("public installer", () => {
     expect(runScript(f)).toContain(`installed successfully at ${f.install}`);
     expect(readFileSync(f.log,"utf8")).toContain("git clone --branch v0.1.1 --depth 1");
     expect(readFileSync(f.log,"utf8")).toContain("setup apply --apply --install-missing");
+  });
+
+  it("accepts a schema 2 manifest with a pinned Docker Hub digest", () => {
+    const f = fixture();
+    expect(runScript(f, { OCBOT_TEST_MANIFEST_SCHEMA: "2" })).toContain(`installed successfully at ${f.install}`);
+    expect(readFileSync(join(f.install, ".opencode-bot/release-manifest.json"), "utf8")).toContain("docker.io/preethamk/opencode-bot@sha256:");
   });
 
   it("resumes installation and opens a private owner handoff", () => {

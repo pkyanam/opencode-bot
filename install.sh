@@ -109,7 +109,8 @@ checkout_repo() {
   parsed="$(node --input-type=module -e '
     import { readFileSync } from "node:fs";
     try { const m=JSON.parse(readFileSync(process.argv[1], "utf8"));
-      if (m.schemaVersion !== 1 || typeof m.version !== "string" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(m.version) || typeof m.commit !== "string" || !/^[0-9a-f]{40}$/i.test(m.commit)) process.exit(2);
+      const imageOk = m.schemaVersion === 1 || (m.schemaVersion === 2 && typeof m.image?.reference === "string" && /^docker\.io\/preethamk\/opencode-bot@sha256:[0-9a-f]{64}$/i.test(m.image.reference));
+      if (!imageOk || (m.schemaVersion !== 1 && m.schemaVersion !== 2) || typeof m.version !== "string" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(m.version) || typeof m.commit !== "string" || !/^[0-9a-f]{40}$/i.test(m.commit)) process.exit(2);
       process.stdout.write(`${m.version}\t${m.commit.toLowerCase()}`);
     } catch { process.exit(2); }
   ' "$manifest_file")" || die "release manifest is invalid (expected schemaVersion 1, strict version, and 40 character commit)"

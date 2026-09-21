@@ -18,11 +18,16 @@ env:
   NODE_VERSION: 24
   OPENCODE_VERSION: 2.0.11
   SANDBOX_VERSION: 0.12.9
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'preethamk' }}
 jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Check publishing credentials
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: test -n "$DOCKERHUB_TOKEN" || { echo "Add DOCKERHUB_TOKEN in repository Actions secrets before releasing" >&2; exit 1; }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
@@ -43,7 +48,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
-      digest: ${{ steps.digest.outputs.digest }}
+      image: ${{ steps.push.outputs.image }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -68,8 +73,6 @@ jobs:
           --load .
       - name: Smoke test image
         run: scripts/release/smoke-image.sh opencode-bot:release "$OPENCODE_VERSION" "$SANDBOX_VERSION"
-      - id: digest
-        run: echo "digest=$(scripts/release/image-digest.sh image-metadata.json)" >> "$GITHUB_OUTPUT"
       - name: Smoke test runner health
         run: |
           set -euo pipefail
@@ -83,29 +86,46 @@ jobs:
           done
           docker logs opencode-release-smoke
           exit 1
-      - name: Export image archive
+      - name: Publish image to Docker Hub
+        id: push
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
         run: |
-          docker save opencode-bot:release | gzip -1 -n > computer-image.tar.gz
-          test "$(stat -c '%s' computer-image.tar.gz)" -lt 2147483648
+          set -euo pipefail
+          test -n "$DOCKERHUB_TOKEN" || { echo 'DOCKERHUB_TOKEN is required; add it in repository Settings > Secrets and variables > Actions' >&2; exit 1; }
+          repo="docker.io/$DOCKERHUB_USERNAME/opencode-bot"
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker tag opencode-bot:release "$repo:$RELEASE_TAG"
+          docker tag opencode-bot:release "$repo:$RELEASE_COMMIT"
+          docker push "$repo:$RELEASE_TAG"
+          docker push "$repo:$RELEASE_COMMIT"
+          digest=$(docker buildx imagetools inspect "$repo:$RELEASE_TAG" | awk '/Digest:/ { print $2; exit }')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Docker Hub did not return an immutable digest" >&2; exit 1; }
+          reference="$repo@$digest"
+          echo "image=$reference" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          docker logout docker.io
+          # Verify installers can pull without our publishing credentials.
+          docker buildx imagetools inspect "$reference" >/dev/null
       - name: Write release manifest
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
-          RELEASE_DIGEST: ${{ steps.digest.outputs.digest }}
+          IMAGE_REFERENCE: ${{ steps.push.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          BUILD_DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          sha256sum computer-image.tar.gz | cut -d' ' -f1 > computer-image.sha256
           node scripts/release/write-manifest.mjs --output release-manifest.json \
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
-            --digest "$RELEASE_DIGEST" --archive computer-image.tar.gz \
-            --archive-sha256 "$(cat computer-image.sha256)"
-          sha256sum release-manifest.json computer-image.tar.gz > SHA256SUMS
+            --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE"
+          sha256sum release-manifest.json > SHA256SUMS
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: release-bundle
-          compression-level: 0
           retention-days: 3
           path: |
-            computer-image.tar.gz
             release-manifest.json
             SHA256SUMS
           if-no-files-found: error
@@ -129,11 +149,11 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
             test "$draft" = true || { echo "release $RELEASE_TAG already exists and is published" >&2; exit 1; }
-            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json SHA256SUMS computer-image.tar.gz
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json SHA256SUMS
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
-              --generate-notes --draft release-manifest.json SHA256SUMS computer-image.tar.gz
+              --generate-notes --draft release-manifest.json SHA256SUMS
           fi
       - name: Publish release atomically
         env:
