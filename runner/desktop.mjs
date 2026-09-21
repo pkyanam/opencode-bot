@@ -12,7 +12,7 @@ const MAX_CONTROL_TEXT = 16_000;
 const MODIFIERS = new Set(["Alt", "Control", "Meta", "Shift"]);
 const NAVIGATION_KEYS = new Set(["Backspace", "Delete", "Enter", "Escape", "Tab", "Space", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home", "PageDown", "PageUp"]);
 const ALLOWED_SHORTCUTS = new Set([
-  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").flatMap(key => [`Control+${key}`, `Control+Shift+${key}`]),
+  ..."ACFLNPRSTUVXYZ".split("").flatMap(key => [`Control+${key}`, `Control+Shift+${key}`]),
   ...["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].flatMap(key => [`Shift+${key}`, `Control+${key}`, `Control+Shift+${key}`]),
   "Control+Tab", "Control+Shift+Tab",
   "Meta+A", "Meta+C", "Meta+L", "Meta+V", "Meta+X",
