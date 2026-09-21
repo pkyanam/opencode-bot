@@ -218,17 +218,41 @@ choose_cloudflare_account() {
 open_onboarding() {
   local state_dir="${INSTALL_DIR}/.opencode-bot"
   [[ -s "${state_dir}/deployment-state.json" && -s "${state_dir}/secrets.json" ]] || return 0
-  OCBOT_STATE_DIR="$state_dir" node --input-type=module -e '
+  if ! OCBOT_STATE_DIR="$state_dir" node --input-type=module -e '
     import { readFileSync, writeFileSync, chmodSync } from "node:fs";
     const dir = process.env.OCBOT_STATE_DIR;
     const state = JSON.parse(readFileSync(`${dir}/deployment-state.json`, "utf8"));
     const secrets = JSON.parse(readFileSync(`${dir}/secrets.json`, "utf8"));
     if (!state.deploymentUrl || !secrets.APP_TOKEN) process.exit(0);
-    const target = `${state.deploymentUrl.replace(/\/$/, "")}#connect=${encodeURIComponent(secrets.APP_TOKEN)}`;
+    const ready = async () => {
+      if (process.env.OCBOT_SKIP_HANDOFF_READY === "1") return true;
+      const attempts = Math.max(1, Number(process.env.OCBOT_HANDOFF_READY_ATTEMPTS || 10));
+      const delayMs = Math.max(0, Number(process.env.OCBOT_HANDOFF_READY_DELAY_MS || 1000));
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+          const url = new URL(state.deploymentUrl); url.pathname = "/"; url.searchParams.set("ocbot", String(Date.now()));
+          const response = await fetch(url, { signal: AbortSignal.timeout(5000), cache: "no-store" });
+          const html = await response.text();
+          const asset = html.match(/<script[^>]+src="(\/assets\/[^"?]+\.js)"/i)?.[1];
+          const assetResponse = asset ? await fetch(new URL(asset, url), { signal: AbortSignal.timeout(5000), cache: "no-store" }) : null;
+          if (response.ok && /^text\/html(?:;|$)/i.test(response.headers.get("content-type") ?? "") && /<title>OpenCode Bot<\/title>/i.test(html) && assetResponse?.ok) return true;
+        } catch { /* deployment propagation is retried below */ }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      return false;
+    };
+    // Bust a cached workers.dev shell while keeping the owner credential in
+    // the fragment, where it is never sent in an HTTP request.
+    const targetUrl = new URL(state.deploymentUrl); targetUrl.pathname = "/"; targetUrl.searchParams.set("ocbot", String(Date.now())); targetUrl.hash = `connect=${encodeURIComponent(secrets.APP_TOKEN)}`;
+    const target = targetUrl.toString();
     const file = `${dir}/open.html`;
     writeFileSync(file, `<!doctype html><meta http-equiv="refresh" content="0;url=${target}"><a href="${target}">Open opencode-bot</a>\n`, { mode: 0o600 });
     chmodSync(file, 0o600);
-  '
+    if (!(await ready())) { process.stderr.write("[opencode-bot] deployment is healthy but its web shell is not ready yet; the saved handoff can be opened again in a minute\n"); process.exit(1); }
+  '; then
+    say "deployment handoff saved at ${state_dir}/open.html; web assets are still propagating, so it was not opened automatically"
+    return 0
+  fi
   if [[ -f "${state_dir}/open.html" ]]; then
     say "opening the owner connection handoff"
     if command_exists open; then open "${state_dir}/open.html" >/dev/null 2>&1 || true

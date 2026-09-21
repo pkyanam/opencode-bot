@@ -48,7 +48,7 @@ function runScript(f: ReturnType<typeof fixture>, extraEnv: Record<string, strin
   return execFileSync("bash", ["-s", "--", "--yes"], {
     cwd: f.dir,
     env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, HOME: f.home, TMPDIR: f.dir,
-      OCBOT_INSTALL_DIR: f.install, OCBOT_NODE_ROOT: f.runtime,
+      OCBOT_INSTALL_DIR: f.install, OCBOT_NODE_ROOT: f.runtime, OCBOT_SKIP_HANDOFF_READY: "1",
       OCBOT_REPO_URL: "https://github.com/pkyanam/opencode-bot.git", OCBOT_TEST_LOG: f.log, ...extraEnv },
     input: readFileSync(installer), encoding: "utf8",
   });
@@ -86,9 +86,22 @@ describe("public installer", () => {
     expect(calls).toContain("setup apply --apply --install-missing");
     expect(existsSync(join(f.install, "setup.sh"))).toBe(true);
     const handoff=join(f.install,".opencode-bot/open.html");
-    expect(readFileSync(handoff,"utf8")).toContain("#connect="+token);
+    expect(readFileSync(handoff,"utf8")).toMatch(/workers\.dev\/\?ocbot=\d+#connect=/);
     expect(statSync(handoff).mode & 0o777).toBe(0o600);
     expect(output).not.toContain(token);
+  });
+
+  it("saves but does not open a handoff while the web shell is unavailable", () => {
+    const f = fixture();
+    mkdirSync(join(f.install, ".git"), { recursive: true });
+    mkdirSync(join(f.install, ".opencode-bot"), { recursive: true });
+    executable(join(f.install, "setup.sh"), `printf 'setup apply --apply --install-missing\\n' >> "$OCBOT_TEST_LOG"`);
+    writeFileSync(join(f.install, ".opencode-bot/deployment-state.json"), JSON.stringify({ deploymentUrl: "http://127.0.0.1:1" }));
+    writeFileSync(join(f.install, ".opencode-bot/secrets.json"), JSON.stringify({ APP_TOKEN: "z".repeat(43) }));
+    const output = runScript(f, { OCBOT_SKIP_HANDOFF_READY: "0", OCBOT_HANDOFF_READY_ATTEMPTS: "1", OCBOT_HANDOFF_READY_DELAY_MS: "0" });
+    expect(output).toContain("web assets are still propagating");
+    expect(readFileSync(f.log, "utf8")).not.toContain("open ");
+    expect(readFileSync(join(f.install, ".opencode-bot/open.html"), "utf8")).toContain("#connect=");
   });
 
   it("refuses an existing checkout with local changes", () => {
