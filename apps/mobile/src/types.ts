@@ -3,7 +3,9 @@ export type Bot = {
   name: string;
   instructions?: string;
   model?: string;
+  agent?: string;
   status?: string;
+  createdAt?: string;
 };
 export type Thread = {
   id: string;
@@ -71,3 +73,8 @@ export type State = {
   messages?: Record<string, Message[]>;
   threadMessages?: Record<string, Message[]>;
 };
+export type CatalogModel = { id?: string; name?: string; providerID?: string; provider?: string; [key: string]: unknown };
+export type CatalogAgent = { id?: string; name?: string; description?: string; [key: string]: unknown };
+export type Catalog = { runtime?: { name?: string; version?: string }; models?: CatalogModel[]; agents?: CatalogAgent[]; commands?: Array<{ name: string; description?: string }>; actions?: Array<{ name: string; action?: string }>; };
+export type Skill = { id: string; name: string; description: string; instructions: string; createdAt?: string; updatedAt?: string };
+export type FileArtifact = { path: string; kind?: string; size?: number; modifiedAt?: string; [key: string]: unknown };

@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -15,6 +16,8 @@ type Store = {
   state: State | null;
   refresh: () => Promise<void>;
   connected: boolean;
+  loading: boolean;
+  refreshing: boolean;
   pairing: (baseUrl: string, secret: string, name: string) => Promise<void>;
   disconnect: () => Promise<void>;
   error: string;
@@ -25,10 +28,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<State | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshInFlight = useRef(false);
   useEffect(() => {
     let alive = true;
     void readConnection().then((connection) => {
-      if (!alive || !connection) return;
+      if (!alive || !connection) { if (alive) setLoading(false); return; }
       setBaseUrl(connection.baseUrl);
       setCachedToken(connection.token);
       setConnected(true);
@@ -38,7 +44,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!alive) return;
         if (e instanceof ApiError && e.status === 401) setConnected(false);
         setError(e instanceof Error ? e.message : "Could not reach the workspace.");
-      });
+      }).finally(() => { if (alive) setLoading(false); });
+    }).catch((e) => {
+      // SecureStore can reject (for example after an OS restore). Leave the
+      // signed-out screen usable instead of keeping its spinner forever.
+      if (alive) { setError(e instanceof Error ? e.message : "Could not load saved connection."); setLoading(false); }
     });
     return () => { alive = false; };
   }, []);
@@ -47,6 +57,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setState(null);
   }), []);
   async function refresh() {
+    if (refreshInFlight.current || !baseUrl) return;
+    refreshInFlight.current = true;
+    setRefreshing(true);
     try {
       setError("");
       setState(await api(baseUrl).state());
@@ -56,7 +69,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setError(
         e instanceof Error ? e.message : "Could not reach the workspace.",
       );
-    }
+    } finally { refreshInFlight.current = false; setRefreshing(false); }
   }
   async function pairing(url: string, secret: string, name: string) {
     const result = await api(url).redeem(secret, name);
@@ -64,7 +77,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setCachedToken(result.deviceToken);
     setBaseUrl(url.trim().replace(/\/$/, ""));
     setConnected(true);
-    setState(await api(url).state());
+    try { setState(await api(url).state()); }
+    catch (error) { setConnected(false); throw error; }
   }
   async function disconnect() {
     await clearConnection();
@@ -79,11 +93,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       state,
       refresh,
       connected,
+      loading,
+      refreshing,
       pairing,
       disconnect,
       error,
     }),
-    [baseUrl, state, connected, error],
+    [baseUrl, state, connected, loading, refreshing, error],
   );
   return (
     <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

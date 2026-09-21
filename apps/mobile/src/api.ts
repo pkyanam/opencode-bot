@@ -2,11 +2,15 @@ import { clearConnection, readToken } from "./storage";
 import type {
   Approval,
   Attachment,
+  Bot,
   Message,
   Run,
   RunEvent,
   State,
   Thread,
+  Catalog,
+  FileArtifact,
+  Skill,
 } from "./types";
 
 export class ApiError extends Error {
@@ -86,6 +90,14 @@ export async function request<T>(
 type MobileRequestInit = RequestInit & { auth?: boolean; timeoutMs?: number };
 export const api = (baseUrl: string) => ({
   state: () => request<State>(baseUrl, "/api/state"),
+  bots: () => request<Bot[]>(baseUrl, "/api/bots"),
+  createBot: (payload: { name: string; instructions?: string; model?: string; agent?: string; nodeId?: string } | string) => {
+    const body = typeof payload === "string" ? { name: payload, instructions: "", model: "" } : { instructions: "", model: "", ...payload };
+    return request<Bot>(baseUrl, "/api/bots", { method: "POST", body: JSON.stringify(body) });
+  },
+  updateBot: (id: string, payload: Partial<Pick<Bot, "name" | "instructions" | "model" | "agent">>) =>
+    request<Bot>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteBot: (id: string) => request<void>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, { method: "DELETE" }),
   redeem: (credential: string, deviceName: string) =>
     request<{ deviceToken: string }>(baseUrl, "/api/pairing/redeem", {
       method: "POST",
@@ -108,6 +120,21 @@ export const api = (baseUrl: string) => ({
       method: "POST",
       body: JSON.stringify({ botId, title }),
     }),
+  renameThread: (threadId: string, title: string) =>
+    request<Thread>(baseUrl, `/api/threads/${encodeURIComponent(threadId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+  deleteThread: (threadId: string) =>
+    request<void>(baseUrl, `/api/threads/${encodeURIComponent(threadId)}`, {
+      method: "DELETE",
+    }),
+  catalog: () => request<Catalog>(baseUrl, "/api/catalog"),
+  skills: () => request<Skill[]>(baseUrl, "/api/skills"),
+  createSkill: (payload: Pick<Skill, "name" | "description" | "instructions">) => request<Skill>(baseUrl, "/api/skills", { method: "POST", body: JSON.stringify(payload) }),
+  updateSkill: (id: string, payload: Pick<Skill, "name" | "description" | "instructions">) => request<Skill>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteSkill: (id: string) => request<void>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  files: (path = ".") => request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(baseUrl, `/api/files?path=${encodeURIComponent(path)}`),
   messages: async (threadId: string) => {
     const result = await request<{ messages: Message[] }>(
       baseUrl,
