@@ -147,7 +147,7 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
     // its ID was persisted. Reuse this job's rollout instead of replacing it.
     if (typeof body.description === "string" && body.description.includes("(")) {
       const rollouts = await this.request<Array<{ id?: string; status?: string; description?: string; target_configuration?: { image?: string } }>>(path);
-      const existing = Array.isArray(rollouts) && rollouts.find(rollout => rollout.description === body.description && rollout.target_configuration?.image === (body.target_configuration as { image?: string })?.image);
+      const existing = Array.isArray(rollouts) ? rollouts.find(rollout => rollout.description === body.description && rollout.target_configuration?.image === (body.target_configuration as { image?: string })?.image) : undefined;
       if (existing?.id) return existing;
     }
     return this.request(path, { method: "POST", body: JSON.stringify(body) });
