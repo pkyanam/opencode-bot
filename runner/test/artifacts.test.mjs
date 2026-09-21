@@ -51,6 +51,46 @@ test("artifact content and atomic upload work", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("artifact workspace management creates, moves, and deletes safely", async () => {
+  const root = await fixture();
+  try {
+    const created = await request(root, "POST", "/files/mkdir?path=projects%2Fdemo");
+    assert.equal(created.response.status, 201, created.bytes.toString());
+    const uploaded = await request(root, "POST", "/files?path=projects%2Fdemo%2Fnotes.txt", "notes");
+    assert.equal(uploaded.response.status, 201);
+    const moved = await request(root, "POST", "/files/move?from=projects%2Fdemo%2Fnotes.txt&to=projects%2Fdemo%2Frenamed.txt");
+    assert.equal(moved.response.status, 200, moved.bytes.toString());
+    assert.equal(await readFile(path.join(root, "projects/demo/renamed.txt"), "utf8"), "notes");
+    const deleted = await request(root, "DELETE", "/files?path=projects%2Fdemo");
+    assert.equal(deleted.response.status, 200, deleted.bytes.toString());
+    await assert.rejects(readFile(path.join(root, "projects/demo/renamed.txt")));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("artifact workspace management rejects root and symlink mutations", async () => {
+  const root = await fixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "opencode-artifacts-outside-"));
+  try {
+    await writeFile(path.join(outside, "secret.txt"), "secret");
+    await symlink(outside, path.join(root, "outside-link"));
+    for (const [method, url] of [
+      ["DELETE", "/files?path=."],
+      ["POST", "/files/mkdir?path=linked%2Fnew"],
+      ["POST", "/files/move?from=nested%2Fhello.txt&to=linked%2Fcopy.txt"],
+      ["DELETE", "/files?path=linked"],
+      ["DELETE", "/files?path=outside-link%2Fsecret.txt"],
+      ["POST", "/files/move?from=outside-link%2Fsecret.txt&to=copy.txt"],
+      ["POST", "/files/mkdir?path=outside-link%2Fnew"],
+    ]) {
+      const result = await request(root, method, url);
+      assert.equal(result.response.status, 400, `${method} ${url}`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("artifact paths reject traversal, hidden paths, and symlinks", async () => {
   const root = await fixture();
   try {

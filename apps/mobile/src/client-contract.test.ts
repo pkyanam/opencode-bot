@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 const storage=vi.hoisted(()=>({clearConnection:vi.fn(async()=>{}),readToken:vi.fn(async()=>null)}));
-vi.mock('../apps/mobile/src/storage',()=>storage);
-import { api, request, setCachedToken, onAuthInvalidated } from '../apps/mobile/src/api';
+vi.mock('./storage',()=>storage);
+vi.mock('expo-file-system',()=>({File: class {}}));
+import { api, request, setCachedToken, onAuthInvalidated } from './api';
 afterEach(()=>{vi.unstubAllGlobals();vi.clearAllMocks();setCachedToken(null)});
 it('never sends an existing workspace token during pairing or clears it on a rejected invitation',async()=>{
  setCachedToken('existing-private-token');

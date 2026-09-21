@@ -69,7 +69,8 @@ async function saveConfig(file, value) {
 
 async function jsonFetch(url, { token, method = "GET", body } = {}) {
   const headers = { accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }), ...(token ? { authorization: `Bearer ${token}` } : {}) };
-  const response = await fetch(url, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const timeoutMs = Math.max(1000, Number(process.env.NODE_HTTP_TIMEOUT_MS || 30_000));
+  const response = await fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs), ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   let value = null;
   try { value = await response.json(); } catch { /* response body is optional */ }
   if (!response.ok) throw new Error(`${method} ${url} failed with HTTP ${response.status}: ${value?.error || "request failed"}`);

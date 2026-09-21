@@ -1,4 +1,5 @@
 import { clearConnection, readToken } from "./storage";
+import { File as ExpoFile } from "expo-file-system";
 import type {
   Approval,
   Attachment,
@@ -52,7 +53,7 @@ export async function request<T>(
   const authToken = await token();
   const headers = new Headers(fetchInit.headers);
   headers.set("Accept", responseType === "text" ? "text/plain, */*" : "application/json");
-  if (fetchInit.body && !(fetchInit.body instanceof FormData))
+  if (fetchInit.body && !(fetchInit.body instanceof FormData) && !headers.has("Content-Type"))
     headers.set("Content-Type", "application/json");
   if (includeAuth && authToken)
     headers.set("Authorization", `Bearer ${authToken}`);
@@ -243,11 +244,26 @@ export const api = (baseUrl: string) => ({
     }),
   upload: async (file: { uri: string; name: string; mimeType?: string }) => {
     const form = new FormData();
-    form.append("file", {
-      uri: file.uri,
-      name: file.name,
-      type: file.mimeType ?? "application/octet-stream",
-    } as unknown as Blob);
+    // Expo's fetch multipart encoder does not support React Native's `{ uri,
+    // name, type }` descriptor. Its native encoder does support an object with
+    // `bytes`, however, which keeps the file off the JS Blob/ArrayBuffer path
+    // (React Native's BlobManager rejects ArrayBuffer parts).
+    const nativeFile = new ExpoFile(file.uri);
+    if (nativeFile.size > 10 * 1024 * 1024) throw new ApiError("Attachments must be 10 MiB or smaller.");
+    const name = file.name || nativeFile.name || "attachment";
+    const type = file.mimeType || "application/octet-stream";
+    if (typeof (form as FormData & { getParts?: unknown }).getParts === "function") {
+      const nativePart = {
+        bytes: () => nativeFile.bytes(),
+        name,
+        type,
+      };
+      form.append("file", nativePart as unknown as Blob);
+    } else {
+      // Browsers and the unit-test FormData use standard Blob values.
+      const blob = new Blob([await nativeFile.arrayBuffer()], { type });
+      form.append("file", blob, name);
+    }
     return request<{ attachment: Attachment }>(baseUrl, "/api/uploads", {
       method: "POST",
       body: form,

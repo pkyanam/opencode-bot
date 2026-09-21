@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, mkdir, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, rename, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import { listWorkspaceArtifacts, resolveWorkspaceFile, resolveWorkspacePath, WorkspacePathError } from "../packages/browser/src/index.ts";
 
@@ -18,7 +18,7 @@ export async function dispatchArtifactRequest(req, res, workspace, options = {})
   const maxUploadBytes = options.maxUploadBytes ?? MAX_ARTIFACT_UPLOAD_BYTES;
   const maxDownloadBytes = options.maxDownloadBytes ?? MAX_ARTIFACT_DOWNLOAD_BYTES;
   const requestUrl = new URL(req.url ?? "/", "http://runner");
-  if (requestUrl.pathname !== "/files" && requestUrl.pathname !== "/files/content") return false;
+  if (!["/files", "/files/content", "/files/mkdir", "/files/move"].includes(requestUrl.pathname)) return false;
 
   try {
     if (requestUrl.pathname === "/files" && req.method === "GET") {
@@ -42,6 +42,49 @@ export async function dispatchArtifactRequest(req, res, workspace, options = {})
       });
       createReadStream(file).pipe(res);
       return true;
+    }
+    if (requestUrl.pathname === "/files/mkdir" && req.method === "POST") {
+      const requested = artifactPath(requestUrl.searchParams.get("path"));
+      const target = resolveWorkspacePath(workspace, requested);
+      await ensureDirectoryPath(path.resolve(workspace), target);
+      try {
+        const info = await lstat(target);
+        if (info.isSymbolicLink()) throw new WorkspacePathError("Symbolic links are not allowed");
+        if (!info.isDirectory()) throw new WorkspacePathError("path already exists and is not a directory");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        await mkdir(target, { mode: 0o700 });
+      }
+      return json(res, 201, { path: path.relative(path.resolve(workspace), target), kind: "directory" });
+    }
+    if (requestUrl.pathname === "/files/move" && req.method === "POST") {
+      const source = artifactPath(requestUrl.searchParams.get("from"));
+      const destination = artifactPath(requestUrl.searchParams.get("to"));
+      if (source === destination) throw new WorkspacePathError("source and destination must differ");
+      const root = path.resolve(workspace);
+      const sourceTarget = resolveWorkspacePath(root, source);
+      const destinationTarget = resolveWorkspacePath(root, destination);
+      const sourceInfo = await lstat(sourceTarget);
+      if (sourceInfo.isSymbolicLink()) throw new WorkspacePathError("Symbolic links are not allowed");
+      await ensureDirectoryPath(root, path.dirname(destinationTarget));
+      try {
+        await lstat(destinationTarget);
+        throw new WorkspacePathError("destination already exists");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await rename(sourceTarget, destinationTarget);
+      return json(res, 200, { from: path.relative(root, sourceTarget), to: path.relative(root, destinationTarget), kind: sourceInfo.isDirectory() ? "directory" : "file" });
+    }
+    if (requestUrl.pathname === "/files" && req.method === "DELETE") {
+      const requested = artifactPath(requestUrl.searchParams.get("path"));
+      const root = path.resolve(workspace);
+      if (requested === ".") throw new WorkspacePathError("workspace root cannot be deleted");
+      const target = resolveWorkspacePath(root, requested);
+      const info = await lstat(target);
+      if (info.isSymbolicLink()) throw new WorkspacePathError("Symbolic links are not allowed");
+      await rm(target, { recursive: info.isDirectory(), force: false });
+      return json(res, 200, { deleted: true, path: path.relative(root, target) });
     }
     if (requestUrl.pathname === "/files" && req.method === "POST") {
       const requested = artifactPath(requestUrl.searchParams.get("path"));

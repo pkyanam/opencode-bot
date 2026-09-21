@@ -654,10 +654,11 @@ export class Workspace {
           const headers = new Headers({ Authorization: request.headers.get("authorization") ?? "" });
           const raw = typeof input === "string";
           const multipart = input instanceof FormData;
-          if (input !== undefined && !multipart) headers.set("content-type", raw ? "text/plain; charset=utf-8" : "application/json");
+          const binary = input instanceof Blob;
+          if (input !== undefined && !multipart) headers.set("content-type", binary ? (input.type || "application/octet-stream") : raw ? "text/plain; charset=utf-8" : "application/json");
           // Re-enter the same routes with the caller's credential. Never elevate a paired device.
           const result = await this.fetch(new Request(new URL(path, url), {
-            method, headers, ...(input === undefined ? {} : { body: raw || multipart ? input as BodyInit : JSON.stringify(input) }),
+            method, headers, ...(input === undefined ? {} : { body: raw || multipart || binary ? input as BodyInit : JSON.stringify(input) }),
           }));
           const contentType = result.headers.get("content-type") ?? "";
           const bytes = new Uint8Array(await result.arrayBuffer());
@@ -782,9 +783,8 @@ export class Workspace {
       if (nativeMessages && request.method === "GET")
         return await this.nativeMessages(nativeMessages[1]);
       if (
-        (url.pathname === "/api/files" ||
-          url.pathname === "/api/files/content") &&
-        ["GET", "POST"].includes(request.method)
+        ["/api/files", "/api/files/content", "/api/files/mkdir", "/api/files/move"].includes(url.pathname) &&
+        ["GET", "POST", "DELETE"].includes(request.method)
       )
         return await this.fileProxy(request, url);
       if (url.pathname === "/api/uploads" && request.method === "POST")
@@ -2485,22 +2485,24 @@ export class Workspace {
       url.pathname === "/api/files" &&
       request.method === "GET" &&
       (!url.searchParams.get("path") || url.searchParams.get("path") === ".");
+    const operationPath = url.pathname === "/api/files/content"
+      ? "/files/content"
+      : url.pathname === "/api/files/mkdir"
+        ? "/files/mkdir"
+        : url.pathname === "/api/files/move"
+          ? "/files/move"
+          : "/files";
     const path = listingRoot ? "." : url.searchParams.get("path");
+    const moveFrom = url.searchParams.get("from");
+    const moveTo = url.searchParams.get("to");
+    const pathValues = operationPath === "/files/move" ? [moveFrom, moveTo] : [path];
     if (
       !listingRoot &&
-      (!path ||
-        path.length > 1000 ||
-        path.startsWith("/") ||
-        path
-          .split(/[\\/]+/)
-          .some(
-            (part) =>
-              !part || part === "." || part === ".." || part.startsWith("."),
-          ))
+      pathValues.some((value) => !value || value.length > 1000 || value.startsWith("/") || value.split(/[\\/]+/).some((part) => !part || part === "." || part === ".." || part.startsWith(".")))
     )
       throw new HttpError(400, "a safe explicit path is required");
     const transport = await this.transport();
-    const target = `${url.pathname === "/api/files/content" ? "/files/content" : "/files"}?path=${encodeURIComponent(path!)}${url.searchParams.get("limit") ? `&limit=${encodeURIComponent(url.searchParams.get("limit")!)}` : ""}`;
+    const target = `${operationPath}?${operationPath === "/files/move" ? `from=${encodeURIComponent(moveFrom!)}&to=${encodeURIComponent(moveTo!)}` : `path=${encodeURIComponent(path!)}`}${url.searchParams.get("limit") ? `&limit=${encodeURIComponent(url.searchParams.get("limit")!)}` : ""}`;
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) headers.set("content-type", contentType);
@@ -3419,7 +3421,7 @@ const TERMINAL = new Set(["succeeded", "failed", "needs_review", "cancelled"]);
 const CLIENT_MCP_TOOLS = new Set([
   "bot_list", "bot_create", "bot_update", "bot_delete", "thread_list", "thread_create", "thread_update", "thread_delete", "thread_messages",
   "run_list", "run_start", "run_get", "run_events", "run_cancel", "run_approve", "delegation_list", "delegation_create",
-  "skill_list", "skill_create", "skill_update", "skill_delete", "file_list", "file_read", "file_write", "upload_file", "attachment_read",
+  "skill_list", "skill_create", "skill_update", "skill_delete", "file_list", "file_read", "file_write", "file_upload", "file_mkdir", "file_move", "file_delete", "upload_file", "attachment_read",
   "computer_readiness", "computer_status", "pairing_session", "routine_list", "routine_create", "routine_update", "routine_delete",
   "memory_list", "memory_add", "memory_delete", "catalog_get", "thread_bot_skills", "thread_assign_skills", "thread_action",
 ]);

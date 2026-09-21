@@ -12,9 +12,15 @@
       "expo-secure-store",
       "expo-document-picker",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow OpenCode Bot to attach photos to your bot conversations."
+        }
+      ],
+      [
         "expo-camera",
         {
-          "cameraPermission": "Allow OpenCode Bot to scan device invitations."
+          "cameraPermission": "Allow OpenCode Bot to take photos and scan device invitations."
         }
       ],
       [

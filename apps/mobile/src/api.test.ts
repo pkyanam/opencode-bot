@@ -9,6 +9,18 @@ const secure = vi.hoisted(() => ({
 // this virtual connector mock when running the pure API contract tests.
 // @ts-expect-error Vitest's runtime supports the virtual mock option.
 vi.mock("expo-secure-store", () => secure, { virtual: true });
+vi.mock("expo-file-system", () => ({
+  File: class MockExpoFile extends Blob {
+    uri: string;
+    constructor(uri: string) {
+      super([], { type: "application/octet-stream" });
+      this.uri = uri;
+    }
+    bytes() {
+      return this.arrayBuffer().then((value) => new Uint8Array(value));
+    }
+  },
+}), { virtual: true });
 
 import { api, ApiError, normalizeMessages, setCachedToken } from "./api";
 
@@ -17,6 +29,7 @@ const jsonResponse = (value: unknown, status = 200) =>
 
 describe("mobile API contract", () => {
   beforeEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     setCachedToken("dt_test");
   });
@@ -72,6 +85,56 @@ describe("mobile API contract", () => {
     vi.stubGlobal("fetch", fetchMock);
     await api("https://workspace.example").redeem("ps_invite", "Phone");
     expect(fetchMock.mock.calls[0][1].headers.get("Authorization")).toBeNull();
+  });
+
+  it("passes native file bytes to Expo without creating an ArrayBuffer-backed RN Blob", async () => {
+    class NativeForm {
+      parts: Array<[string, any]> = [];
+      append(name: string, part: unknown) { this.parts.push([name, part]); }
+      getParts() { return this.parts; }
+    }
+    vi.stubGlobal("FormData", NativeForm);
+    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ attachment: { id: "native" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await api("https://workspace.example").upload({ uri: "file:///photo.heic", name: "My photo.heic", mimeType: "image/heic" });
+    const part = (fetcher.mock.calls[0][1].body as NativeForm).parts[0][1];
+    expect(part.name).toBe("My photo.heic");
+    expect(part.type).toBe("image/heic");
+    expect(typeof part.bytes).toBe("function");
+    expect(await part.bytes()).toBeInstanceOf(Uint8Array);
+    expect(fetcher.mock.calls[0][1].headers.has("Content-Type")).toBe(false);
+  });
+
+  it("uploads a native Blob part with the picked filename", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ attachment: { id: "att_1", name: "photo.jpg", mimeType: "image/jpeg", size: 12 } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await api("https://workspace.example").upload({
+      uri: "file:///cache/photo.jpg",
+      name: "photo.jpg",
+      mimeType: "image/jpeg",
+    });
+    const body = fetchMock.mock.calls[0][1].body as FormData;
+    const part = body.get("file");
+    expect(part).toBeInstanceOf(Blob);
+    expect((part as File).name).toBe("photo.jpg");
+    expect((part as Blob).type).toBe("image/jpeg");
+    expect(fetchMock.mock.calls[0][1].headers.get("Content-Type")).toBeNull();
+  });
+
+  it("uses an octet-stream MIME type when the picker omits one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ attachment: { id: "att_2", name: "payload.bin", mimeType: "application/octet-stream", size: 0 } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await api("https://workspace.example").upload({
+      uri: "file:///cache/payload.bin",
+      name: "payload.bin",
+    });
+    const part = (fetchMock.mock.calls[0][1].body as FormData).get("file") as Blob;
+    expect(part).toBeInstanceOf(Blob);
+    expect(part.type).toBe("application/octet-stream");
   });
 
   it("orders native messages chronologically and drops empty assistant bubbles", () => {

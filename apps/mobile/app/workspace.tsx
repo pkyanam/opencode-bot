@@ -14,7 +14,8 @@ import { router, useLocalSearchParams } from "expo-router";
 import { api, request } from "../src/api";
 import { useStore } from "../src/store";
 import { colors, styles } from "../src/ui";
-import type { Skill, FileArtifact } from "../src/types";
+import type { Skill } from "../src/types";
+import { FilesystemExplorer } from "../src/components/filesystem-explorer";
 
 type Section = "skills" | "files" | "computer" | "routines";
 type Routine = {
@@ -44,47 +45,10 @@ export default function Workspace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [files, setFiles] = useState<FileArtifact[]>([]);
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [computer, setComputer] = useState<Computer | null>(null);
-  const [path, setPath] = useState(".");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [fileText, setFileText] = useState("");
-  const [fileLoading, setFileLoading] = useState(false);
-  async function openFile(file: FileArtifact) {
-    if (/dir|folder/.test(file.kind ?? "")) {
-      setPath(file.path);
-      return;
-    }
-    if (expanded === file.path) {
-      setExpanded(null);
-      return;
-    }
-    setExpanded(file.path);
-    setFileText("");
-    if (
-      (file.size ?? 0) > 100_000 ||
-      !/\.(txt|md|json|csv|log|js|ts|tsx|jsx|css|html|yaml|yml|toml|py|sh)$/i.test(
-        file.path,
-      )
-    ) {
-      setFileText(
-        "Open this file in the web workspace to preview or download it.",
-      );
-      return;
-    }
-    setFileLoading(true);
-    try {
-      setFileText(
-        (await api(baseUrl).fileContent(file.path)).slice(0, 100_000),
-      );
-    } catch (e) {
-      setFileText(e instanceof Error ? e.message : "Could not read this file.");
-    } finally {
-      setFileLoading(false);
-    }
-  }
   const load = useCallback(async () => {
     if (!baseUrl) {
       setLoading(false);
@@ -99,12 +63,6 @@ export default function Workspace() {
     setError("");
     try {
       if (section === "skills") setSkills(await read<Skill[]>("/api/skills"));
-      if (section === "files") {
-        const result = await read<
-          FileArtifact[] | { artifacts?: FileArtifact[] }
-        >(`/api/files?path=${encodeURIComponent(path)}`);
-        setFiles(Array.isArray(result) ? result : (result.artifacts ?? []));
-      }
       if (section === "routines")
         setRoutines(await read<Routine[]>("/api/routines"));
       if (section === "computer")
@@ -119,7 +77,7 @@ export default function Workspace() {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [baseUrl, section, path]);
+  }, [baseUrl, section]);
   useEffect(() => {
     void load();
     return () => pending.current?.abort();
@@ -245,53 +203,7 @@ export default function Workspace() {
                     detail="Skills give your bots reusable instructions. Add them from the web workspace, then review them here."
                   />
                 ))}
-              {section === "files" && (
-                <>
-                  <Text style={styles.label}>
-                    {path === "." ? "Shared workspace" : path}
-                  </Text>
-                  {path !== "." && (
-                    <Pressable
-                      style={styles.ghost}
-                      onPress={() =>
-                        setPath(path.split("/").slice(0, -1).join("/") || ".")
-                      }
-                    >
-                      <Text style={styles.ghostText}>Up one folder</Text>
-                    </Pressable>
-                  )}
-                  {files.length ? (
-                    files.map((file) => (
-                      <Pressable
-                        key={file.path}
-                        style={styles.card}
-                        onPress={() => void openFile(file)}
-                      >
-                        <Text style={local.name}>
-                          {file.path.split("/").pop()}
-                        </Text>
-                        <Text style={styles.subtitle}>
-                          {/dir|folder/.test(file.kind ?? "")
-                            ? "Folder ›"
-                            : typeof file.size === "number"
-                              ? `${Math.ceil(file.size / 1024)} KB`
-                              : "File"}
-                        </Text>
-                        {expanded === file.path && (
-                          <Text selectable style={local.body}>
-                            {fileLoading ? "Reading file…" : fileText}
-                          </Text>
-                        )}
-                      </Pressable>
-                    ))
-                  ) : (
-                    <Empty
-                      title="No files in this folder"
-                      detail="Files your bots create will appear here. You can also attach documents and images to any conversation."
-                    />
-                  )}
-                </>
-              )}
+              {section === "files" && <FilesystemExplorer baseUrl={baseUrl} />}
               {section === "computer" && (
                 <View style={styles.card}>
                   <Text style={local.name}>Shared computer</Text>

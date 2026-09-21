@@ -16,9 +16,9 @@ trap '[[ -n "${tmp:-}" ]] && rm -rf "$tmp"' EXIT
 say() { printf '[opencode-bot node] %s\n' "$*"; }
 die() { printf '[opencode-bot node] error: %s\n' "$*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
-download() { if has curl; then curl -fsSL "$1" -o "$2"; elif has wget; then wget -qO "$2" "$1"; else die 'curl or wget is required'; fi; }
+download() { if has curl; then curl --connect-timeout 10 --max-time 180 --retry 2 --retry-delay 1 -fsSL "$1" -o "$2"; elif has wget; then wget --timeout=30 --tries=3 -qO "$2" "$1"; else die 'curl or wget is required'; fi; }
 sha256() { if has sha256sum; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-new_tmp() { tmp="$(mktemp -d "${TMPDIR:-/tmp}/opencode-bot-node-install.XXXXXX")"; }
+new_tmp() { [[ -z "${tmp:-}" ]] || rm -rf "$tmp"; tmp="$(mktemp -d "${TMPDIR:-/tmp}/opencode-bot-node-install.XXXXXX")"; }
 xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'; }
 node_archive() { case "$(uname -s):$(uname -m)" in Darwin:x86_64) printf 'node-v%s-darwin-x64.tar.gz' "$NODE_VERSION";; Darwin:arm64) printf 'node-v%s-darwin-arm64.tar.gz' "$NODE_VERSION";; Linux:x86_64) printf 'node-v%s-linux-x64.tar.xz' "$NODE_VERSION";; Linux:aarch64|Linux:arm64) printf 'node-v%s-linux-arm64.tar.xz' "$NODE_VERSION";; *) die "unsupported platform $(uname -s)/$(uname -m)";; esac; }
 
@@ -59,6 +59,7 @@ Description=OpenCode Bot owned computer node
 After=network-online.target
 [Service]
 ExecStart="${NODE_BIN}" "${agent}" start --config "${CONFIG_FILE}"
+Environment="PATH=$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin"
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -71,22 +72,41 @@ EOF
   fi
 }
 
+usage() {
+  cat <<'HELP'
+Connect this computer to OpenCode Bot (no checkout required).
+Usage: bash node-install.sh --control-url URL --pairing-token TOKEN [--name NAME]
+  --control-url URL    Your OpenCode Bot workspace URL
+  --pairing-token TOKEN  One-use token from Settings > Computers
+  --name NAME          Optional display name (defaults to this computer's hostname)
+  --version vX.Y.Z     Install a specific release
+  --uninstall         Remove the installed node service and its local data
+  --help              Show this help
+HELP
+}
 main() {
   local control_url='' pairing_token='' name='' version manifest_url bundle_url expected actual expected_size actual_size
-  while (($#)); do case "$1" in --control-url) control_url="${2:-}"; shift 2;; --pairing-token) pairing_token="${2:-}"; shift 2;; --name) name="${2:-}"; shift 2;; --version) export OCBOT_VERSION="${2:-}"; shift 2;; --uninstall) uninstall; return;; --help|-h) sed -n '1,12p' "$0"; return;; *) die "unknown option $1 (use --control-url, --pairing-token, and --name)";; esac; done
-  [[ -n "$control_url" && -n "$pairing_token" && -n "$name" ]] || die '--control-url, --pairing-token, and --name are required'
+  while (($#)); do
+    case "$1" in --control-url|--pairing-token|--name|--version) [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 needs a value";; esac
+    case "$1" in --control-url) control_url="${2:-}"; shift 2;; --pairing-token) pairing_token="${2:-}"; shift 2;; --name) name="${2:-}"; shift 2;; --version) export OCBOT_VERSION="${2:-}"; shift 2;; --uninstall) uninstall; return;; --help|-h) usage; return;; *) die "unknown option $1 (use --control-url, --pairing-token, and --name)";; esac; done
+  name="${name:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'opencode-node')}"
+  [[ -n "$control_url" && -n "$pairing_token" && -n "$name" ]] || die '--control-url and --pairing-token are required'
+  say 'Preparing runtime…'
   ensure_node; export PATH="$(dirname "$NODE_BIN"):$PATH"; new_tmp
   if [[ -n "${OCBOT_VERSION:-}" ]]; then [[ "$OCBOT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die '--version must be vSemVer'; manifest_url="$RELEASE_BASE/releases/download/$OCBOT_VERSION/node-bundle-manifest.json"; else manifest_url="$RELEASE_BASE/releases/latest/download/node-bundle-manifest.json"; fi
+  say 'Downloading the verified node release…'
   download "$manifest_url" "$tmp/manifest.json" || die 'could not download the node release manifest'
   read -r version bundle_url expected expected_size <<EOF
 $(node --input-type=module -e 'import {readFileSync} from "node:fs"; const m=JSON.parse(readFileSync(process.argv[1])); if(m.schemaVersion!==1||!/^v\d+\.\d+\.\d+$/.test(m.version)||!/^[0-9a-f]{40}$/.test(m.commit)||m.archive?.file!=="node-bundle.tar.gz"||!/^[0-9a-f]{64}$/.test(m.archive.sha256)||!Number.isSafeInteger(m.archive.size)||m.archive.size<=0) process.exit(2); process.stdout.write(`${m.version} ${m.archive.file} ${m.archive.sha256} ${m.archive.size}`)' "$tmp/manifest.json")
 EOF
   bundle_url="$RELEASE_BASE/releases/download/$version/$bundle_url"; download "$bundle_url" "$tmp/node-bundle.tar.gz"; actual="$(sha256 "$tmp/node-bundle.tar.gz")"; actual_size="$(wc -c < "$tmp/node-bundle.tar.gz" | tr -d '[:space:]')"; [[ "$actual" == "$expected" && "$actual_size" == "$expected_size" ]] || die 'node bundle checksum or size verification failed'
   stop_service; rm -rf "$NODE_HOME.partial"; mkdir -p "$NODE_HOME" "$NODE_HOME.partial"; tar -xzf "$tmp/node-bundle.tar.gz" -C "$NODE_HOME.partial"; rm -rf "$NODE_HOME/bundle"; mv "$NODE_HOME.partial" "$NODE_HOME/bundle"; : > "$NODE_HOME/.opencode-bot-node-owned"; chmod 600 "$NODE_HOME/.opencode-bot-node-owned"
+  say 'Installing OpenCode dependencies…'
   npm ci --prefix "$NODE_HOME/bundle/runner" --omit=dev --no-audit --fund=false >/dev/null
   rm -rf "$NODE_HOME/bundle/node_modules"; ln -s runner/node_modules "$NODE_HOME/bundle/node_modules"
   "$NODE_BIN" "$NODE_HOME/bundle/scripts/node-agent.mjs" register --control-url "$control_url" --pairing-token "$pairing_token" --name "$name" --config "$CONFIG_FILE" >/dev/null
   : > "$CONFIG_DIR/.opencode-bot-node-owned"; chmod 600 "$CONFIG_DIR/.opencode-bot-node-owned"
+  say 'Starting the background service…'
   install_service; say "paired $name and started the node service (credentials are in $CONFIG_FILE)"
 }
 main "$@"

@@ -14,6 +14,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import { api } from "../../src/api";
 import { useStore } from "../../src/store";
 import { colors, styles } from "../../src/ui";
@@ -299,14 +300,13 @@ export default function ThreadScreen() {
       loadSerial.current += 1;
     };
   }, []);
-  async function pickAttachment() {
+  async function uploadPickedFile(file: {
+    uri: string;
+    name: string;
+    mimeType?: string | null;
+    size?: number | null;
+  }) {
     if (attachments.length >= 8 || busy) return;
-    const result = await DocumentPicker.getDocumentAsync({
-      copyToCacheDirectory: true,
-      multiple: false,
-    });
-    if (result.canceled) return;
-    const file = result.assets[0];
     if (file.size && file.size > 10 * 1024 * 1024) {
       setError("Attachments must be 10 MiB or smaller.");
       return;
@@ -323,7 +323,7 @@ export default function ThreadScreen() {
       const uploaded = await client.upload({
         uri: file.uri,
         name: file.name,
-        mimeType: file.mimeType,
+        mimeType: file.mimeType ?? undefined,
       });
       setAttachments((current) => [...current, uploaded.attachment]);
     } catch (e) {
@@ -331,6 +331,72 @@ export default function ThreadScreen() {
     } finally {
       setBusy(false);
     }
+  }
+  async function pickFile() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const file = result.assets[0];
+      await uploadPickedFile({
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open the file picker.");
+    }
+  }
+  async function pickPhoto(useCamera: boolean) {
+    try {
+      if (useCamera) {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          setError("Camera access is unavailable. Allow camera access in Settings, or choose a photo or file.");
+          return;
+        }
+      } else {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          setError("Photo access is unavailable. Allow photo access in Settings, or choose a file.");
+          return;
+        }
+      }
+      const result = useCamera
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ["images"],
+            quality: 0.9,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ["images"],
+            quality: 0.9,
+          });
+      if (result.canceled) return;
+      const file = result.assets[0];
+      await uploadPickedFile({
+        uri: file.uri,
+        name: file.fileName ?? `photo-${Date.now()}.jpg`,
+        mimeType: file.mimeType ?? "image/jpeg",
+        size: file.fileSize,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open the camera or photo library.");
+    }
+  }
+  function pickAttachment() {
+    if (attachments.length >= 8 || busy) return;
+    const actions = [
+      { text: "Take photo", onPress: () => void pickPhoto(true) },
+      { text: "Choose photo", onPress: () => void pickPhoto(false) },
+      { text: "Choose file", onPress: () => void pickFile() },
+      ...(Platform.OS === "android" ? [] : [{ text: "Cancel", style: "cancel" as const }]),
+    ];
+    // Android Alert supports at most three action buttons. The system back
+    // gesture dismisses this chooser when no explicit Cancel button is shown.
+    Alert.alert("Add attachment", "Choose where to get your file.", actions);
   }
   async function send() {
     if ((!draft.trim() && !attachments.length) || busy || !id) return;

@@ -78,6 +78,7 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
   receive formatted replies and progress. Local mode uses polling; Cloudflare
   uses HTTPS webhooks.
 - **Send the source material.** Attach images and files in web chat or Telegram.
+  On mobile, take a photo, choose from the photo library, or choose a file.
   Supported images reach the model; other files are available in its workspace.
 - **Pair another client.** Settings → Devices gives you a one-use code or QR.
   Each trusted browser or client gets an independently revocable credential.
@@ -86,9 +87,12 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
   inbox; work for a busy computer stays queued. Stop works while awaiting approval.
 - **Update from Settings.** Connect deployment access once, then update the app
   and computer together with a saved checkpoint.
-- **Bring another computer.** Settings → Computers provides a copyable installer
-  for macOS/Linux or Windows. It installs the runtime, pairs the machine, and
-  starts its background service without a Git checkout.
+- **Bring another computer.** Settings → Computers provides a copyable one-line
+  installer for macOS/Linux or Windows. It accepts the pairing token, installs
+  the runtime, pairs the machine, and starts its background service without a Git
+  checkout.
+- **Manage workspace files.** Open Workspace → Files to browse folders, search,
+  upload/download files, preview text, and organize the shared computer files.
 
 ## Mobile preview
 

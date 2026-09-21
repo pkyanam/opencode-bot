@@ -98,6 +98,20 @@ function uploadBody(arguments_: Record<string, unknown>): FormData {
   form.append("file", new Blob([bytes], { type: mimeType }), name);
   return form;
 }
+/**
+ * Decode a filesystem upload into a native Blob.  The control route forwards
+ * this body as bytes to the runner; keeping the path in the query string
+ * avoids an ad-hoc JSON proxy and preserves the runner's content-type.
+ */
+function fileUploadBody(arguments_: Record<string, unknown>): Blob {
+  const encoded = String(required(arguments_, "contentBase64"));
+  const mimeType = arguments_.mimeType === undefined ? "application/octet-stream" : String(arguments_.mimeType);
+  let binary: string;
+  try { binary = globalThis.atob(encoded); } catch { throw new Error("contentBase64 must be valid base64"); }
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (bytes.byteLength < 1 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("contentBase64 must decode to 1-10 MiB");
+  return new Blob([bytes], { type: mimeType });
+}
 function tool(name: string, description: string, properties: Record<string, unknown>, requiredKeys: string[], annotations: ToolAnnotation, call: Tool["call"]): Tool {
   return { name, description, inputSchema: objectSchema(properties, requiredKeys), annotations, call };
 }
@@ -144,6 +158,10 @@ export const MCP_TOOLS: readonly Tool[] = [
   tool("file_list", "List safe workspace artifacts.", { path: string("Optional relative path"), limit: number("Optional result limit") }, [], read, (a) => ({ path: queryPath("/api/files", { path: a.path ?? ".", limit: a.limit }), method: "GET" })),
   tool("file_read", "Download a safe workspace artifact.", { path: string("Relative artifact path") }, ["path"], read, (a) => ({ path: queryPath("/api/files/content", { path: required(a, "path") }), method: "GET" })),
   tool("file_write", "Upload a bounded text workspace artifact.", { path: string("Relative artifact path"), content: string("UTF-8 file content") }, ["path", "content"], { ...create, destructiveHint: true }, (a) => ({ path: queryPath("/api/files", { path: required(a, "path") }), method: "POST", body: required(a, "content") })),
+  tool("file_upload", "Upload a bounded binary workspace artifact from base64 content.", { path: string("Relative artifact path"), contentBase64: string("Base64 file content, at most 10 MiB decoded"), mimeType: string("Optional MIME type") }, ["path", "contentBase64"], { ...create, destructiveHint: true }, (a) => ({ path: queryPath("/api/files", { path: required(a, "path") }), method: "POST", body: fileUploadBody(a) })),
+  tool("file_mkdir", "Create a workspace directory, including missing parent directories.", { path: string("Relative directory path") }, ["path"], { ...create, idempotentHint: true }, (a) => ({ path: queryPath("/api/files/mkdir", { path: required(a, "path") }), method: "POST" })),
+  tool("file_move", "Move a workspace file or directory to a new relative path.", { from: string("Existing relative path"), to: string("Destination relative path") }, ["from", "to"], { ...update, destructiveHint: true }, (a) => ({ path: queryPath("/api/files/move", { from: required(a, "from"), to: required(a, "to") }), method: "POST" })),
+  tool("file_delete", "Delete a workspace file or directory recursively.", { path: string("Relative path to delete") }, ["path"], remove, (a) => ({ path: queryPath("/api/files", { path: required(a, "path") }), method: "DELETE" })),
   tool("upload_file", "Upload a bounded chat attachment from base64 content and return its canonical attachment id.", { name: string("File name"), mimeType: string("MIME type"), contentBase64: string("Base64 file content, at most 10 MiB decoded") }, ["name", "mimeType", "contentBase64"], { ...create, destructiveHint: false }, (a) => ({ path: "/api/uploads", method: "POST", body: uploadBody(a) })),
   tool("attachment_read", "Download a previously uploaded chat attachment.", { id: string("Attachment id") }, ["id"], read, (a) => ({ path: idPath("/api/uploads", required(a, "id")), method: "GET" })),
   tool("computer_readiness", "Get computer startup readiness.", {}, [], read, () => ({ path: "/api/computer/readiness", method: "GET" })),

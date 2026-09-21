@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { version as clientVersion } from "../../../../package.json";
 import { api, type UpdateJob, type UpdateStatus } from "../api";
@@ -70,6 +70,7 @@ export function AppUpdates() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [replaceAccess, setReplaceAccess] = useState(false);
+  const statusPollInFlight = useRef(false);
 
   const load = async () => {
     setChecking(true);
@@ -94,20 +95,31 @@ export function AppUpdates() {
   const recoveryRequired = status?.job?.phase === "rollback_required";
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => {
-      void api
-        .updates()
-        .then((next) => {
+    let stopped = false;
+    const poll = async () => {
+      if (stopped || statusPollInFlight.current || document.hidden) return;
+      statusPollInFlight.current = true;
+      try {
+        const next = await api.updates();
+        if (!stopped) {
           setStatus(next);
           setError("");
-        })
-        .catch((e) => {
+        }
+      } catch (e) {
+        if (!stopped) {
           setError(
             e instanceof Error ? e.message : "Could not read update progress",
           );
-        });
-    }, 3000);
-    return () => window.clearInterval(timer);
+        }
+      } finally {
+        statusPollInFlight.current = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
   }, [active]);
 
   const latest = status?.latestVersion;

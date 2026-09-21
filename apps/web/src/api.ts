@@ -73,7 +73,11 @@ export type ApprovalRequest = {
 export type Run = {
   internal?: boolean;
   startedAt?: string;
-  queue?: { position: number; blockedBy?: { id: string; status: string; botName: string }; reconnecting?: boolean };
+  queue?: {
+    position: number;
+    blockedBy?: { id: string; status: string; botName: string };
+    reconnecting?: boolean;
+  };
   id: string;
   threadId: string;
   status: string;
@@ -166,7 +170,7 @@ export type FileArtifact = {
   path: string;
   kind?: string;
   size?: number;
-  modifiedAt?: string;
+  modifiedAt: string;
   [key: string]: unknown;
 };
 export type CatalogModel = {
@@ -210,7 +214,16 @@ export type Catalog = {
   mcp?: unknown[];
 };
 export type State = {
-  pendingMessages?: Array<{id:string;threadId:string;runId:string;content:string;status:string;nativeId?:string;createdAt:string;attachments?:Attachment[]}>;
+  pendingMessages?: Array<{
+    id: string;
+    threadId: string;
+    runId: string;
+    content: string;
+    status: string;
+    nativeId?: string;
+    createdAt: string;
+    attachments?: Attachment[];
+  }>;
   bots: Bot[];
   threads: Thread[];
   runs: Run[];
@@ -223,20 +236,31 @@ const base =
   "";
 const tokenKey = "opencode-bot-app-token";
 if (typeof window !== "undefined") {
-  consumeConnectionFragment(window.location, window.history, window.localStorage);
+  consumeConnectionFragment(
+    window.location,
+    window.history,
+    window.localStorage,
+  );
 }
 export const CONNECTION_EVENT = "opencode-bot-connection-change";
 /** True when the shared Computer is still coming online. */
 export const isComputerWarmingUpError = (error: unknown) => {
-  const status = error && typeof error === "object" && "status" in error
-    ? Number((error as { status?: unknown }).status)
-    : undefined;
-  const code = error && typeof error === "object" && "code" in error
-    ? String((error as { code?: unknown }).code ?? "")
-    : "";
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (code) return code === "computer_starting";
-  return (status === undefined || status === 503) && /computer (?:is )?(?:starting|warming up)|warming up in the background/i.test(message);
+  return (
+    (status === undefined || status === 503) &&
+    /computer (?:is )?(?:starting|warming up)|warming up in the background/i.test(
+      message,
+    )
+  );
 };
 // Connection credentials belong to this installation, not one browser tab.
 // Migrate existing tabs once and share subsequent changes across the origin.
@@ -264,7 +288,8 @@ export async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  if (init.body && !(init.body instanceof FormData))
+    headers.set("Content-Type", "application/json");
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${base}${path}`, {
@@ -279,7 +304,9 @@ export async function request<T>(
     if (response.status === 401) {
       if (token?.startsWith("dt_")) {
         setToken("");
-        const error = new Error("This device connection expired or was revoked. Pair it again.") as Error & { status?: number };
+        const error = new Error(
+          "This device connection expired or was revoked. Pair it again.",
+        ) as Error & { status?: number };
         error.status = response.status;
         throw error;
       }
@@ -290,15 +317,24 @@ export async function request<T>(
       error.status = response.status;
       throw error;
     }
-    let message = response.status >= 500 ? `The workspace server is reconnecting (${response.status}). Please try again shortly.` : body.slice(0, 500);
+    let message =
+      response.status >= 500
+        ? `The workspace server is reconnecting (${response.status}). Please try again shortly.`
+        : body.slice(0, 500);
     try {
-      const parsed = JSON.parse(body) as { error?: string; message?: string; title?: string };
+      const parsed = JSON.parse(body) as {
+        error?: string;
+        message?: string;
+        title?: string;
+      };
       const detail = parsed.error ?? parsed.message ?? parsed.title;
       if (typeof detail === "string" && detail.length <= 500) message = detail;
     } catch {
       /* plain text response */
     }
-    const error = new Error(message || `${response.status} ${response.statusText}`) as Error & { status?: number; code?: string };
+    const error = new Error(
+      message || `${response.status} ${response.statusText}`,
+    ) as Error & { status?: number; code?: string };
     error.status = response.status;
     try {
       const parsed = JSON.parse(body) as { code?: unknown };
@@ -312,13 +348,34 @@ export async function request<T>(
   return response.json() as Promise<T>;
 }
 
-export async function requestBlob(path: string): Promise<Blob> {
+export async function requestBlob(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
   const headers = new Headers({ Accept: "*/*" });
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`Could not download attachment (${response.status})`);
+  const response = await fetch(`${base}${path}`, {
+    headers,
+    signal: signal ?? AbortSignal.timeout(30_000),
+  });
+  if (!response.ok)
+    throw new Error(`Could not download attachment (${response.status})`);
   return response.blob();
+}
+export async function requestText(
+  path: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const headers = new Headers({ Accept: "text/plain" });
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${base}${path}`, {
+    headers,
+    signal: signal ?? AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Could not read file (${response.status})`);
+  return response.text();
 }
 
 // Readiness and the settings surfaces can ask for the catalog at the same
@@ -390,10 +447,14 @@ export const api = {
   upload: async (file: File) => {
     const body = new FormData();
     body.append("file", file);
-    const result = await request<{ attachment: Attachment }>("/api/uploads", { method: "POST", body });
+    const result = await request<{ attachment: Attachment }>("/api/uploads", {
+      method: "POST",
+      body,
+    });
     return result.attachment;
   },
-  download: (id: string) => requestBlob(`/api/uploads/${encodeURIComponent(id)}`),
+  download: (id: string) =>
+    requestBlob(`/api/uploads/${encodeURIComponent(id)}`),
   run: (payload: {
     threadId: string;
     prompt: string;
@@ -466,9 +527,14 @@ export const api = {
       method: "DELETE",
     }),
   computerStatus: () => request<ComputerStatus>("/api/computer/status"),
-  computerReadiness: () => request<ComputerReadiness>("/api/computer/readiness"),
+  computerReadiness: () =>
+    request<ComputerReadiness>("/api/computer/readiness"),
   updates: () => request<UpdateStatus>("/api/updates"),
-  configureUpdates: (payload: { accountId: string; workerName: string; token: string }) =>
+  configureUpdates: (payload: {
+    accountId: string;
+    workerName: string;
+    token: string;
+  }) =>
     request<UpdateStatus>("/api/updates/configure", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -480,7 +546,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ version }),
     }),
-  recoverUpdate: () => request<UpdateStatus>("/api/updates/recover", { method: "POST" }),
+  recoverUpdate: () =>
+    request<UpdateStatus>("/api/updates/recover", { method: "POST" }),
   checkpoint: () =>
     request<ComputerStatus>("/api/computer/checkpoint", { method: "POST" }),
   restoreCheckpoint: (checkpointId?: string) =>
@@ -517,9 +584,38 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ skillIds }),
     }),
-  files: (path = ".") =>
+  files: (path = ".", signal?: AbortSignal) =>
     request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
       `/api/files?path=${encodeURIComponent(path)}`,
+      { signal },
+    ),
+  fileContent: (path: string, signal?: AbortSignal) =>
+    requestText(`/api/files/content?path=${encodeURIComponent(path)}`, signal),
+  fileDownload: (path: string, signal?: AbortSignal) =>
+    requestBlob(`/api/files/content?path=${encodeURIComponent(path)}`, signal),
+  fileUpload: (path: string, body: ArrayBuffer, mimeType?: string) =>
+    request<{ path: string; bytes: number }>(
+      `/api/files?path=${encodeURIComponent(path)}`,
+      {
+        method: "POST",
+        headers: { "content-type": mimeType || "application/octet-stream" },
+        body,
+      },
+    ),
+  fileMkdir: (path: string) =>
+    request<{ path: string; kind: "directory" }>(
+      `/api/files/mkdir?path=${encodeURIComponent(path)}`,
+      { method: "POST" },
+    ),
+  fileMove: (from: string, to: string) =>
+    request<{ from: string; to: string }>(
+      `/api/files/move?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      { method: "POST" },
+    ),
+  fileDelete: (path: string) =>
+    request<{ deleted: boolean }>(
+      `/api/files?path=${encodeURIComponent(path)}`,
+      { method: "DELETE" },
     ),
   catalog,
   preview: async (signal?: AbortSignal) => {

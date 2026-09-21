@@ -56,6 +56,7 @@ export function SettingsModal({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [pairExpired, setPairExpired] = useState(false);
   const [installPlatform, setInstallPlatform] = useState<"unix" | "windows">("unix");
   const [pair, setPair] = useState<{ token: string; expiresAt: string } | null>(
     null,
@@ -105,6 +106,30 @@ export function SettingsModal({
     if (tab === "telegram") void action(loadTelegram);
   }, [tab, botId]);
   useEffect(() => {
+    if (tab !== "nodes") return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    const refresh = async () => {
+      if (disposed) return;
+      if (document.visibilityState === "visible") {
+        try {
+          const result = await request<{ nodes: Node[] }>("/api/nodes", { signal: controller.signal });
+          if (!disposed) setNodes(result.nodes);
+        } catch { /* Keep the last known list; manual refresh displays errors. */ }
+      }
+      if (!disposed) timer = setTimeout(refresh, 5000);
+    };
+    timer = setTimeout(refresh, 5000);
+    return () => { disposed = true; clearTimeout(timer); controller.abort(); };
+  }, [tab]);
+  useEffect(() => {
+    setPairExpired(Boolean(pair && Date.parse(pair.expiresAt) <= Date.now()));
+    if (!pair) return;
+    const timer = setTimeout(() => setPairExpired(true), Math.max(0, Date.parse(pair.expiresAt) - Date.now()));
+    return () => clearTimeout(timer);
+  }, [pair]);
+  useEffect(() => {
     if (tab !== "telegram" || !botId) return;
     const timer = window.setInterval(() => {
       void loadTelegram().catch(() => undefined);
@@ -131,8 +156,13 @@ export function SettingsModal({
     };
   }, [link]);
   const copy = async (text: string) => {
-    await navigator.clipboard.writeText(text);
-    setNotice("Copied.");
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice("Copied.");
+      setError("");
+    } catch {
+      setError("Clipboard access was blocked. Select and copy the command instead.");
+    }
   };
   const json = (value: unknown) => ({
     method: "POST",
@@ -293,19 +323,20 @@ export function SettingsModal({
                   )
                 }
               >
-                Pair a computer
+                {pairExpired ? "Generate a new pairing command" : "Pair a computer"}
               </button>
               {pair && (
                 <div className="setup-detail">
                   <h4>Run on the computer you want to connect</h4>
-                  <p>Paste this into a terminal on the other computer. It installs OpenCode and starts the connection automatically.</p>
+                  <p>Paste this into a terminal on the other computer. The installer downloads the runtime, pairs it, and starts a background service. No Git checkout is needed.</p>
+                  <p className="settings-muted">Keep this page open: your computer will appear automatically. Then choose it in a bot’s settings to run tasks there.</p>
                   <label className="field-label" htmlFor="computer-platform">Operating system</label>
                   <select id="computer-platform" value={installPlatform} onChange={event => setInstallPlatform(event.target.value as "unix" | "windows")}>
                     <option value="unix">macOS or Linux</option>
                     <option value="windows">Windows · PowerShell</option>
                   </select>
-                  <code className="copy-block">{computerInstallCommand(installPlatform, location.origin, pair.token)}</code>
-                  <button className="soft-btn" onClick={() => void copy(computerInstallCommand(installPlatform, location.origin, pair.token))}>
+                  {pairExpired ? <p role="status">This pairing command has expired. Generate a new one above.</p> : <code className="copy-block">{computerInstallCommand(installPlatform, location.origin, pair.token)}</code>}
+                  <button className="soft-btn" disabled={pairExpired} onClick={() => void copy(computerInstallCommand(installPlatform, location.origin, pair.token))}>
                     <Copy size={16} /> Copy install command
                   </button>
                   <p className="settings-muted">

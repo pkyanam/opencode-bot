@@ -47,6 +47,12 @@ export default function Home() {
   const [error, setError] = useState("");
   const bots = store.state?.bots ?? [],
     threads = store.state?.threads ?? [];
+  const navItems = [
+    { key: "chats" as const, label: "Chats", symbol: "◌" },
+    { key: "bots" as const, label: "Bots", symbol: "✦" },
+    { key: "workspace" as const, label: "Workspace", symbol: "▦" },
+    { key: "settings" as const, label: "Settings", symbol: "⚙" },
+  ];
   useEffect(() => {
     const handle = (url: string | null) => {
       if (!url || !/^https?:\/\//i.test(url)) return;
@@ -230,6 +236,12 @@ export default function Home() {
               accessibilityLabel={
                 view === "chats" ? "New conversation" : "Create bot"
               }
+              accessibilityRole="button"
+              accessibilityHint={
+                view === "chats"
+                  ? "Choose a bot and start a conversation"
+                  : "Add a bot to this workspace"
+              }
               onPress={() => (view === "chats" ? openThread() : openBot())}
               hitSlop={12}
             >
@@ -242,6 +254,7 @@ export default function Home() {
             <Text style={styles.error}>{store.error}</Text>
             <Pressable
               style={{ marginTop: 12 }}
+              accessibilityRole="button"
               onPress={() => void store.refresh()}
             >
               <Text style={{ color: colors.text }}>Retry</Text>
@@ -254,7 +267,9 @@ export default function Home() {
               {threads.map((thread) => (
                 <Pressable
                   key={thread.id}
-                  style={styles.card}
+                  style={styles.cardPressable}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open conversation ${thread.title}`}
                   onPress={() =>
                     router.push({
                       pathname: "/thread/[id]",
@@ -344,6 +359,8 @@ export default function Home() {
                   </View>
                   <Pressable
                     style={{ flex: 1 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Start a conversation with ${bot.name}`}
                     onPress={() => openThread(bot)}
                   >
                     <Text
@@ -364,6 +381,8 @@ export default function Home() {
                   </Pressable>
                   <Pressable
                     accessibilityLabel={`Edit ${bot.name}`}
+                    accessibilityRole="button"
+                    accessibilityHint="Open bot settings"
                     hitSlop={12}
                     onPress={() => openBot(bot)}
                   >
@@ -373,11 +392,17 @@ export default function Home() {
               </View>
             ))}
             {!bots.length && (
-              <View style={{ paddingVertical: 38, gap: 16 }}>
+              <View style={[styles.card, { paddingVertical: 24, gap: 14 }]}>
+                <Text style={styles.title}>No bots yet</Text>
                 <Text style={styles.subtitle}>
-                  Create a bot to start your first conversation.
+                  Create one with a name, model, and role. You can edit it
+                  whenever you like.
                 </Text>
-                <Pressable style={styles.button} onPress={() => openBot()}>
+                <Pressable
+                  style={styles.button}
+                  onPress={() => openBot()}
+                  accessibilityRole="button"
+                >
                   <Text style={styles.buttonText}>Create a bot</Text>
                 </Pressable>
               </View>
@@ -401,6 +426,8 @@ export default function Home() {
             </View>
             <Pressable
               style={styles.card}
+              accessibilityRole="button"
+              accessibilityLabel="Open skills, files, and computer workspace"
               onPress={() => router.push("/workspace")}
             >
               <Text style={{ color: colors.text, fontSize: 16 }}>
@@ -441,25 +468,34 @@ export default function Home() {
           backgroundColor: colors.bg,
         }}
       >
-        {(["chats", "bots", "workspace", "settings"] as const).map((item) => (
+        {navItems.map((item) => (
           <Pressable
-            key={item}
-            style={{ flex: 1, alignItems: "center" }}
+            key={item.key}
+            style={styles.navItem}
             accessibilityRole="tab"
-            accessibilityState={{ selected: view === item }}
+            accessibilityLabel={item.label}
+            accessibilityState={{ selected: view === item.key }}
             onPress={() =>
-              item === "workspace" ? router.push("/workspace") : setView(item)
+              item.key === "workspace"
+                ? router.push("/workspace")
+                : setView(item.key)
             }
           >
             <Text
               style={{
-                fontSize: 13,
-                fontWeight: view === item ? "700" : "400",
-                color: view === item ? colors.text : colors.muted,
-                textTransform: "capitalize",
+                fontSize: 16,
+                color: view === item.key ? colors.text : colors.muted,
               }}
             >
-              {item}
+              {item.symbol}
+            </Text>
+            <Text
+              style={[
+                styles.navLabel,
+                { color: view === item.key ? colors.text : colors.muted },
+              ]}
+            >
+              {item.label}
             </Text>
           </Pressable>
         ))}
@@ -486,7 +522,12 @@ export default function Home() {
                   ? "Bot settings"
                   : "Create a bot"}
             </Text>
-            <Pressable disabled={busy} onPress={() => setForm(null)}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+              disabled={busy}
+              onPress={() => setForm(null)}
+            >
               <Text style={styles.subtitle}>Cancel</Text>
             </Pressable>
           </View>
@@ -521,6 +562,7 @@ export default function Home() {
                   TITLE · OPTIONAL
                 </Text>
                 <TextInput
+                  accessibilityLabel="Conversation title"
                   value={title}
                   onChangeText={setTitle}
                   style={styles.input}
@@ -532,6 +574,7 @@ export default function Home() {
               <>
                 <Text style={styles.label}>NAME</Text>
                 <TextInput
+                  accessibilityLabel="Bot name"
                   value={name}
                   onChangeText={setName}
                   style={styles.input}
@@ -542,6 +585,7 @@ export default function Home() {
                 <ModelPicker value={model} onChange={setModel} />
                 <Text style={styles.label}>INSTRUCTIONS</Text>
                 <TextInput
+                  accessibilityLabel="Bot instructions"
                   value={instructions}
                   onChangeText={setInstructions}
                   style={[

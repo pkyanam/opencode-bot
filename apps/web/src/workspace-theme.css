@@ -48,6 +48,36 @@
 .extension-sources a { justify-content: flex-start; }
 .extension-sources a > svg:last-child { margin-left: auto; }
 .extension-repository, .extension-skill { background: transparent; border-color: var(--line); }
+.files-explorer .files-actions { display:flex; gap:8px; align-items:center; }
+.file-upload-btn { display:inline-flex; align-items:center; gap:7px; border:1px solid #4b3f33; background:#2c231e; color:#f1d6c7; border-radius:8px; padding:8px 11px; font-size:12px; font-weight:700; cursor:pointer; }
+.files-breadcrumbs { display:flex; align-items:center; gap:5px; color:#8d8c84; font-size:12px; margin:18px 0 12px; }
+.files-breadcrumbs span { display:flex; align-items:center; gap:5px; }
+.files-breadcrumbs button { border:0; background:none; color:#b9b5aa; padding:3px; cursor:pointer; }
+.files-toolbar { display:flex; gap:10px; margin-bottom:12px; }
+.files-search { flex:1; display:flex; align-items:center; gap:8px; background:#191916; border:1px solid #32312b; border-radius:8px; padding:0 10px; color:#8d8c84; }
+.files-search input, .files-toolbar select { border:0; background:transparent; color:#e9e7df; padding:10px 0; outline:none; font:inherit; font-size:12px; }
+.files-toolbar select { border:1px solid #32312b; padding:0 10px; border-radius:8px; }
+.file-row { width:100%; display:flex; align-items:center; gap:10px; border:0; border-bottom:1px solid #2b2a25; background:transparent; color:#e9e7df; padding:12px 8px; text-align:left; cursor:pointer; }
+.file-row:hover { background:#201f1b; }
+.file-icon { color:#c88763; display:grid; place-items:center; }
+.file-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; }
+.file-name strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.file-name small, .file-preview-head small { color:#8d8c84; font-size:11px; }
+.file-row-action { color:#8d8c84; padding:5px; }
+.file-preview { margin-top:18px; border:1px solid #32312b; background:#191916; border-radius:10px; overflow:hidden; }
+.file-preview-head { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid #32312b; }
+.file-preview-head div { display:flex; flex-direction:column; gap:4px; }
+.file-preview-head button, .inline-error button { background:none; border:0; color:#8d8c84; cursor:pointer; }
+.file-preview-actions { display:flex; gap:4px; }
+.file-preview-actions button { padding:5px; }
+.file-image-preview { display:block; max-width:100%; max-height:420px; margin:16px auto; object-fit:contain; }
+.file-action-dialog { position:fixed; inset:0; z-index:30; display:grid; place-items:center; background:#080906b8; }
+.file-action-card { width:min(420px,calc(100vw - 36px)); border:1px solid #3c3e33; border-radius:10px; background:#1b1c18; padding:18px; color:var(--cream); box-shadow:0 22px 90px #0008; }
+.file-action-card strong { display:block; font-size:15px; margin-bottom:10px; }
+.file-action-card p { color:var(--muted); font-size:12px; line-height:1.5; }
+.file-action-card input { width:100%; box-sizing:border-box; border:1px solid #3b3e32; border-radius:7px; padding:10px; background:#151610; color:var(--cream); margin:6px 0 16px; }
+.file-action-card > div:last-child { display:flex; justify-content:flex-end; gap:8px; }
+.file-preview pre { max-height:420px; overflow:auto; margin:0; padding:16px; color:#d6d1c5; font:12px/1.6 "DM Mono", monospace; white-space:pre-wrap; }
 @media (max-width: 760px) {
  .topbar { padding: 0 16px; height: 56px; }
  .brand-wordmark { width: 152px; }
@@ -59,3 +89,15 @@
  .settings-nav { gap: 4px 10px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+/* Keep explorer spacing independent of the chat attachment styles. */
+.files-explorer .files-breadcrumbs, .files-explorer .files-toolbar { margin-left: clamp(20px, 4vw, 52px); margin-right: clamp(20px, 4vw, 52px); }
+.files-explorer .files-breadcrumbs { flex-wrap: wrap; }
+.files-explorer .files-breadcrumbs button { display: inline-flex; align-items: center; gap: 7px; }
+.files-explorer .file-name { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
+.files-explorer .file-name strong { max-width: 100%; font-weight: 500; }
+.files-explorer .file-row-action { background: transparent; border: 0; border-radius: 4px; min-width: 32px; min-height: 32px; display: grid; place-items: center; cursor: pointer; }
+.files-explorer .file-row-action:hover { background: var(--panel); color: var(--cream); }
+.files-explorer .file-preview { margin: 20px clamp(20px, 4vw, 52px); }
+.files-explorer .file-preview-head .file-preview-actions { flex-direction: row; align-items: center; }
+.files-explorer .files-search input { width: 100%; min-width: 0; }
+.files-explorer .files-actions { flex-wrap: wrap; justify-content: flex-end; }

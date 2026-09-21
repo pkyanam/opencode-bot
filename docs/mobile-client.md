@@ -57,7 +57,7 @@ state.
 | Cancel | `POST /api/runs/:id/cancel` | Disable duplicate taps while request is in flight. |
 | Approval | `POST /api/runs/:id/approval` with `requestId`, `decision` | Show the action, target, command, details, and expiry from `pendingApproval`; never auto-approve on reconnect. |
 | Native transcript | `GET /api/threads/:id/messages` | Use for computer-backed threads. Owned-node threads explicitly do not support native browsing yet. |
-| Chat attachments | `POST /api/uploads` multipart field `file`, then `POST /api/runs` with `attachments: [{id}]` | Pick images/documents with native pickers; upload before submission. Preserve IDs across queued messages and retries. Up to eight files, 10 MiB each. |
+| Chat attachments | `POST /api/uploads` multipart field `file`, then `POST /api/runs` with `attachments: [{id}]` | The composer offers **Take photo**, **Choose photo**, and **Choose file**. Upload before submission, preserve IDs across retries, and enforce eight files, 10 MiB each, and 20 MiB total. |
 | Artifacts | `GET /api/files?path=...`, `GET /api/files/content?path=...` | List bounded workspace paths, then download through an authenticated stream. Current runner limits uploads to 10 MB and downloads to 50 MB. |
 | Computer readiness | `GET /api/computer/readiness`, `GET /api/computer/status` | Gate catalog, providers, terminal, and preview screens while the computer is starting. |
 | Live preview | `GET /api/computer/preview` | The current response is a multipart JPEG stream. A native image/stream adapter is needed; this is not a normal JSON or static image endpoint. |
@@ -146,10 +146,10 @@ memory even when the server returns up to 100 runs.
 
 The first useful native slice is: connect, browse bots/threads, send a run,
 watch status and public events, read the transcript, cancel, respond to an
-approval, and browse/download artifacts. It can show tool names, bounded input
-and output previews, retry/reconnect notices, and sanitized errors using the
-same public fields as the web client. It should never render private reasoning
-or credential-bearing provider payloads.
+approval, and manage workspace files. It can show tool names, bounded input and
+output previews, retry/reconnect notices, and sanitized errors using the same
+public fields as the web client. It should never render private reasoning or
+credential-bearing provider payloads.
 
 Live computer preview is possible in principle but needs a native multipart
 JPEG decoder/viewer and lifecycle handling for backgrounding. It will consume
@@ -192,11 +192,13 @@ The first Expo Router slice now lives in `apps/mobile`. It includes:
 - A restrained dark OpenCode palette with a thread list and readable composer.
 
 The app intentionally leaves live computer preview, native terminal, and push
-notifications for a later slice. The current composer has a native document
-picker, uploads selected files through `/api/uploads`, shows removable chips,
-and includes uploaded IDs in the run request. The picker is intentionally
-bounded to eight files and 10 MiB per file; image preview and share-sheet
-download remain later polish.
+notifications for a later slice. The composer uses the native document picker,
+photo library, and camera, uploads through `/api/uploads`, shows removable
+chips, and includes uploaded IDs in the run request. The picker is bounded to
+eight files, 10 MiB per file, and 20 MiB total. Workspace → Files provides
+breadcrumbs, filtering, folder creation, text/image previews, uploads, sharing,
+rename, and deletion. Binary files download with bearer authentication into the
+app cache, then open the native save/share sheet on iOS and Android.
 
 The visual direction follows the referenced `EvanBacon/chat-template` patterns:
 Expo Router file routes, a stable message list, isolated active-run updates,

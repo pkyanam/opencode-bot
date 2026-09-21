@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Check,
   ExternalLink,
@@ -134,6 +134,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const [editingConnection, setEditingConnection] = useState("");
   const [connectionLabel, setConnectionLabel] = useState("");
   const [customOpen, setCustomOpen] = useState(false);
+  const providerLoadInFlight = useRef(false);
   const computerWarming = isComputerWarmingUpError(error);
   const integrations = data?.integrations ?? [];
   const providers = data?.providers ?? [];
@@ -173,6 +174,8 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     items[0];
 
   const load = async () => {
+    if (providerLoadInFlight.current) return;
+    providerLoadInFlight.current = true;
     setBusy(true);
     setError("");
     try {
@@ -191,6 +194,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
         e instanceof Error ? e.message : "Could not load OpenCode providers",
       );
     } finally {
+      providerLoadInFlight.current = false;
       setBusy(false);
     }
   };
@@ -199,8 +203,18 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   }, []);
   useEffect(() => {
     if (!computerWarming) return;
-    const timer = window.setInterval(() => void load(), 3500);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    const poll = async () => {
+      if (stopped || document.hidden) return;
+      try {
+        await load();
+      } catch { /* load reports its own errors */ }
+    };
+    const timer = window.setInterval(() => void poll(), 3500);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
   }, [computerWarming]);
   useEffect(() => {
     const next: ProviderValues = {};

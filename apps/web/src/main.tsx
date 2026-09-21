@@ -50,7 +50,6 @@ import {
   CatalogAgent,
   CatalogModel,
   ComputerStatus,
-  FileArtifact,
   getToken,
   isComputerWarmingUpError,
   MemoryItem,
@@ -69,6 +68,7 @@ import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { MarkdownContent } from "./components/markdown-content";
 import { AttachmentCards, ChatAttachments, uploadFiles } from "./components/chat-attachments";
 import { ToolActivity } from "./components/tool-activity";
+import { FilesExplorer } from "./components/files-explorer";
 import { RunProgress } from "./components/run-progress";
 const NativeTerminal = React.lazy(() =>
   import("./components/native-terminal").then((module) => ({
@@ -2097,87 +2097,7 @@ function SkillsWorkspace({
 }
 
 function FilesWorkspace() {
-  const [path, setPath] = useState(".");
-  const [items, setItems] = useState<FileArtifact[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const load = async () => {
-    try {
-      setLoading(true);
-      const result = await api.files(path);
-      setItems(Array.isArray(result) ? result : (result.artifacts ?? []));
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load files");
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    load();
-  }, []);
-  return (
-    <main className="main workspace-surface">
-      <div className="surface-head">
-        <div>
-          <div className="eyebrow">SHARED COMPUTER</div>
-          <h1>Files</h1>
-          <p>Browse artifacts created by your bots on the trusted computer.</p>
-        </div>
-        <Button variant="outline" onClick={load}>
-          <RefreshCw size={14} /> Refresh
-        </Button>
-      </div>
-      <div className="file-toolbar">
-        <HardDrive size={15} />
-        <input
-          aria-label="Folder path"
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && load()}
-        />
-        <Button size="sm" onClick={load}>
-          Open
-        </Button>
-      </div>
-      {error && (
-        <div className="inline-error">
-          <AlertCircle size={15} />
-          {error}
-        </div>
-      )}
-      <div className="file-list">
-        {loading ? (
-          <div className="surface-empty">
-            <LoaderCircle size={20} className="spin" />
-            <p>Reading the computer…</p>
-          </div>
-        ) : items.length ? (
-          items.map((item) => (
-            <div className="file-row" key={item.path}>
-              <FileText size={16} />
-              <div>
-                <strong>{item.path}</strong>
-                <span>
-                  {item.kind ?? "file"}
-                  {typeof item.size === "number"
-                    ? ` · ${item.size.toLocaleString()} bytes`
-                    : ""}
-                </span>
-              </div>
-              <ChevronRight size={15} />
-            </div>
-          ))
-        ) : (
-          <div className="surface-empty">
-            <FileText size={22} />
-            <h2>No artifacts here</h2>
-            <p>Files your bots create will appear in this folder.</p>
-          </div>
-        )}
-      </div>
-    </main>
-  );
+  return <FilesExplorer />;
 }
 
 function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {

@@ -186,10 +186,11 @@ in this preview; voice/files and inline approval buttons remain extensions.
 ## Owned computers and recovery
 
 An owned macOS, Linux, or Windows computer can be paired through the outbound
-node agent. This is a development path, not the default provider and not a
-native desktop app. In Settings → Nodes, create a pairing token, then copy one
-of these commands. The installer downloads a pinned release bundle directly;
-it does not require Git, a checkout, or a package manager setup.
+node agent. In **Settings → Computers**, create a pairing token, then paste the
+copyable one-liner onto that computer. The installer downloads a pinned release
+bundle, installs a private runtime when needed, registers the node, and starts
+its background service. It does not require Git, a checkout, or a package
+manager setup.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/node-install.sh | bash -s -- \
@@ -209,7 +210,7 @@ The token is used once during registration and is not written to the service
 definition or installer logs. The agent stores its returned node secret in a
 per-user config file with private permissions and starts at login. To remove a
 node, rerun the Unix command with `--uninstall`, or use
-`-Uninstall` with the PowerShell command; then revoke it in Settings → Nodes.
+`-Uninstall` with the PowerShell command; then revoke it in Settings → Computers.
 
 Registration creates a private node secret and local runner token in the
 platform config directory. Remote terminal/desktop access is not currently

@@ -143,6 +143,35 @@ describe("control MCP handler", () => {
     expect(invoke.mock.calls[1][0]).toEqual({ path: "/api/runs", method: "POST", body: { threadId: "thr_1", prompt: "inspect", idempotencyKey: "key_1", attachments: [{ id: "att_1" }] } });
   });
 
+  it("exposes the filesystem server contract as typed, explicit tools", async () => {
+    const invoke = vi.fn().mockResolvedValue({ status: 200, body: { ok: true } });
+    const handler = createMcpHandler({ authorize: async () => true, invoke });
+    const call = async (name: string, arguments_: Record<string, unknown>) => handler(request({
+      jsonrpc: "2.0", id: name, method: "tools/call", params: { name, arguments: arguments_, _meta: { "io.modelcontextprotocol/protocolVersion": MCP_LEGACY_VERSION } },
+    }));
+    await call("file_mkdir", { path: "projects/demo" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/files/mkdir?path=projects%2Fdemo", method: "POST" });
+    await call("file_move", { from: "projects/demo/a.txt", to: "projects/demo/b.txt" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/files/move?from=projects%2Fdemo%2Fa.txt&to=projects%2Fdemo%2Fb.txt", method: "POST" });
+    await call("file_delete", { path: "projects/demo/b.txt" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/files?path=projects%2Fdemo%2Fb.txt", method: "DELETE" });
+    await call("file_upload", { path: "projects/demo/data.bin", contentBase64: btoa("hello"), mimeType: "application/octet-stream" });
+    const upload = invoke.mock.calls.at(-1)?.[0];
+    expect(upload).toMatchObject({ path: "/api/files?path=projects%2Fdemo%2Fdata.bin", method: "POST" });
+    expect(upload.body).toBeInstanceOf(Blob);
+    expect(await (upload.body as Blob).text()).toBe("hello");
+  });
+
+  it("marks filesystem mutations with destructive and idempotency annotations", async () => {
+    const handler = createMcpHandler({ authorize: async () => true, invoke: vi.fn() });
+    const result = await read(await handler(request({ jsonrpc: "2.0", id: 50, method: "tools/list" })));
+    const tools = Object.fromEntries(result.body.result.tools.map((item: any) => [item.name, item]));
+    expect(tools.file_mkdir.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
+    expect(tools.file_move.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true });
+    expect(tools.file_delete.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true });
+    expect(tools.file_upload.inputSchema.required).toEqual(["path", "contentBase64"]);
+  });
+
   it("returns 405 for GET and does not fabricate an SSE transport", async () => {
     const handler = createMcpHandler({ authorize: async () => true, invoke: vi.fn() });
     const result = await handler(new Request("https://example.test/api/mcp", { method: "GET", headers: { accept: "text/event-stream" } }));
