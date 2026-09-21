@@ -211,7 +211,8 @@ so no Grok branding or copied screens are included.
 Verification completed locally with `npm install`, Expo dependency checks,
 `npm run typecheck`, and `npx expo export --platform ios` plus
 `npx expo export --platform android`. A signed iOS Release build has also been installed over Wi-Fi on a physical
-iPhone. Launch verification and end-to-end pairing, camera permissions, and
+iPhone. The corrected build launched successfully and retained the same process across
+checks more than 20 seconds apart. End-to-end pairing, camera permissions, and
 document-picker testing are pending; Android has only bundle verification. The root web typecheck excludes `apps/mobile/**`;
 the app has its own `typecheck` script.
 
