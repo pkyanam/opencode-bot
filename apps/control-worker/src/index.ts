@@ -964,17 +964,17 @@ export class Workspace {
   private runs(): any[] {
     const runs = this.rows<any>("SELECT * FROM runs ORDER BY created_at DESC LIMIT 100");
     if (!runs.length) return [];
-    // Each indexed subquery stays bounded to 30 rows. A window over the full
-    // event history would scan old tool output every time the workspace polls.
+    // SQLite calls here are local and synchronous. Keep each indexed lookup
+    // bounded; a compound SELECT grows past the hosted SQLite term limit.
     const ids = runs.map(run => run.id);
-    const eventRows = this.rows<any>(ids.map(() => "SELECT * FROM (SELECT * FROM events WHERE run_id=? ORDER BY sequence DESC LIMIT 30)").join(" UNION ALL "), ...ids);
+    const eventRows = ids.flatMap(id => this.rows<any>("SELECT * FROM events WHERE run_id=? ORDER BY sequence DESC LIMIT 30", id));
     const byRun = new Map<string, any[]>();
     for (const event of eventRows) {
       const list = byRun.get(event.run_id) ?? [];
       list.push({ id: event.id, runId: event.run_id, sequence: event.sequence, type: event.type, payload: parseJson(event.payload, null), createdAt: event.created_at });
       byRun.set(event.run_id, list);
     }
-    const starts = new Map(this.rows<any>(ids.map(() => "SELECT * FROM (SELECT run_id,created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1)").join(" UNION ALL "), ...ids).map(event => [event.run_id, event.created_at]));
+    const starts = new Map(ids.flatMap(id => this.rows<any>("SELECT run_id,created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1", id)).map(event => [event.run_id, event.created_at]));
     let blockedBy: any;
     const positions = new Map<string, number>();
     if (runs.some(run => run.status === "queued")) {

@@ -770,7 +770,8 @@ it('hydrates 100 run summaries with bounded query count and preserves per-run or
   const result=await f.request('/api/state');
   expect(result.status).toBe(200);expect(result.body.runs).toHaveLength(100);
   for(const run of result.body.runs){expect(run.events.map((e:any)=>e.sequence)).toEqual(Array.from({length:30},(_,i)=>i+6));expect(run.startedAt).toBe(run.createdAt);}
-  expect(f.queries.filter(q=>q.includes('FROM events'))).toHaveLength(2);
+  expect(f.queries.filter(q=>q.includes('FROM events'))).toHaveLength(200);
+  expect(f.queries.some(q=>q.includes('UNION ALL'))).toBe(false);
 });
 
 it('reacquires a durable object stub once for a read interrupted by an update', async () => {

@@ -42,6 +42,43 @@ describe("CloudflareUpdateApiClient", () => {
     expect(JSON.parse(String(multipart.get("metadata"))).assets).toEqual({ jwt: "assets-jwt", config: { not_found_handling: "single-page-application" } });
   });
 
+  it("does not send server-managed container fields in patch or rollout requests", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); calls.push({ url, init: init ?? {} });
+      return reply({ id: "app-1", configuration: { image: "new" } });
+    }) as unknown as typeof fetch;
+    const client = new CloudflareUpdateApiClient(account, "worker", token, fetchImpl, "https://cf.test");
+    const configuration = { image: "pinned-image", location: "ewr", deployment_type: "regional", max_instances: 2 };
+
+    await client.modifyContainerApplication("app-1", { configuration });
+    await client.createContainerRollout("app-1", { description: "rollback", target_configuration: configuration, strategy: "rolling" });
+
+    const patchBody = JSON.parse(String(calls[0].init.body));
+    const rolloutBody = JSON.parse(String(calls[1].init.body));
+    expect(patchBody).toEqual({ configuration: { image: "pinned-image", max_instances: 2 } });
+    expect(rolloutBody.target_configuration).toEqual({ image: "pinned-image", max_instances: 2 });
+    expect(patchBody.configuration).not.toHaveProperty("location");
+    expect(patchBody.configuration).not.toHaveProperty("deployment_type");
+  });
+
+  it("sanitizes server-managed fields while restoring a container during rollback", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); calls.push({ url, init: init ?? {} });
+      if (url.endsWith("/applications")) return reply([{ id: "app-1", configuration: { image: "current", location: "ewr", deployment_type: "regional", vcpu: 2 } }]);
+      return reply({ id: "app-1", configuration: { image: "restored" } });
+    }) as unknown as typeof fetch;
+    const client = new CloudflareUpdateApiClient(account, "worker", token, fetchImpl, "https://cf.test");
+
+    await client.rollback({ containerApplicationId: "app-1", imageReference: "restored" });
+
+    const patchBody = JSON.parse(String(calls[1].init.body));
+    const rolloutBody = JSON.parse(String(calls[2].init.body));
+    expect(patchBody.configuration).toEqual({ image: "restored", vcpu: 2 });
+    expect(rolloutBody.target_configuration).toEqual({ image: "restored", vcpu: 2 });
+  });
+
   it("redacts the control token from API failures", async () => {
     const fetchImpl = vi.fn(async () => reply(null, 403)) as unknown as typeof fetch;
     const client = new CloudflareUpdateApiClient(account, "worker", token, fetchImpl, "https://cf.test");

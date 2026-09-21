@@ -150,19 +150,23 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
   async modifyContainerApplication(id: string, body: Record<string, unknown>): Promise<ContainerApplication> {
     const configuration = body.configuration;
     if (!configuration || typeof configuration !== "object") throw new Error("container configuration is missing");
-    return this.request<ContainerApplication>(this.containers(`/applications/${encodeURIComponent(id)}`), { method: "PATCH", body: JSON.stringify({ configuration }) });
+    return this.request<ContainerApplication>(this.containers(`/applications/${encodeURIComponent(id)}`), { method: "PATCH", body: JSON.stringify({ configuration: sanitizeContainerConfiguration(configuration as Record<string, unknown>) }) });
   }
 
   async createContainerRollout(id: string, body: Record<string, unknown>): Promise<{ id?: string; status?: string; [key: string]: unknown }> {
     const path = this.containers(`/applications/${encodeURIComponent(id)}/rollouts`);
+    const targetConfiguration = body.target_configuration;
+    const requestBody = targetConfiguration && typeof targetConfiguration === "object"
+      ? { ...body, target_configuration: sanitizeContainerConfiguration(targetConfiguration as Record<string, unknown>) }
+      : body;
     // An alarm can be interrupted after Cloudflare accepted a rollout but before
     // its ID was persisted. Reuse this job's rollout instead of replacing it.
-    if (typeof body.description === "string" && body.description.includes("(")) {
+    if (typeof requestBody.description === "string" && requestBody.description.includes("(")) {
       const rollouts = await this.request<Array<{ id?: string; status?: string; description?: string; target_configuration?: { image?: string } }>>(path);
-      const existing = Array.isArray(rollouts) ? rollouts.find(rollout => rollout.description === body.description && rollout.target_configuration?.image === (body.target_configuration as { image?: string })?.image) : undefined;
+      const existing = Array.isArray(rollouts) ? rollouts.find(rollout => rollout.description === requestBody.description && rollout.target_configuration?.image === (requestBody.target_configuration as { image?: string })?.image) : undefined;
       if (existing?.id) return existing;
     }
-    return this.request(path, { method: "POST", body: JSON.stringify(body) });
+    return this.request(path, { method: "POST", body: JSON.stringify(requestBody) });
   }
 
   async getContainerRollout(id: string, rolloutId: string): Promise<{ id?: string; status?: string; [key: string]: unknown }> {
@@ -174,7 +178,7 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
     if (previous.containerApplicationId && previous.imageReference) {
       const app = (await this.listContainerApplications()).find((item) => item.id === previous.containerApplicationId);
       if (!app) throw new Error("previous container application was not found");
-      const configuration = { ...(app.configuration ?? {}), image: previous.imageReference };
+      const configuration = sanitizeContainerConfiguration({ ...(app.configuration ?? {}), image: previous.imageReference });
       await this.modifyContainerApplication(app.id, { configuration });
       await this.createContainerRollout(app.id, { description: "opencode-bot rollback", strategy: "rolling", target_configuration: configuration, step_percentage: 100, kind: "full_auto" });
     }
@@ -204,4 +208,10 @@ function contentTypeForPath(path: string): string {
 
 function sanitizeAssetConfig(config: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(config).filter(([key]) => ["html_handling", "not_found_handling", "run_worker_first", "_redirects", "_headers"].includes(key)));
+}
+
+/** Cloudflare includes these server-managed fields in GET application configuration. */
+function sanitizeContainerConfiguration(configuration: Record<string, unknown>): Record<string, unknown> {
+  const { location: _location, deployment_type: _deploymentType, ...writable } = configuration;
+  return writable;
 }
