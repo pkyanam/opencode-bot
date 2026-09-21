@@ -78,15 +78,17 @@ export async function request<T>(
   }
   if (!response.ok) {
     const raw = await response.text();
-    let message = raw || `${response.status} ${response.statusText}`;
+    let message = response.status >= 500 ? `The workspace server returned an error (${response.status}). It will reconnect automatically.` : `Request failed (${response.status}).`;
     let code: string | undefined;
     try {
       const parsed = JSON.parse(raw) as {
         error?: string;
         message?: string;
         code?: string;
+        title?: string;
       };
-      message = parsed.error ?? parsed.message ?? message;
+      const detail = parsed.error ?? parsed.message ?? parsed.title;
+      if (typeof detail === "string" && detail.length <= 500) message = detail;
       code = parsed.code;
     } catch {}
     if (response.status === 401 && includeAuth) {
@@ -210,7 +212,7 @@ export const api = (baseUrl: string) => ({
     );
     return {
       ...result,
-      messages: (result.messages ?? []).map(normalizeMessage),
+      messages: normalizeMessages(result.messages ?? []),
     };
   },
   run: (
@@ -275,6 +277,24 @@ function normalizeBaseUrl(value: string): string {
   return trimmed;
 }
 
+export function normalizeMessages(input: unknown[]): Message[] {
+  return input
+    .map((item, index) => ({ message: normalizeMessage(item as Message), index }))
+    .filter(({ message }) => Boolean(message.content.trim() || message.error || message.attachments?.length || message.parts?.some((part) => part.type === "tool")))
+    .sort((a, b) => {
+      const at = messageTime(a.message);
+      const bt = messageTime(b.message);
+      if (at !== bt) return at - bt;
+      const as = messageSequence(a.message);
+      const bs = messageSequence(b.message);
+      if (as !== bs) return as - bs;
+      const aid = String(a.message.id ?? "");
+      const bid = String(b.message.id ?? "");
+      return aid.localeCompare(bid) || a.index - b.index;
+    })
+    .map(({ message }) => message);
+}
+
 function normalizeMessage(message: Message): Message {
   const raw = (message as unknown as { content?: unknown }).content;
   const parts = Array.isArray(raw) ? raw : message.parts;
@@ -307,19 +327,44 @@ function normalizeMessage(message: Message): Message {
               output:
                 typeof part.state?.output === "string"
                   ? part.state.output
-                  : typeof part.state?.content === "string"
-                    ? part.state.content
+                  : Array.isArray(part.state?.content)
+                    ? part.state.content.filter((child: any) => child?.type === "text" && typeof child.text === "string").map((child: any) => child.text).join("\n")
+                    : typeof part.state?.content === "string"
+                      ? part.state.content
                     : part.output,
               error: part.state?.error ?? part.error,
             }
           : part,
       )
     : message.parts;
+  const created = (message as Message & { time?: { created?: unknown } }).time?.created;
+  const createdAt = message.createdAt ?? toIso(created);
   return {
     ...message,
     role: message.role ?? native.type ?? "assistant",
     content: text || native.text || "",
     parts: normalizedParts,
     attachments: message.attachments ?? native.files,
+    ...(createdAt ? { createdAt } : {}),
   };
+}
+
+function toMillis(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+function toIso(value: unknown): string | undefined {
+  const millis = toMillis(value);
+  return millis === Number.MAX_SAFE_INTEGER ? undefined : new Date(millis).toISOString();
+}
+function messageTime(message: Message): number { return toMillis(message.createdAt); }
+function messageSequence(message: Message): number {
+  const sequence = (message as Message & { sequence?: unknown }).sequence;
+  return typeof sequence === "number" && Number.isFinite(sequence) ? sequence : Number.MAX_SAFE_INTEGER;
 }

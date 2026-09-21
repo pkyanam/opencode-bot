@@ -10,7 +10,7 @@ const secure = vi.hoisted(() => ({
 // @ts-expect-error Vitest's runtime supports the virtual mock option.
 vi.mock("expo-secure-store", () => secure, { virtual: true });
 
-import { api, ApiError, setCachedToken } from "./api";
+import { api, ApiError, normalizeMessages, setCachedToken } from "./api";
 
 const jsonResponse = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -72,5 +72,16 @@ describe("mobile API contract", () => {
     vi.stubGlobal("fetch", fetchMock);
     await api("https://workspace.example").redeem("ps_invite", "Phone");
     expect(fetchMock.mock.calls[0][1].headers.get("Authorization")).toBeNull();
+  });
+
+  it("orders native messages chronologically and drops empty assistant bubbles", () => {
+    const messages = normalizeMessages([
+      { id: "assistant", type: "assistant", time: { created: 2000 }, content: [{ type: "text", text: "done" }] },
+      { id: "empty", type: "assistant", time: { created: 1500 }, content: [] },
+      { id: "user", type: "user", time: { created: 1000 }, text: "start" },
+      { id: "tool", type: "assistant", time: { created: 1800 }, content: [{ type: "tool", callID: "call-1", name: "read", state: { status: "completed", content: [{ type: "text", text: "ok" }] } }] },
+    ]);
+    expect(messages.map((message) => message.id)).toEqual(["user", "tool", "assistant"]);
+    expect(messages[1].parts?.[0]).toMatchObject({ type: "tool", id: "call-1", output: "ok" });
   });
 });
