@@ -3,10 +3,28 @@ import { useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import type { Attachment } from "../api";
 import { api } from "../api";
+import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 
 export const MAX_ATTACHMENTS = 8;
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
+const PREVIEWABLE_IMAGE_TYPES = new Set([
+  "image/avif",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
+export function isPreviewableImage(mimeType: string) {
+  return PREVIEWABLE_IMAGE_TYPES.has(mimeType.trim().toLowerCase());
+}
+
+function isHeicImage(mimeType: string) {
+  const normalized = mimeType.trim().toLowerCase();
+  return normalized === "image/heic" || normalized === "image/heif";
+}
 
 export async function uploadFiles(files: File[], existing: Attachment[], onChange: (update: Attachment[] | ((current: Attachment[]) => Attachment[])) => void, onError: (message: string) => void) {
   const available = Math.max(0, MAX_ATTACHMENTS - existing.length);
@@ -57,22 +75,53 @@ export function AttachmentCards({ attachments }: { attachments?: Attachment[] })
 function AttachmentCard({ attachment }: { attachment: Attachment }) {
   const [url, setUrl] = useState<string>();
   const [error, setError] = useState("");
-  const image = /^(image\/(png|jpe?g|gif|webp))$/i.test(attachment.mimeType);
+  const image = isPreviewableImage(attachment.mimeType) || isHeicImage(attachment.mimeType);
+  const heic = isHeicImage(attachment.mimeType);
+  const [expanded, setExpanded] = useState(false);
   const canonical = /^att_[0-9a-f-]{20,80}$/i.test(attachment.id);
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  useEffect(() => {
+    setUrl(undefined);
+    setError("");
+    if (!image || !canonical) return;
+    if (attachment.size > MAX_PREVIEW_BYTES) { setError("Attachment is too large to preview"); return; }
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    void api.download(attachment.id, controller.signal).then(async (blob) => {
+      if (controller.signal.aborted) return;
+      if (blob.size > MAX_PREVIEW_BYTES) throw new Error("Attachment is too large to preview");
+      if (heic) {
+        // Use the CSP build: the default package relies on dynamic evaluation.
+        const { heicTo } = await import("heic-to/csp");
+        if (controller.signal.aborted) return;
+        blob = await heicTo({ blob: new Blob([blob], { type: attachment.mimeType }), type: "image/jpeg", quality: 0.82 });
+        if (blob.size > MAX_PREVIEW_BYTES) throw new Error("Converted image is too large to preview");
+      }
+      if (controller.signal.aborted) return;
+      objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl);
+    }).catch((e) => {
+      if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load attachment");
+    });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attachment.id, canonical, heic, image]);
+  useEffect(() => () => {
+    if (url) URL.revokeObjectURL(url);
+  }, [url]);
   const open = async () => {
     if (!canonical) { setError("Attachment is no longer available."); return; }
+    if (image) {
+      if (url) setExpanded(true);
+      return;
+    }
     try {
       const blob = await api.download(attachment.id);
-      if (!image) {
-        const href = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = href; anchor.download = attachment.name; anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(href), 0);
-        return;
-      }
-      const next = URL.createObjectURL(blob);
-      setUrl((current) => { if (current) URL.revokeObjectURL(current); return next; });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href; anchor.download = attachment.name; anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(href), 0);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not load attachment"); }
   };
   const download = async (event: MouseEvent) => {
@@ -86,10 +135,19 @@ function AttachmentCard({ attachment }: { attachment: Attachment }) {
       window.setTimeout(() => URL.revokeObjectURL(href), 0);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not download attachment"); }
   };
-  return <div className="transcript-attachment" role="button" tabIndex={0} onClick={() => void open()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") void open(); }} title={image ? "Preview attachment" : "Download attachment"}>
-    {image && url ? <img src={url} alt={attachment.name} /> : <FileText size={18} />}
-    <span><strong>{attachment.name}</strong><small>{formatBytes(attachment.size)} · {attachment.mimeType}</small>{error && <small className="attachment-error">{error}</small>}<a href="#download" onClick={(event) => { event.preventDefault(); void download(event); }}>Download</a></span>
-  </div>;
+  const previewMessage = error || (!image && attachment.mimeType.toLowerCase().startsWith("image/") ? "Preview unavailable for this image format" : "");
+  return <>
+    <div className={`transcript-attachment${image && url ? " transcript-attachment-image" : ""}`} role="button" tabIndex={0} onClick={() => void open()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") void open(); }} title={image ? "Preview attachment" : "Download attachment"}>
+    {image && url ? <img src={url} alt={attachment.name} onError={() => { URL.revokeObjectURL(url); setUrl(undefined); setError("Preview unavailable for this image format"); }} /> : <FileText size={18} />}
+    <span><strong>{attachment.name}</strong><small>{formatBytes(attachment.size)} · {attachment.mimeType}</small>{previewMessage && <small className="attachment-error">{previewMessage}</small>}<a href="#download" onClick={(event) => { event.preventDefault(); void download(event); }}>Download</a></span>
+    </div>
+    <Dialog open={expanded} onOpenChange={setExpanded}>
+      <DialogContent className="attachment-preview-dialog">
+        <DialogTitle>{attachment.name}</DialogTitle>
+        {url && <img className="attachment-preview-image" src={url} alt={attachment.name} />}
+      </DialogContent>
+    </Dialog>
+  </>;
 }
 
 function formatBytes(size: number) {

@@ -147,4 +147,32 @@ describe("mobile API contract", () => {
     expect(messages.map((message) => message.id)).toEqual(["user", "tool", "assistant"]);
     expect(messages[1].parts?.[0]).toMatchObject({ type: "tool", id: "call-1", output: "ok" });
   });
+
+  it("sanitizes structured and oversized tool output before rendering", () => {
+    const huge = "A".repeat(20_000);
+    const messages = normalizeMessages([
+      {
+        id: "structured",
+        type: "assistant",
+        content: [
+          null,
+          { type: "tool", callID: "call-structured", name: "picture", state: {
+            status: "completed",
+            content: { files: [{ name: "photo.png", data: `data:image/png;base64,${huge}` }], ok: true },
+          } },
+          { type: "text", text: huge },
+        ],
+      },
+    ]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content.length).toBeLessThanOrEqual(16_001);
+    const tool = messages[0].parts?.find((part) => part.type === "tool");
+    expect(tool).toMatchObject({ type: "tool", output: expect.stringContaining("[binary data omitted]") });
+    expect(typeof tool?.output).toBe("string");
+  });
 });
+
+ it('renders the structured HEIC read failure from Pictures as a failed tool rather than an object', () => {
+  const [message] = normalizeMessages([{id:'picture',type:'assistant',content:[{type:'tool',name:'read',state:{status:'error',error:{type:'unknown',message:'Cannot read binary file: photo.heic'}}}]}]);
+  expect(message.parts?.[0]).toMatchObject({type:'tool',status:'failed',error:'Cannot read binary file: photo.heic'});
+ });

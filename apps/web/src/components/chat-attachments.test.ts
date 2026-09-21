@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { api, type Attachment } from "../api";
-import { uploadFiles } from "./chat-attachments";
+import { isPreviewableImage, uploadFiles } from "./chat-attachments";
+
+describe("chat attachment previews", () => {
+  it("allows browser-friendly image formats and gracefully excludes HEIC", () => {
+    expect(isPreviewableImage("image/jpeg")).toBe(true);
+    expect(isPreviewableImage("IMAGE/WEBP")).toBe(true);
+    expect(isPreviewableImage("image/heic")).toBe(false);
+    expect(isPreviewableImage("image/heif")).toBe(false);
+    expect(isPreviewableImage("application/pdf")).toBe(false);
+  });
+});
 
 describe("chat attachment upload limits", () => {
   it("caps a batch at eight attachments", async () => {

@@ -453,8 +453,8 @@ export const api = {
     });
     return result.attachment;
   },
-  download: (id: string) =>
-    requestBlob(`/api/uploads/${encodeURIComponent(id)}`),
+  download: (id: string, signal?: AbortSignal) =>
+    requestBlob(`/api/uploads/${encodeURIComponent(id)}`, signal),
   run: (payload: {
     threadId: string;
     prompt: string;

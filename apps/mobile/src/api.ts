@@ -295,7 +295,7 @@ function normalizeBaseUrl(value: string): string {
 
 export function normalizeMessages(input: unknown[]): Message[] {
   return input
-    .map((item, index) => ({ message: normalizeMessage(item as Message), index }))
+    .map((item, index) => ({ message: normalizeMessage(item), index }))
     .filter(({ message }) => Boolean(message.content.trim() || message.error || message.attachments?.length || message.parts?.some((part) => part.type === "tool")))
     .sort((a, b) => {
       const at = messageTime(a.message);
@@ -311,7 +311,47 @@ export function normalizeMessages(input: unknown[]): Message[] {
     .map(({ message }) => message);
 }
 
-function normalizeMessage(message: Message): Message {
+const MAX_DISPLAY_TEXT = 16_000;
+
+function displayText(value: unknown, depth = 0): string {
+  if (typeof value === "string") {
+    // Tool results can contain image/file data URIs. Never copy those into a
+    // React Native Text node (or retain the full value in message state).
+    if (/^data:[^;,]+;base64,/i.test(value)) return "[binary data omitted]";
+    if (value.length > 4096 && /^[A-Za-z0-9+/=\s]+$/.test(value)) return "[binary data omitted]";
+    if (value.length > MAX_DISPLAY_TEXT) return `${value.slice(0, MAX_DISPLAY_TEXT)}…`;
+    return value;
+  }
+  if (value == null || typeof value === "function" || typeof value === "symbol") return "";
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  if (depth >= 4) return "[structured output omitted]";
+  if (Array.isArray(value)) {
+    return truncateDisplay(value.map((item) => displayText(item, depth + 1)).filter(Boolean).join("\n"));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") return displayText(record.text, depth + 1);
+    if (typeof record.message === "string") return displayText(record.message, depth + 1);
+    const entries = Object.entries(record)
+      .map(([key, item]) => {
+        if (typeof item === "string" && item.length > 1024 && /(?:data|base64|bytes|encrypted|blob)/i.test(key)) {
+          return `${key}: [binary data omitted]`;
+        }
+        const rendered = displayText(item, depth + 1);
+        return rendered ? `${key}: ${rendered}` : "";
+      })
+      .filter(Boolean);
+    return truncateDisplay(entries.join("\n"));
+  }
+  return "";
+}
+
+function truncateDisplay(value: string): string {
+  return value.length > MAX_DISPLAY_TEXT ? `${value.slice(0, MAX_DISPLAY_TEXT)}…` : value;
+}
+
+function normalizeMessage(input: unknown): Message {
+  const message = input && typeof input === "object" ? input as Message : {} as Message;
   const raw = (message as unknown as { content?: unknown }).content;
   const parts = Array.isArray(raw) ? raw : message.parts;
   const text = Array.isArray(parts)
@@ -323,10 +363,10 @@ function normalizeMessage(message: Message): Message {
             (part as { type?: unknown }).type === "text",
           ),
         )
-        .map((part) => String(part.text ?? ""))
+        .map((part) => displayText(part.text))
         .join("\n")
     : typeof raw === "string"
-      ? raw
+      ? displayText(raw)
       : "";
   const native = message as unknown as {
     type?: string;
@@ -334,33 +374,46 @@ function normalizeMessage(message: Message): Message {
     files?: Message["attachments"];
   };
   const normalizedParts = Array.isArray(parts)
-    ? parts.map((part: any) =>
-        part.type === "tool"
-          ? {
-              ...part,
-              id: part.id ?? part.callID,
-              status: part.state?.status ?? part.status ?? "running",
-              output:
-                typeof part.state?.output === "string"
-                  ? part.state.output
-                  : Array.isArray(part.state?.content)
-                    ? part.state.content.filter((child: any) => child?.type === "text" && typeof child.text === "string").map((child: any) => child.text).join("\n")
-                    : typeof part.state?.content === "string"
-                      ? part.state.content
-                    : part.output,
-              error: part.state?.error ?? part.error,
-            }
-          : part,
-      )
+    ? parts.flatMap((part: unknown) => {
+        if (!part || typeof part !== "object") return [];
+        const value = part as Record<string, any>;
+        if (value.type === "tool") {
+          const output = typeof value.state?.output === "string"
+            ? displayText(value.state.output)
+            : value.state?.content !== undefined
+              ? displayText(value.state.content)
+              : displayText(value.output);
+          const error = displayText(value.state?.error ?? value.error);
+          const rawInput = value.state?.input ?? value.input;
+          const input = rawInput && typeof rawInput === "object"
+            ? Object.fromEntries(["url", "path", "command"].flatMap((key) =>
+                typeof rawInput[key] === "string" ? [[key, displayText(rawInput[key])]] : [],
+              ))
+            : undefined;
+          const rawStatus = value.state?.status ?? value.status ?? "running";
+          return [{
+            type: "tool" as const,
+            id: value.id ?? value.callID,
+            name: typeof value.name === "string" ? value.name : "tool",
+            status: ["error", "failed", "cancelled"].includes(rawStatus) ? "failed" : rawStatus,
+            ...(input && Object.keys(input).length ? { input } : {}),
+            ...(output ? { output } : {}),
+            ...(error ? { error } : {}),
+          } as NonNullable<Message["parts"]>[number]];
+        }
+        if (value.type === "text") return [{ type: "text" as const, text: displayText(value.text) }];
+        return [];
+      })
     : message.parts;
   const created = (message as Message & { time?: { created?: unknown } }).time?.created;
   const createdAt = message.createdAt ?? toIso(created);
   return {
     ...message,
     role: message.role ?? native.type ?? "assistant",
-    content: text || native.text || "",
+    content: text || displayText(native.text),
     parts: normalizedParts,
     attachments: message.attachments ?? native.files,
+    ...(message.error ? { error: displayText(message.error) } : {}),
     ...(createdAt ? { createdAt } : {}),
   };
 }

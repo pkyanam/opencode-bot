@@ -1,3 +1,4 @@
+import { clientPayload } from "./client-payload";
 import { Buffer } from "node:buffer";
 import { UpdateController } from "./update-controller";
 import packageInfo from "../../../package.json";
@@ -629,7 +630,7 @@ export class Workspace {
       runId: e.run_id,
       sequence: e.sequence,
       type: e.type,
-      payload: parseJson(e.payload, null),
+      payload: clientPayload(parseJson(e.payload, null)),
       createdAt: e.created_at,
     }));
   }
@@ -971,7 +972,7 @@ export class Workspace {
     const byRun = new Map<string, any[]>();
     for (const event of eventRows) {
       const list = byRun.get(event.run_id) ?? [];
-      list.push({ id: event.id, runId: event.run_id, sequence: event.sequence, type: event.type, payload: parseJson(event.payload, null), createdAt: event.created_at });
+      list.push({ id: event.id, runId: event.run_id, sequence: event.sequence, type: event.type, payload: clientPayload(parseJson(event.payload, null)), createdAt: event.created_at });
       byRun.set(event.run_id, list);
     }
     const starts = new Map(ids.flatMap(id => this.rows<any>("SELECT run_id,created_at FROM events WHERE run_id=? AND type IN ('run.dispatching','node.dispatching') ORDER BY sequence LIMIT 1", id)).map(event => [event.run_id, event.created_at]));
@@ -2618,7 +2619,7 @@ export class Workspace {
         return row ? { ...part, data: "", id: row.id, name: row.name, mime: row.mime_type, mimeType: row.mime_type, size: Number(row.size) } : { ...part, ...(part.data !== undefined ? { data: "" } : {}) };
       }) : message.content,
     }));
-    return response({ ...payload, messages });
+    return response(clientPayload({ ...payload, messages }));
   }
   private botInstructions(thread: any): string {
     const memories = this.rows<any>(

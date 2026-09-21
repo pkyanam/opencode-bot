@@ -30,6 +30,7 @@
     "@xterm/xterm": "6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "heic-to": "^1.5.2",
     "lucide-react": "0.577.0",
     "mdast-util-from-markdown": "2.0.3",
     "qrcode": "^1.5.4",
