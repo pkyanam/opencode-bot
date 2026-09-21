@@ -15,6 +15,7 @@ import {
   SafeAreaView,
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
+import { MessageSquare, Bot as BotIcon, FolderOpen, Settings2 } from "lucide-react-native";
 import { router } from "expo-router";
 import * as Linking from "expo-linking";
 import { useStore } from "../src/store";
@@ -48,10 +49,10 @@ export default function Home() {
   const bots = store.state?.bots ?? [],
     threads = store.state?.threads ?? [];
   const navItems = [
-    { key: "chats" as const, label: "Chats", symbol: "◌" },
-    { key: "bots" as const, label: "Bots", symbol: "✦" },
-    { key: "workspace" as const, label: "Workspace", symbol: "▦" },
-    { key: "settings" as const, label: "Settings", symbol: "⚙" },
+    { key: "chats" as const, label: "Chats", icon: MessageSquare },
+    { key: "bots" as const, label: "Bots", icon: BotIcon },
+    { key: "workspace" as const, label: "Workspace", icon: FolderOpen },
+    { key: "settings" as const, label: "Settings", icon: Settings2 },
   ];
   useEffect(() => {
     const handle = (url: string | null) => {
@@ -463,8 +464,8 @@ export default function Home() {
           flexDirection: "row",
           borderTopWidth: 1,
           borderTopColor: colors.line,
-          paddingTop: 14,
-          paddingBottom: Math.max(14, insets.bottom),
+          paddingTop: 6,
+          paddingBottom: Math.max(6, insets.bottom),
           backgroundColor: colors.bg,
         }}
       >
@@ -481,14 +482,12 @@ export default function Home() {
                 : setView(item.key)
             }
           >
-            <Text
-              style={{
-                fontSize: 16,
-                color: view === item.key ? colors.text : colors.muted,
-              }}
-            >
-              {item.symbol}
-            </Text>
+            <item.icon
+              size={21}
+              strokeWidth={view === item.key ? 2 : 1.7}
+              color={view === item.key ? colors.text : colors.muted}
+              accessible={false}
+            />
             <Text
               style={[
                 styles.navLabel,

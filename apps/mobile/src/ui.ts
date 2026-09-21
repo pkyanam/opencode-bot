@@ -75,9 +75,9 @@ export const styles = StyleSheet.create({
     minHeight: 48,
     alignItems: "center",
     justifyContent: "center",
-    gap: 3,
+    gap: 5,
   },
-  navLabel: { fontSize: 12, fontWeight: "600" },
+  navLabel: { fontSize: 11, lineHeight: 14, fontWeight: "500" },
   label: { color: colors.muted, fontSize: 12, marginBottom: 7 },
   error: { color: colors.danger, marginTop: 10, lineHeight: 19 },
 });
