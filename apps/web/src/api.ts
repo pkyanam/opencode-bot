@@ -1,3 +1,4 @@
+import { consumeConnectionFragment } from "./lib/bootstrap-connection";
 import { normalizeNativeMessages } from "./lib/transcript";
 export type Bot = {
   id: string;
@@ -185,6 +186,9 @@ const base =
   (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ??
   "";
 const tokenKey = "opencode-bot-app-token";
+if (typeof window !== "undefined") {
+  consumeConnectionFragment(window.location, window.history, window.localStorage);
+}
 export const CONNECTION_EVENT = "opencode-bot-connection-change";
 // Connection credentials belong to this installation, not one browser tab.
 // Migrate existing tabs once and share subsequent changes across the origin.

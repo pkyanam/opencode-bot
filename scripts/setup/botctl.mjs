@@ -99,8 +99,11 @@ function writeDevVars() {
 }
 
 function runRequired(label, name, argv, options = {}) {
-  const result = spawnSync(name, argv, { cwd: root, encoding: "utf8", timeout: options.timeout ?? 600000, stdio: options.inherit ? "inherit" : "pipe" });
-  if (result.status !== 0) throw new Error(`${label} failed (exit ${result.status ?? "unknown"})`);
+  const result = spawnSync(name, argv, { cwd: root, encoding: "utf8", timeout: options.timeout ?? 1200000, maxBuffer: 32 * 1024 * 1024, stdio: options.inherit ? "inherit" : "pipe" });
+  if (result.status !== 0) {
+    const detail = `${result.stderr || result.stdout || ""}`.trim().split("\n").filter(Boolean).slice(-8).join(" ").slice(0, 1200);
+    throw new Error(`${label} failed (exit ${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}`);
+  }
   return result;
 }
 
@@ -130,18 +133,57 @@ function secretMaterial() {
 
 function ensureBucket(config, state) {
   const bucket = config.bucketName ?? "ocbot-personal-artifacts";
-  const listed = runRequired("R2 bucket list", "npx", ["--no-install", "wrangler", "r2", "bucket", "list"]);
+  let listed;
+  try {
+    listed = runRequired("R2 bucket list", "npx", ["--no-install", "wrangler", "r2", "bucket", "list"]);
+  } catch (error) {
+    if (/10042|enable R2|R2.*dashboard/i.test(error.message)) {
+      throw new Error("Cloudflare R2 is not enabled for this account. Enable R2 in the Cloudflare dashboard (https://dash.cloudflare.com/?to=/:account/r2) and rerun the installer; no billing or account changes were made automatically.");
+    }
+    throw error;
+  }
   // Wrangler 4.135 has no --json flag for this command. Match the exact
   // bucket name in its table output while avoiding substring adoption.
   const bucketExists = (listed.stdout || "").split(/\r?\n/).some((line) => {
     const match = line.trim().match(/^name:\s+(\S+)/);
     return match?.[1] === bucket;
   });
+  if (bucketExists && !state.resources?.r2) throw new Error(`R2 bucket ${bucket} already exists but is not recorded as owned by this installation; choose a unique bucketName or rerun with the original deployment state`);
   if (!bucketExists) runRequired("R2 bucket create", "npx", ["--no-install", "wrangler", "r2", "bucket", "create", bucket], { inherit: true });
   state.resources.r2 = bucket;
 }
 
-function applyDeployment(config) {
+function ensureWorkerOwnership(config, state) {
+  if (state.resources?.worker || state.deploymentUrl) return;
+  const worker = config.name ?? "ocbot-personal";
+  let deployments;
+  try { deployments = runRequired("Worker deployment lookup", "npx", ["--no-install", "wrangler", "deployments", "list", "--name", worker]); }
+  catch (error) {
+    if (/10007|not found|does not exist/i.test(error.message)) return;
+    throw error;
+  }
+  if ((deployments.stdout || "").trim()) throw new Error(`Worker ${worker} already has Cloudflare deployment history but this checkout has no ownership state; use the original checkout or choose a unique deployment name`);
+}
+
+async function verifyDeployment(url, tokenValue) {
+  const endpoint = `${url.replace(/\/$/, "")}/api/state`;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, { redirect: "error", headers: { Authorization: `Bearer ${tokenValue}` }, signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      if (!Array.isArray(body.bots) || !Array.isArray(body.threads) || !Array.isArray(body.runs)) throw new Error("invalid workspace response");
+      const unauthenticated = await fetch(endpoint, { redirect: "error", signal: AbortSignal.timeout(15000) });
+      if (unauthenticated.status !== 401) throw new Error("unauthenticated API access was not rejected");
+      return { status: response.status, state: true, authentication: true };
+    } catch (error) {
+      if (attempt === 5) throw new Error(`deployed Worker health check failed: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+}
+
+async function applyDeployment(config) {
   validateDeploymentConfig(config);
   let list = checks();
   printChecks(list);
@@ -161,6 +203,7 @@ function applyDeployment(config) {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const material = secretMaterial();
   const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { schemaVersion: 1, project: config.name ?? "ocbot-personal", createdAt: new Date().toISOString(), resources: {}, journal: [] };
+  ensureWorkerOwnership(config, state);
   state.secretDigests = { APP_TOKEN: digest(material.APP_TOKEN), RUNNER_TOKEN: digest(material.RUNNER_TOKEN) };
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   chmodSync(statePath, 0o600);
@@ -171,24 +214,34 @@ function applyDeployment(config) {
   runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
   runRequired("web build", "npm", ["run", "build"], { inherit: true }); journal(state, "build", "complete");
   ensureBucket(config, state); journal(state, "r2", "complete");
-  runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", "wrangler.jsonc"], { inherit: true }); journal(state, "deploy", "complete");
+  console.log("Building and publishing the Sandbox image and Worker. The first deployment can take several minutes.");
+  const deployed = runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", "wrangler.jsonc"]);
+  const workerName = config.name ?? "ocbot-personal";
+  const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
+  if (appUrl && !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL; refusing to hand off credentials");
+  if (!appUrl) throw new Error("Worker deploy completed without a discoverable public URL; inspect Wrangler output and rerun setup");
+  state.deploymentUrl = appUrl; state.resources.worker = appUrl; journal(state, "deploy", "complete", appUrl);
   runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", "wrangler.jsonc"], { inherit: true }); journal(state, "secrets", "complete");
-  console.log("Deployment complete. Secret values were stored only in the mode-0600 local state directory.");
+  state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
+  journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 }); chmodSync(statePath, 0o600);
+  console.log(`Deployment complete: ${appUrl}`);
+  console.log(`Onboarding handoff is available from ${statePath}; the connection token remains mode-0600 and is never printed.`);
 }
 
-function main() {
+async function main() {
   if (args.has("--help") || args.has("-h")) { console.log("Usage: setup.sh [doctor|plan|apply] [--config FILE] [--apply] [--install-missing]"); return; }
   const config = readConfig();
   if (command === "doctor") { const result = checks(); printChecks(result); if (result.some((item) => !item.ok)) process.exitCode = 1; return; }
   if (command === "plan" || args.has("--plan")) { console.log(JSON.stringify(plan(config), null, 2)); return; }
   if (command === "apply") {
     if (!apply) throw new Error("apply requires explicit --apply");
-    applyDeployment(config);
+    await applyDeployment(config);
     return;
   }
   throw new Error(`unknown command ${command}`);
 }
 
-try { main(); } catch (error) { console.error(`setup error: ${error.message}`); process.exitCode = 1; }
+try { await main(); } catch (error) { console.error(`setup error: ${error.message}`); process.exitCode = 1; }
 
 export { checkNode, checks, plan, digest };

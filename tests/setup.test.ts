@@ -37,8 +37,8 @@ describe("setup planner", () => {
     const fake = (name: string, body: string) => writeFileSync(resolve(bin, name), `#!/bin/sh\nprintf '%s\\n' "${name} $*" >> '${log}'\n${body}\n` , { mode: 0o755 });
     fake("git", "exit 0"); fake("docker", "[ \"$1\" = info ] && echo 29.0 || true");
     fake("npm", "if [ \"$1\" = run ]; then mkdir -p apps/web/dist; fi");
-    fake("npx", "case \"$*\" in *whoami*) echo 'You are logged in' ;; *'bucket list'*) echo 'name' ;; *) exit 0 ;; esac");
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    fake("npx", "case \"$*\" in *whoami*) echo 'You are logged in' ;; *'bucket list'*) echo 'name' ;; *'deployments list'*) exit 0 ;; *deploy*) echo 'https://ocbot-personal.example.workers.dev' ;; *) exit 0 ;; esac");
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, OCBOT_SKIP_HEALTH: "1" };
     execFileSync(process.execPath, [resolve(fixture, "scripts/setup.mjs"), "apply", "--apply", "--install-missing"], { cwd: fixture, env, encoding: "utf8" });
     const secrets = JSON.parse(readFileSync(resolve(fixture, ".opencode-bot/secrets.json"), "utf8"));
     expect(secrets.APP_TOKEN).toHaveLength(43);
