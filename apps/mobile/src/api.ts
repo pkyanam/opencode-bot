@@ -29,7 +29,9 @@ export const setCachedToken = (value: string | null) => {
 };
 export const onAuthInvalidated = (listener: () => void) => {
   authInvalidated.add(listener);
-  return () => { authInvalidated.delete(listener); };
+  return () => {
+    authInvalidated.delete(listener);
+  };
 };
 async function token() {
   if (cachedToken === undefined) cachedToken = await readToken();
@@ -40,14 +42,20 @@ export async function request<T>(
   path: string,
   init: MobileRequestInit = {},
 ): Promise<T> {
-  const { auth: includeAuth = true, timeoutMs = 30_000, ...fetchInit } = init;
+  const {
+    auth: includeAuth = true,
+    timeoutMs = 30_000,
+    responseType = "json",
+    ...fetchInit
+  } = init;
   const url = normalizeBaseUrl(baseUrl);
   const authToken = await token();
   const headers = new Headers(fetchInit.headers);
-  headers.set("Accept", "application/json");
+  headers.set("Accept", responseType === "text" ? "text/plain, */*" : "application/json");
   if (fetchInit.body && !(fetchInit.body instanceof FormData))
     headers.set("Content-Type", "application/json");
-  if (includeAuth && authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  if (includeAuth && authToken)
+    headers.set("Authorization", `Bearer ${authToken}`);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const signal = fetchInit.signal;
@@ -55,9 +63,14 @@ export async function request<T>(
   signal?.addEventListener("abort", abort, { once: true });
   let response: Response;
   try {
-    response = await fetch(`${url}${path}`, { ...fetchInit, headers, signal: controller.signal });
+    response = await fetch(`${url}${path}`, {
+      ...fetchInit,
+      headers,
+      signal: controller.signal,
+    });
   } catch (error) {
-    if (controller.signal.aborted && !signal?.aborted) throw new ApiError("The workspace request timed out.");
+    if (controller.signal.aborted && !signal?.aborted)
+      throw new ApiError("The workspace request timed out.");
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -84,20 +97,49 @@ export async function request<T>(
     throw new ApiError(message, response.status, code);
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  return (responseType === "text" ? response.text() : response.json()) as Promise<T>;
 }
 
-type MobileRequestInit = RequestInit & { auth?: boolean; timeoutMs?: number };
+type MobileRequestInit = RequestInit & {
+  auth?: boolean;
+  timeoutMs?: number;
+  responseType?: "json" | "text";
+};
 export const api = (baseUrl: string) => ({
   state: () => request<State>(baseUrl, "/api/state"),
   bots: () => request<Bot[]>(baseUrl, "/api/bots"),
-  createBot: (payload: { name: string; instructions?: string; model?: string; agent?: string; nodeId?: string } | string) => {
-    const body = typeof payload === "string" ? { name: payload, instructions: "", model: "" } : { instructions: "", model: "", ...payload };
-    return request<Bot>(baseUrl, "/api/bots", { method: "POST", body: JSON.stringify(body) });
+  createBot: (
+    payload:
+      | {
+          name: string;
+          instructions?: string;
+          model?: string;
+          agent?: string;
+          nodeId?: string;
+        }
+      | string,
+  ) => {
+    const body =
+      typeof payload === "string"
+        ? { name: payload, instructions: "", model: "" }
+        : { instructions: "", model: "", ...payload };
+    return request<Bot>(baseUrl, "/api/bots", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   },
-  updateBot: (id: string, payload: Partial<Pick<Bot, "name" | "instructions" | "model" | "agent">>) =>
-    request<Bot>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  deleteBot: (id: string) => request<void>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  updateBot: (
+    id: string,
+    payload: Partial<Pick<Bot, "name" | "instructions" | "model" | "agent">>,
+  ) =>
+    request<Bot>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteBot: (id: string) =>
+    request<void>(baseUrl, `/api/bots/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   redeem: (credential: string, deviceName: string) =>
     request<{ deviceToken: string }>(baseUrl, "/api/pairing/redeem", {
       method: "POST",
@@ -131,10 +173,36 @@ export const api = (baseUrl: string) => ({
     }),
   catalog: () => request<Catalog>(baseUrl, "/api/catalog"),
   skills: () => request<Skill[]>(baseUrl, "/api/skills"),
-  createSkill: (payload: Pick<Skill, "name" | "description" | "instructions">) => request<Skill>(baseUrl, "/api/skills", { method: "POST", body: JSON.stringify(payload) }),
-  updateSkill: (id: string, payload: Pick<Skill, "name" | "description" | "instructions">) => request<Skill>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  deleteSkill: (id: string) => request<void>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  files: (path = ".") => request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(baseUrl, `/api/files?path=${encodeURIComponent(path)}`),
+  createSkill: (
+    payload: Pick<Skill, "name" | "description" | "instructions">,
+  ) =>
+    request<Skill>(baseUrl, "/api/skills", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateSkill: (
+    id: string,
+    payload: Pick<Skill, "name" | "description" | "instructions">,
+  ) =>
+    request<Skill>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteSkill: (id: string) =>
+    request<void>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  files: (path = ".") =>
+    request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
+      baseUrl,
+      `/api/files?path=${encodeURIComponent(path)}`,
+    ),
+  fileContent: (path: string) =>
+    request<string>(
+      baseUrl,
+      `/api/files/content?path=${encodeURIComponent(path)}`,
+      { responseType: "text" },
+    ),
   messages: async (threadId: string) => {
     const result = await request<{ messages: Message[] }>(
       baseUrl,
@@ -188,9 +256,20 @@ export const api = (baseUrl: string) => ({
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim().replace(/\/$/, "");
   let parsed: URL;
-  try { parsed = new URL(trimmed); } catch { throw new ApiError("Enter a valid workspace URL."); }
-  const local = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1" || parsed.hostname === "[::1]";
-  if (parsed.username || parsed.password || parsed.hash || parsed.search) throw new ApiError("Enter the workspace server URL without credentials or a pairing link.");
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new ApiError("Enter a valid workspace URL.");
+  }
+  const local =
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "::1" ||
+    parsed.hostname === "[::1]";
+  if (parsed.username || parsed.password || parsed.hash || parsed.search)
+    throw new ApiError(
+      "Enter the workspace server URL without credentials or a pairing link.",
+    );
   if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:"))
     throw new ApiError("Workspace connections must use HTTPS.");
   return trimmed;
@@ -213,14 +292,29 @@ function normalizeMessage(message: Message): Message {
     : typeof raw === "string"
       ? raw
       : "";
-  const native = message as unknown as { type?: string; text?: string; files?: Message["attachments"] };
-  const normalizedParts = Array.isArray(parts) ? parts.map((part: any) => part.type === "tool" ? {
-    ...part,
-    id: part.id ?? part.callID,
-    status: part.state?.status ?? part.status ?? "running",
-    output: typeof part.state?.output === "string" ? part.state.output : typeof part.state?.content === "string" ? part.state.content : part.output,
-    error: part.state?.error ?? part.error,
-  } : part) : message.parts;
+  const native = message as unknown as {
+    type?: string;
+    text?: string;
+    files?: Message["attachments"];
+  };
+  const normalizedParts = Array.isArray(parts)
+    ? parts.map((part: any) =>
+        part.type === "tool"
+          ? {
+              ...part,
+              id: part.id ?? part.callID,
+              status: part.state?.status ?? part.status ?? "running",
+              output:
+                typeof part.state?.output === "string"
+                  ? part.state.output
+                  : typeof part.state?.content === "string"
+                    ? part.state.content
+                    : part.output,
+              error: part.state?.error ?? part.error,
+            }
+          : part,
+      )
+    : message.parts;
   return {
     ...message,
     role: message.role ?? native.type ?? "assistant",
