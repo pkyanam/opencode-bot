@@ -15,7 +15,11 @@ Each release contains:
   runtime versions, platform, and `image.reference`.
 - `app-bundle.json`, containing the compiled Worker modules, web assets, routing
   configuration, and pinned computer image for Settings → Updates.
-- A manifest checksum and size for that bundle, plus `SHA256SUMS` for both files.
+- A manifest checksum and size for that bundle, plus `SHA256SUMS` for the
+  published release assets.
+- `node-bundle.tar.gz` and `node-bundle-manifest.json`, a source-free runtime
+  bundle used by the macOS, Linux, and Windows owned-node installers. Its
+  SHA-256 is recorded in the node manifest and `SHA256SUMS`.
 
 The workflow requires the repository secret `DOCKERHUB_TOKEN` and the optional
 repository variable `DOCKERHUB_USERNAME` (default `preethamk`). The token is

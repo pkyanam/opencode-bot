@@ -86,8 +86,18 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
   inbox; work for a busy computer stays queued. Stop works while awaiting approval.
 - **Update from Settings.** Connect deployment access once, then update the app
   and computer together with a saved checkpoint.
-- **Bring another computer.** An outbound node agent can pair your Mac, Linux,
-  or Windows machine. Cloudflare is the default computer.
+- **Bring another computer.** Settings → Computers provides a copyable installer
+  for macOS/Linux or Windows. It installs the runtime, pairs the machine, and
+  starts its background service without a Git checkout.
+
+## Mobile preview
+
+The first native iOS/Android client is in [apps/mobile](apps/mobile). Scan the QR
+from Settings → Devices or enter a one-use code to connect. It shares your bots,
+conversations, approvals, and files with the web app. Device credentials stay in
+secure storage. [Build and run the mobile app →](docs/mobile-client.md)
+
+This is a development preview, not an App Store or Play Store release.
 
 ## First public preview
 

@@ -163,6 +163,7 @@ function normalizeBaseUrl(value: string): string {
   let parsed: URL;
   try { parsed = new URL(trimmed); } catch { throw new ApiError("Enter a valid workspace URL."); }
   const local = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1" || parsed.hostname === "[::1]";
+  if (parsed.username || parsed.password || parsed.hash || parsed.search) throw new ApiError("Enter the workspace server URL without credentials or a pairing link.");
   if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:"))
     throw new ApiError("Workspace connections must use HTTPS.");
   return trimmed;
@@ -185,9 +186,19 @@ function normalizeMessage(message: Message): Message {
     : typeof raw === "string"
       ? raw
       : "";
+  const native = message as unknown as { type?: string; text?: string; files?: Message["attachments"] };
+  const normalizedParts = Array.isArray(parts) ? parts.map((part: any) => part.type === "tool" ? {
+    ...part,
+    id: part.id ?? part.callID,
+    status: part.state?.status ?? part.status ?? "running",
+    output: typeof part.state?.output === "string" ? part.state.output : typeof part.state?.content === "string" ? part.state.content : part.output,
+    error: part.state?.error ?? part.error,
+  } : part) : message.parts;
   return {
     ...message,
-    content: text,
-    parts: Array.isArray(parts) ? (parts as Message["parts"]) : message.parts,
+    role: message.role ?? native.type ?? "assistant",
+    content: text || native.text || "",
+    parts: normalizedParts,
+    attachments: message.attachments ?? native.files,
   };
 }

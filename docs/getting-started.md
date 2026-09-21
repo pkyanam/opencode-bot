@@ -187,13 +187,29 @@ in this preview; voice/files and inline approval buttons remain extensions.
 
 An owned macOS, Linux, or Windows computer can be paired through the outbound
 node agent. This is a development path, not the default provider and not a
-native desktop app:
+native desktop app. In Settings → Nodes, create a pairing token, then copy one
+of these commands. The installer downloads a pinned release bundle directly;
+it does not require Git, a checkout, or a package manager setup.
 
 ```sh
-npm ci --prefix runner
-node scripts/node-agent.mjs register --control-url https://YOUR-WORKER.example --pairing-token PAIRING_TOKEN --name "My computer"
-node scripts/node-agent.mjs start
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/node-install.sh | bash -s -- \
+  --control-url https://YOUR-WORKER.example \
+  --pairing-token PAIRING_TOKEN \
+  --name "My computer"
 ```
+
+On Windows, open PowerShell and run:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/node-install.ps1))) `
+  -ControlUrl 'https://YOUR-WORKER.example' -PairingToken 'PAIRING_TOKEN' -Name 'My computer'
+```
+
+The token is used once during registration and is not written to the service
+definition or installer logs. The agent stores its returned node secret in a
+per-user config file with private permissions and starts at login. To remove a
+node, rerun the Unix command with `--uninstall`, or use
+`-Uninstall` with the PowerShell command; then revoke it in Settings → Nodes.
 
 Registration creates a private node secret and local runner token in the
 platform config directory. Remote terminal/desktop access is not currently

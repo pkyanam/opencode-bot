@@ -34,9 +34,10 @@ platform fit:
 - Expo Router file routes and platform-specific files for native drawer versus
   web sidebar behavior.
 
-The reference currently depends on Expo SDK 56 packages and `@legendapp/list`;
-the mobile app should pin versions compatible with the chosen SDK rather than
-assuming the reference lockfile is current.
+The reference README currently targets Expo SDK 55 and `@legendapp/list`; this
+mobile app uses the current stable Expo SDK 57 line (`expo@57.0.24`, React
+Native 0.86) and runs `expo install` compatibility checks after dependency
+changes.
 
 ## Control API boundary
 
@@ -177,5 +178,40 @@ snapshot polling.
 5. Evaluate preview and notifications against native platform constraints
    before adding either to the default navigation.
 
-No native app is built by this document; it records the boundary and sequence
-for a future implementation.
+## First native slice (implemented)
+
+The first Expo Router slice now lives in `apps/mobile`. It includes:
+
+- Expo Router routes for pairing, workspace threads, and a conversation view.
+- SecureStore backed device-token storage; the owner token is never required by
+  the phone client.
+- Pairing by QR fragment secret or human code against `/api/pairing/redeem`.
+- State/thread creation, public transcript loading, run submission with an
+  idempotency key, run/event polling, cancellation, approval decisions, and
+  bounded public tool activity.
+- A restrained dark OpenCode palette with a thread list and readable composer.
+
+The app intentionally leaves live computer preview, native terminal, and push
+notifications for a later slice. The current composer has a native document
+picker, uploads selected files through `/api/uploads`, shows removable chips,
+and includes uploaded IDs in the run request. The picker is intentionally
+bounded to eight files and 10 MiB per file; image preview and share-sheet
+download remain later polish.
+
+The visual direction follows the referenced `EvanBacon/chat-template` patterns:
+Expo Router file routes, a stable message list, isolated active-run updates,
+and explicit scrollable transcript space. The template's direct model route is
+not used; all execution remains behind this repository's control Worker. Grok's
+official mobile documentation describes the same useful shape of a shared bot
+list, per-conversation chat, file/photo input, and explicit computer approval;
+those cues informed the simple home/thread/composer hierarchy here. The
+official docs do not provide a reusable public design system or source assets,
+so no Grok branding or copied screens are included.
+
+Verification completed locally with `npm install`, Expo dependency checks,
+`npm run typecheck`, and `npx expo export --platform ios` plus
+`npx expo export --platform android`. These are JavaScript bundle exports, not
+device or simulator tests. A signed development build is still required to
+verify SecureStore, camera permissions, document picker, and the custom link on
+real iOS/Android hardware. The root web typecheck excludes `apps/mobile/**`;
+the app has its own `typecheck` script.

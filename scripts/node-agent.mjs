@@ -150,7 +150,8 @@ async function run(options) {
     const entrypoint = process.env.NODE_RUNNER_ENTRYPOINT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../runner/server.mjs");
     await mkdir(path.join(path.dirname(file), "state"), { recursive: true });
     await mkdir(path.join(path.dirname(file), "workspace"), { recursive: true });
-    localRunner = spawn(process.execPath, [entrypoint], { cwd: path.dirname(entrypoint), env: { ...process.env, RUNTIME_ROOT: path.join(path.dirname(file), "state"), WORKSPACE_DIRECTORY: path.join(path.dirname(file), "workspace"), RUNNER_HOST: "127.0.0.1", RUNNER_TOKEN: config.runnerToken, RUNNER_PORT: new URL(config.runnerUrl || "http://127.0.0.1:8787").port || "8787" }, stdio: "inherit", windowsHide: false });
+    const runnerBin = path.join(path.dirname(entrypoint), "node_modules", ".bin");
+    localRunner = spawn(process.execPath, [entrypoint], { cwd: path.dirname(entrypoint), env: { ...process.env, PATH: [runnerBin, process.env.PATH].filter(Boolean).join(path.delimiter), OPENCODE_BOT_DESKTOP: process.env.OPENCODE_BOT_DESKTOP ?? "0", RUNTIME_ROOT: path.join(path.dirname(file), "state"), WORKSPACE_DIRECTORY: path.join(path.dirname(file), "workspace"), RUNNER_HOST: "127.0.0.1", RUNNER_TOKEN: config.runnerToken, RUNNER_PORT: new URL(config.runnerUrl || "http://127.0.0.1:8787").port || "8787" }, stdio: "inherit", windowsHide: false });
     process.once("SIGINT", () => localRunner.kill("SIGINT"));
     process.once("SIGTERM", () => localRunner.kill("SIGTERM"));
   }

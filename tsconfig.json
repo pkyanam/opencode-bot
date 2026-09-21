@@ -13,5 +13,6 @@
     "noEmit": true,
     "types": ["node", "@cloudflare/workers-types"]
   },
+  "exclude": ["apps/mobile/**"],
   "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "runner/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
 }

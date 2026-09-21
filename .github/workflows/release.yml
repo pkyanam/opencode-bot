@@ -38,6 +38,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm ci --prefix runner
+      - run: npm ci --prefix apps/mobile
+      - run: npm run typecheck --prefix apps/mobile
+      - name: Verify mobile bundles
+        working-directory: apps/mobile
+        run: |
+          npx expo export --platform ios
+          npx expo export --platform android
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -78,6 +85,8 @@ jobs:
         run: >-
           docker buildx build --platform linux/amd64 --file images/computer/Dockerfile
           --tag opencode-bot:release --metadata-file image-metadata.json
+          --cache-from type=registry,ref=docker.io/$DOCKERHUB_USERNAME/opencode-bot:buildcache
+          --cache-to type=inline
           --load .
       - name: Smoke test image
         run: scripts/release/smoke-image.sh opencode-bot:release "$OPENCODE_VERSION" "$SANDBOX_VERSION"
@@ -107,8 +116,10 @@ jobs:
           printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
           docker tag opencode-bot:release "$repo:$RELEASE_TAG"
           docker tag opencode-bot:release "$repo:$RELEASE_COMMIT"
+          docker tag opencode-bot:release "$repo:buildcache"
           docker push "$repo:$RELEASE_TAG"
           docker push "$repo:$RELEASE_COMMIT"
+          docker push "$repo:buildcache"
           digest=$(docker buildx imagetools inspect "$repo:$RELEASE_TAG" | awk '/Digest:/ { print $2; exit }')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Docker Hub did not return an immutable digest" >&2; exit 1; }
           reference="$repo@$digest"
@@ -125,6 +136,31 @@ jobs:
           IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
           BUILD_DIGEST: ${{ steps.push.outputs.digest }}
         run: |
+          rm -rf .tmp/node-bundle node-bundle.tar.gz
+          mkdir -p .tmp/node-bundle/scripts .tmp/node-bundle/runner .tmp/node-bundle/packages/runtime-opencode2/src .tmp/node-bundle/packages/browser/src
+          cp scripts/node-agent.mjs .tmp/node-bundle/scripts/node-agent.mjs
+          cp runner/*.mjs runner/package.json runner/package-lock.json .tmp/node-bundle/runner/
+          cp packages/runtime-opencode2/src/client.mjs .tmp/node-bundle/packages/runtime-opencode2/src/client.mjs
+          cp packages/browser/src/index.ts .tmp/node-bundle/packages/browser/src/index.ts
+          tar -czf node-bundle.tar.gz -C .tmp/node-bundle .
+          rm -rf .tmp/node-smoke
+          mkdir -p .tmp/node-smoke
+          tar -xzf node-bundle.tar.gz -C .tmp/node-smoke
+          npm ci --prefix .tmp/node-smoke/runner --omit=dev --no-audit --fund=false
+          ln -s runner/node_modules .tmp/node-smoke/node_modules
+          OPENCODE_BOT_DESKTOP=0 RUNNER_TOKEN=release-node-smoke RUNTIME_ROOT="$PWD/.tmp/node-smoke/state" WORKSPACE_DIRECTORY="$PWD/.tmp/node-smoke/workspace" node .tmp/node-smoke/runner/server.mjs >.tmp/node-smoke.log 2>&1 &
+          node_pid=$!
+          trap 'kill "$node_pid" 2>/dev/null || true' EXIT
+          healthy=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/health; then healthy=true; break; fi
+            sleep 1
+          done
+          "$healthy" || { cat .tmp/node-smoke.log; exit 1; }
+          kill "$node_pid" 2>/dev/null || true
+          grep -q 'runner listening' .tmp/node-smoke.log || { cat .tmp/node-smoke.log; exit 1; }
+          node scripts/release/write-node-manifest.mjs --output node-bundle-manifest.json \
+            --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --archive node-bundle.tar.gz
           node scripts/release/build-bundle.mjs \
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --image-reference "$IMAGE_REFERENCE" --image-digest "$BUILD_DIGEST"
@@ -132,7 +168,7 @@ jobs:
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE" --bundle .tmp/update-bundle/app-bundle.json
           cp .tmp/update-bundle/app-bundle.json app-bundle.json
-          sha256sum release-manifest.json app-bundle.json > SHA256SUMS
+          sha256sum release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz > SHA256SUMS
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: release-bundle
@@ -140,6 +176,8 @@ jobs:
           path: |
             release-manifest.json
             app-bundle.json
+            node-bundle-manifest.json
+            node-bundle.tar.gz
             SHA256SUMS
           if-no-files-found: error
   publish:
@@ -162,11 +200,11 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
             test "$draft" = true || { echo "release $RELEASE_TAG already exists and is published" >&2; exit 1; }
-            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json app-bundle.json SHA256SUMS
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz SHA256SUMS
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
-              --generate-notes --draft release-manifest.json app-bundle.json SHA256SUMS
+              --generate-notes --draft release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz SHA256SUMS
           fi
       - name: Publish release atomically
         env:

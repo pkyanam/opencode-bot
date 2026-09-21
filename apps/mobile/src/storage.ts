@@ -17,8 +17,8 @@ export async function readConnection(): Promise<StoredConnection | null> {
         return { baseUrl: value.baseUrl, token: value.token };
     } catch { /* recover through the legacy token migration below */ }
   }
-  const token = (await readToken())?.trim() ?? "";
-  return token ? null : null;
+  // A legacy token without a server cannot be reused safely. Pair again.
+  return null;
 }
 
 /** Persist both connection fields in one SecureStore write. */

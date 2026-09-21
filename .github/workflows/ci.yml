@@ -25,6 +25,16 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Install mobile dependencies
+        run: npm ci --prefix apps/mobile
+
+      - name: Verify mobile client
+        run: |
+          npm run typecheck --prefix apps/mobile
+          cd apps/mobile
+          npx expo export --platform ios
+          npx expo export --platform android
+
       - name: Install pinned runner and native CLI
         run: npm ci --prefix runner
 

@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "OpenCode Bot",
+    "slug": "opencode-bot",
+    "scheme": "opencode-bot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-document-picker",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow OpenCode Bot to scan device invitations."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "enableSceneSupport": true
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.opencode.bot.mobile"
+    },
+    "android": {
+      "package": "com.opencode.bot.mobile"
+    }
+  }
+}
