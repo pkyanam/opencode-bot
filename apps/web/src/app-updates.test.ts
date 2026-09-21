@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { updatePhaseLabel } from "./components/app-updates";
+import { updatePhaseLabel, needsClientReload } from "./components/app-updates";
 
 describe("application update progress", () => {
   it("maps updater phases to readable user-facing copy", () => {
@@ -22,6 +22,19 @@ describe("application update progress", () => {
     for (const [phase, label] of Object.entries(phases)) {
       expect(updatePhaseLabel(phase)).toBe(label);
     }
-    expect(updatePhaseLabel("rollback_required")).toBe("Update needs attention");
+    expect(updatePhaseLabel("rollback_required")).toBe(
+      "Update needs attention",
+    );
   });
+});
+
+it("asks for a reload only when a completed update is newer than the loaded client", () => {
+  const job = { phase: "completed", requestedVersion: "v0.1.12" };
+  expect(needsClientReload(job, "0.1.11")).toBe(true);
+  expect(needsClientReload(job, "0.1.12")).toBe(false);
+  expect(needsClientReload(job, "0.1.13")).toBe(false);
+  expect(needsClientReload({ ...job, phase: "restoring" }, "0.1.11")).toBe(
+    false,
+  );
+  expect(needsClientReload(undefined, "0.1.12")).toBe(false);
 });

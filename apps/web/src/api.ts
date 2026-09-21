@@ -290,10 +290,11 @@ export async function request<T>(
       error.status = response.status;
       throw error;
     }
-    let message = body;
+    let message = response.status >= 500 ? `The workspace server is reconnecting (${response.status}). Please try again shortly.` : body.slice(0, 500);
     try {
-      const parsed = JSON.parse(body) as { error?: string; message?: string };
-      message = parsed.error ?? parsed.message ?? body;
+      const parsed = JSON.parse(body) as { error?: string; message?: string; title?: string };
+      const detail = parsed.error ?? parsed.message ?? parsed.title;
+      if (typeof detail === "string" && detail.length <= 500) message = detail;
     } catch {
       /* plain text response */
     }

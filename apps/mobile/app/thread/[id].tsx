@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  AppState,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -9,9 +11,10 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
-import { api, ApiError } from "../../src/api";
+import { api } from "../../src/api";
 import { useStore } from "../../src/store";
 import { colors, styles } from "../../src/ui";
 import { Markdown } from "../../src/markdown";
@@ -22,6 +25,17 @@ import type {
   Run,
   RunEvent,
 } from "../../src/types";
+
+const ACTIVE = new Set([
+  "queued",
+  "provisioning",
+  "running",
+  "waiting_approval",
+  "waiting_human",
+  "recovering",
+  "checkpointing",
+  "cancelling",
+]);
 const terminal = new Set([
   "succeeded",
   "failed",
@@ -29,29 +43,199 @@ const terminal = new Set([
   "completed",
   "error",
 ]);
-function eventText(e: RunEvent) {
+const lifecycle = new Set([
+  "run.queued",
+  "runner.session.created",
+  "runner.approval.requested",
+  "runner.connection.recovering",
+  "runner.connection.failed",
+  "runner.session.action.completed",
+  "run.succeeded",
+  "run.failed",
+  "run.cancelled",
+  "run.needs_review",
+]);
+const humanTool: Record<string, string> = {
+  browser_navigate: "Open page",
+  browser_snapshot: "Inspect page",
+  browser_click: "Click page element",
+  shell: "Run command",
+  exec: "Run command",
+  read: "Read file",
+  write: "Write file",
+  edit: "Edit file",
+  glob: "Find files",
+  grep: "Search files",
+  delegate: "Delegate task",
+};
+const toolLabel = (name: string) =>
+  humanTool[name.toLowerCase().replace(/[.\s-]+/g, "_")] ??
+  name.replace(/[._-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const eventLabel = (event: RunEvent) =>
+  ({
+    "run.queued": "Task queued",
+    "runner.session.created": "Workspace ready",
+    "runner.approval.requested": "Approval requested",
+    "runner.connection.recovering": "Reconnecting",
+    "runner.connection.failed": "Connection failed",
+    "runner.session.action.completed": "Session action completed",
+    "run.succeeded": "Task finished",
+    "run.failed": "Task failed",
+    "run.cancelled": "Task stopped",
+    "run.needs_review": "Review needed",
+  })[event.type ?? ""] ?? "Task activity";
+const elapsed = (run: Run) => {
+  const start = Date.parse(run.startedAt ?? "");
+  if (!Number.isFinite(start)) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - start) / 1000));
+  return seconds > 60
+    ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+    : `${seconds}s`;
+};
+type Tool = Extract<NonNullable<Message["parts"]>[number], { type: "tool" }>;
+
+function ToolRow({ part }: { part: Tool }) {
+  const [open, setOpen] = useState(false);
+  const input = (part as any).input;
+  const target =
+    typeof input?.url === "string"
+      ? input.url
+      : typeof input?.path === "string"
+        ? input.path
+        : typeof input?.command === "string"
+          ? input.command
+          : "";
+  const detail = part.output ?? part.error ?? "";
+  const preview = detail.split("\n").find(Boolean)?.slice(0, 180) ?? "";
+  const running = part.status === "running" || part.status === "queued";
   return (
-    e.message ?? e.content ?? (typeof e.data === "string" ? e.data : "") ?? ""
+    <View style={mobileStyles.toolRow}>
+      <Pressable
+        onPress={() => setOpen((value) => !value)}
+        style={mobileStyles.toolHeader}
+      >
+        <Text style={mobileStyles.toolIcon}>
+          {running ? "○" : part.status === "failed" ? "!" : "✓"}
+        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={mobileStyles.toolName}>{toolLabel(part.name)}</Text>
+          {target ? (
+            <Text numberOfLines={1} style={mobileStyles.toolTarget}>
+              {target}
+            </Text>
+          ) : null}
+        </View>
+        {detail ? (
+          <Text style={mobileStyles.chevron}>{open ? "⌄" : "›"}</Text>
+        ) : null}
+      </Pressable>
+      {!running && preview ? (
+        <Text numberOfLines={1} style={mobileStyles.toolPreview}>
+          {preview}
+        </Text>
+      ) : null}
+      {open && detail ? (
+        <Text selectable style={mobileStyles.toolDetail}>
+          {detail.slice(0, 16000)}
+        </Text>
+      ) : null}
+    </View>
   );
 }
+
+function MessageCard({
+  message,
+  botName,
+}: {
+  message: Message;
+  botName?: string;
+}) {
+  const user = message.role === "user";
+  const toolOnly =
+    !message.content.trim() &&
+    message.parts?.some((part) => part.type === "tool");
+  return (
+    <View
+      style={[
+        mobileStyles.messageRow,
+        { alignItems: user ? "flex-end" : "flex-start" },
+      ]}
+    >
+      <View
+        style={[
+          mobileStyles.message,
+          user ? mobileStyles.userMessage : undefined,
+          toolOnly ? mobileStyles.toolOnly : undefined,
+        ]}
+      >
+        {!toolOnly ? (
+          <Text style={mobileStyles.messageLabel}>
+            {user ? "You" : (botName ?? "Bot")}
+            {message.createdAt
+              ? `  ${new Date(message.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+              : ""}
+          </Text>
+        ) : null}
+        {message.parts?.length ? (
+          message.parts.map((part, index) =>
+            part.type === "tool" ? (
+              <ToolRow key={part.id ?? index} part={part} />
+            ) : (
+              <Markdown key={index} value={part.text} compact />
+            ),
+          )
+        ) : message.content ? (
+          <Markdown value={message.content} />
+        ) : null}
+        {message.attachments?.map((file) => (
+          <View key={file.id} style={mobileStyles.historyFile}>
+            <Text style={mobileStyles.fileIcon}>□</Text>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={mobileStyles.fileName}>
+                {file.name}
+              </Text>
+              <Text style={mobileStyles.fileMeta}>
+                {file.mimeType} · {file.size} bytes
+              </Text>
+            </View>
+          </View>
+        ))}
+        {message.error ? (
+          <Text style={styles.error}>{message.error}</Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 export default function ThreadScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const store = useStore();
+  const transcriptView = useRef<ScrollView>(null);
+  const nearBottom = useRef(true);
+  const thread = store.state?.threads.find((item) => item.id === id);
+  const client = useMemo(() => api(store.baseUrl), [store.baseUrl]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const thread = store.state?.threads.find((item) => item.id === id);
-  const client = useMemo(() => api(store.baseUrl), [store.baseUrl]);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  const loadSerial = useRef(0);
   const load = useCallback(async () => {
-    if (!id) return;
+    if (!id || inFlight.current) return;
+    inFlight.current = true;
+    const serial = ++loadSerial.current;
     try {
       const [transcript, state] = await Promise.all([
         client.messages(id),
         client.state(),
       ]);
+      if (!mounted.current || serial !== loadSerial.current) return;
       const threadRuns = (state.runs ?? []).filter(
         (run) => run.threadId === id,
       );
@@ -70,6 +254,7 @@ export default function ThreadScreen() {
             }
           }),
       );
+      if (!mounted.current || serial !== loadSerial.current) return;
       const byId = new Map(refreshed.map((run) => [run.id, run]));
       setMessages(
         transcript.messages ??
@@ -80,22 +265,42 @@ export default function ThreadScreen() {
       setRuns(threadRuns.map((run) => byId.get(run.id) ?? run));
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load conversation.");
+      if (mounted.current)
+        setError(
+          e instanceof Error ? e.message : "Could not load conversation.",
+        );
+    } finally {
+      inFlight.current = false;
     }
   }, [client, id]);
   useEffect(() => {
     void load();
   }, [load]);
   useEffect(() => {
-    const active = runs.some((run) => !terminal.has(run.status));
-    if (!active) return;
-    const timer = setInterval(() => {
-      void load();
-    }, 2500);
-    return () => clearInterval(timer);
+    const refresh = () => {
+      if (AppState.currentState === "active" && !inFlight.current) void load();
+    };
+    const timer = setInterval(
+      refresh,
+      runs.some((run) => ACTIVE.has(run.status)) ? 3000 : 5000,
+    );
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") refresh();
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
   }, [runs, load]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      loadSerial.current += 1;
+    };
+  }, []);
   async function pickAttachment() {
-    if (attachments.length >= 8) return;
+    if (attachments.length >= 8 || busy) return;
     const result = await DocumentPicker.getDocumentAsync({
       copyToCacheDirectory: true,
       multiple: false,
@@ -104,6 +309,13 @@ export default function ThreadScreen() {
     const file = result.assets[0];
     if (file.size && file.size > 10 * 1024 * 1024) {
       setError("Attachments must be 10 MiB or smaller.");
+      return;
+    }
+    if (
+      attachments.reduce((sum, item) => sum + item.size, 0) + (file.size ?? 0) >
+      20 * 1024 * 1024
+    ) {
+      setError("Attachments must total 20 MiB or less.");
       return;
     }
     setBusy(true);
@@ -122,7 +334,7 @@ export default function ThreadScreen() {
   }
   async function send() {
     if ((!draft.trim() && !attachments.length) || busy || !id) return;
-    const prompt = draft.trim();
+    const prompt = draft.trim() || "Review the attached files.";
     const files = attachments;
     setDraft("");
     setAttachments([]);
@@ -141,7 +353,7 @@ export default function ThreadScreen() {
       ]);
       await load();
     } catch (e) {
-      setDraft(prompt);
+      setDraft(prompt === "Review the attached files." ? "" : prompt);
       setAttachments(files);
       setError(e instanceof Error ? e.message : "Could not start task.");
     } finally {
@@ -168,210 +380,259 @@ export default function ThreadScreen() {
       setError(e instanceof Error ? e.message : "Could not update approval.");
     }
   }
-  const activity = runs
-    .flatMap((run) => (run.events ?? []).map((event) => ({ run, event })))
-    .slice(-30);
+  async function rename() {
+    if (!id || !renameValue.trim()) return;
+    try {
+      await client.renameThread(id, renameValue.trim());
+      setRenaming(false);
+      await store.refresh();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Could not rename conversation.",
+      );
+    }
+  }
+  async function removeThread() {
+    if (!id) return;
+    try {
+      await client.deleteThread(id);
+      await store.refresh();
+      router.back();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Could not delete conversation.",
+      );
+    }
+  }
+  function openMenu() {
+    Alert.alert(thread?.title ?? "Conversation", undefined, [
+      {
+        text: "Rename",
+        onPress: () => {
+          setRenameValue(thread?.title ?? "");
+          setRenaming(true);
+        },
+      },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () =>
+          Alert.alert("Delete conversation?", "This cannot be undone.", [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Delete",
+              style: "destructive",
+              onPress: () => void removeThread(),
+            },
+          ]),
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
   const approval = runs
     .map((run) => ({
       run,
       approval: run.pendingApproval ?? run.approval ?? run.approvalRequest,
     }))
     .find((item) => item.approval);
+  const activity = runs
+    .flatMap((run) =>
+      (run.events ?? [])
+        .filter((event) => lifecycle.has(event.type ?? ""))
+        .map((event) => ({ run, event })),
+    )
+    .slice(-12);
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <View
-        style={{
-          paddingTop: 58,
-          paddingHorizontal: 20,
-          paddingBottom: 12,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 12,
-        }}
+    <SafeAreaView style={styles.screen}>
+      <KeyboardAvoidingView
+        style={styles.screen}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <Pressable onPress={() => router.back()}>
-          <Text style={{ color: colors.accent, fontSize: 25 }}>‹</Text>
-        </Pressable>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.eyebrow}>THREAD</Text>
-          <Text
-            numberOfLines={1}
-            style={{
-              color: colors.text,
-              fontSize: 20,
-              fontWeight: "700",
-              marginTop: 4,
-            }}
+        <View style={mobileStyles.header}>
+          <Pressable onPress={() => router.back()} hitSlop={12}>
+            <Text style={mobileStyles.back}>‹</Text>
+          </Pressable>
+          <View style={{ flex: 1 }}>
+            <Text numberOfLines={1} style={mobileStyles.title}>
+              {thread?.title ?? "Conversation"}
+            </Text>
+          </View>
+          <Pressable
+            onPress={() =>
+              Alert.alert("Conversation", thread?.title, [
+                {
+                  text: "Rename",
+                  onPress: () => {
+                    setRenameValue(thread?.title ?? "");
+                    setRenaming(true);
+                  },
+                },
+                {
+                  text: "Delete",
+                  style: "destructive",
+                  onPress: () =>
+                    Alert.alert(
+                      "Delete conversation?",
+                      "This cannot be undone.",
+                      [
+                        { text: "Cancel", style: "cancel" },
+                        {
+                          text: "Delete",
+                          style: "destructive",
+                          onPress: () => void removeThread(),
+                        },
+                      ],
+                    ),
+                },
+                { text: "Cancel", style: "cancel" },
+              ])
+            }
+            hitSlop={10}
           >
-            {thread?.title ?? "Conversation"}
-          </Text>
+            <Text style={mobileStyles.more}>•••</Text>
+          </Pressable>
         </View>
-      </View>
-      <ScrollView
-        contentContainerStyle={{ padding: 20, paddingTop: 8, gap: 12 }}
-      >
-        <View
-          style={{ height: 1, backgroundColor: colors.line, marginBottom: 2 }}
-        />
-        {messages.map((message, index) => (
-          <View
-            key={message.id ?? index}
-            style={{
-              alignItems: message.role === "user" ? "flex-end" : "flex-start",
-            }}
-          >
-            <View
-              style={[
-                styles.card,
-                {
-                  maxWidth: "92%",
-                  backgroundColor:
-                    message.role === "user" ? "#29321e" : colors.panel2,
-                },
-              ]}
-            >
-              {message.content ? (
-                <Markdown value={message.content} />
-              ) : message.error ? (
-                <Markdown value={`Error: ${message.error}`} />
-              ) : null}
-              {message.parts
-                ?.filter((part) => part.type === "tool")
-                .map((part) => (
-                  <View
-                    key={part.id}
-                    style={{
-                      borderTopWidth: 1,
-                      borderTopColor: colors.line,
-                      marginTop: 10,
-                      paddingTop: 8,
-                    }}
-                  >
-                    <Text style={{ color: colors.blue, fontSize: 12 }}>
-                      {part.name} · {part.status}
-                    </Text>
-                    {part.output ? (
-                      <Markdown value={part.output} compact />
-                    ) : null}
-                  </View>
-                ))}
-            </View>
+        {renaming ? (
+          <View style={mobileStyles.rename}>
+            <TextInput
+              value={renameValue}
+              onChangeText={setRenameValue}
+              autoFocus
+              style={[styles.input, { flex: 1, paddingVertical: 9 }]}
+              placeholder="Conversation name"
+              placeholderTextColor={colors.muted}
+            />
+            <Pressable onPress={() => void rename()} style={styles.button}>
+              <Text style={styles.buttonText}>Save</Text>
+            </Pressable>
+            <Pressable onPress={() => setRenaming(false)}>
+              <Text style={styles.ghostText}>Cancel</Text>
+            </Pressable>
           </View>
-        ))}
-        {activity.map(({ run, event }, index) => (
-          <View
-            key={`${run.id}-${event.id ?? index}`}
-            style={{ paddingVertical: 6 }}
-          >
-            <Text style={{ color: colors.muted, fontSize: 13 }}>
-              {eventText(event) || event.type || "Task activity"}
-            </Text>
-          </View>
-        ))}
-        {approval ? (
-          <View
-            style={[styles.card, { borderColor: colors.accent, marginTop: 6 }]}
-          >
-            <Text style={{ color: colors.accent, fontWeight: "700" }}>
-              Approval required
-            </Text>
-            <Text style={[styles.subtitle, { marginTop: 7 }]}>
-              {approval.approval?.description ??
-                approval.approval?.action ??
-                "The task is waiting for your approval."}
-            </Text>
-            {approval.approval?.command ? (
-              <Text
-                style={{
-                  color: colors.text,
-                  marginTop: 8,
-                  fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
-                }}
-              >
-                {approval.approval.command}
+        ) : null}
+        <ScrollView
+          ref={transcriptView}
+          contentContainerStyle={mobileStyles.scroll}
+          keyboardShouldPersistTaps="handled"
+          scrollEventThrottle={100}
+          onScroll={({ nativeEvent: e }) => {
+            nearBottom.current =
+              e.contentSize.height -
+                e.layoutMeasurement.height -
+                e.contentOffset.y <
+              100;
+          }}
+          onContentSizeChange={() => {
+            if (nearBottom.current)
+              transcriptView.current?.scrollToEnd({ animated: false });
+          }}
+        >
+          {!messages.length && !runs.length && !error ? (
+            <View style={mobileStyles.empty}>
+              <Text style={mobileStyles.emptyTitle}>Start a conversation</Text>
+              <Text style={styles.subtitle}>
+                Describe what you want your bot to inspect, build, or explain.
               </Text>
-            ) : null}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-              <Pressable
-                style={[styles.button, { flex: 1 }]}
-                onPress={() =>
-                  void decide(approval.run, approval.approval!, "approve")
-                }
-              >
-                <Text style={styles.buttonText}>Approve</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.ghost, { flex: 1 }]}
-                onPress={() =>
-                  void decide(approval.run, approval.approval!, "deny")
-                }
-              >
-                <Text style={styles.ghostText}>Deny</Text>
-              </Pressable>
             </View>
-          </View>
-        ) : null}
-        {runs
-          .filter((run) => !terminal.has(run.status))
-          .map((run) => (
-            <View
-              key={run.id}
-              style={[
-                styles.card,
-                {
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                },
-              ]}
-            >
-              <View
-                style={{ flexDirection: "row", alignItems: "center", gap: 9 }}
-              >
-                <ActivityIndicator color={colors.accent} size="small" />
-                <Text style={styles.subtitle}>
-                  {run.status.replace("_", " ")}
-                </Text>
+          ) : null}
+          {[
+            ...messages.map((message, index) => ({
+              key: `message-${message.id ?? index}`,
+              time: Date.parse(message.createdAt ?? "") || 0,
+              node: (
+                <MessageCard
+                  message={message}
+                  botName={
+                    store.state?.bots.find((bot) => bot.id === thread?.botId)
+                      ?.name
+                  }
+                />
+              ),
+            })),
+            ...activity.map(({ run, event }, index) => ({
+              key: `event-${run.id}-${event.id ?? index}`,
+              time: Date.parse(event.createdAt ?? "") || 0,
+              node: (
+                <View style={mobileStyles.notice}>
+                  <Text style={mobileStyles.noticeTitle}>
+                    {eventLabel(event)}
+                  </Text>
+                  <Text style={mobileStyles.noticeText}>
+                    {event.createdAt
+                      ? new Date(event.createdAt).toLocaleTimeString([], {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })
+                      : ""}
+                  </Text>
+                </View>
+              ),
+            })),
+          ]
+            .sort((a, b) => a.time - b.time)
+            .map((item) => (
+              <View key={item.key}>{item.node}</View>
+            ))}
+          {approval ? (
+            <View style={[styles.card, { borderColor: colors.accent }]}>
+              <Text style={mobileStyles.approvalTitle}>Approval required</Text>
+              <Text style={[styles.subtitle, { marginTop: 7 }]}>
+                {approval.approval?.description ??
+                  approval.approval?.action ??
+                  "The task is waiting for your approval."}
+              </Text>
+              <View style={mobileStyles.actions}>
+                <Pressable
+                  style={[styles.button, { flex: 1 }]}
+                  onPress={() =>
+                    void decide(approval.run, approval.approval!, "approve")
+                  }
+                >
+                  <Text style={styles.buttonText}>Approve</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.ghost, { flex: 1 }]}
+                  onPress={() =>
+                    void decide(approval.run, approval.approval!, "deny")
+                  }
+                >
+                  <Text style={styles.ghostText}>Deny</Text>
+                </Pressable>
               </View>
-              <Pressable style={styles.ghost} onPress={() => void cancel(run)}>
-                <Text style={styles.ghostText}>Stop</Text>
-              </Pressable>
             </View>
-          ))}
-        {error ? (
-          <Text style={styles.error}>
-            {error}
-            {error.includes("401") ? " Pair this device again." : ""}
-          </Text>
-        ) : null}
-      </ScrollView>
-      <View
-        style={{
-          paddingHorizontal: 16,
-          paddingTop: 8,
-          paddingBottom: Platform.OS === "ios" ? 24 : 12,
-          borderTopWidth: 1,
-          borderTopColor: colors.line,
-          flexDirection: "row",
-          alignItems: "flex-end",
-          gap: 9,
-        }}
-      >
-        {attachments.length > 0 ? (
-          <View
-            style={{
-              position: "absolute",
-              bottom: 62,
-              left: 16,
-              right: 16,
-              flexDirection: "row",
-              gap: 6,
-              flexWrap: "wrap",
-            }}
-          >
+          ) : null}
+          {runs
+            .filter((run) => ACTIVE.has(run.status))
+            .map((run) => (
+              <View key={run.id} style={mobileStyles.progress}>
+                <View style={{ flex: 1 }}>
+                  <Text style={mobileStyles.progressTitle}>
+                    {run.status === "waiting_approval"
+                      ? "Waiting for approval"
+                      : run.events?.length
+                        ? eventLabel(run.events[run.events.length - 1])
+                        : "Preparing a response"}
+                  </Text>
+                  <Text style={mobileStyles.progressMeta}>
+                    {elapsed(run)}
+                    {run.events?.length
+                      ? ` · ${run.events.length} updates`
+                      : ""}
+                  </Text>
+                </View>
+                <ActivityIndicator color={colors.muted} size="small" />
+                <Pressable
+                  onPress={() => void cancel(run)}
+                  style={styles.ghost}
+                >
+                  <Text style={styles.ghostText}>Stop</Text>
+                </Pressable>
+              </View>
+            ))}
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+        </ScrollView>
+        <View style={mobileStyles.composer}>
+          <View style={mobileStyles.composerTop}>
             {attachments.map((file) => (
               <Pressable
                 key={file.id}
@@ -380,57 +641,213 @@ export default function ThreadScreen() {
                     current.filter((item) => item.id !== file.id),
                   )
                 }
-                style={{
-                  backgroundColor: colors.panel2,
-                  borderColor: colors.line,
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  paddingHorizontal: 8,
-                  paddingVertical: 5,
-                }}
+                style={mobileStyles.chip}
               >
-                <Text
-                  numberOfLines={1}
-                  style={{ color: colors.text, maxWidth: 180, fontSize: 12 }}
-                >
+                <Text numberOfLines={1} style={mobileStyles.chipText}>
                   {file.name} ×
                 </Text>
               </Pressable>
             ))}
           </View>
-        ) : null}
-        <Pressable
-          style={styles.ghost}
-          disabled={busy || attachments.length >= 8}
-          onPress={() => void pickAttachment()}
-        >
-          <Text style={styles.ghostText}>＋</Text>
-        </Pressable>
-        <TextInput
-          value={draft}
-          onChangeText={setDraft}
-          multiline
-          placeholder="Ask your bot to inspect, build, or explain…"
-          placeholderTextColor={colors.muted}
-          style={[
-            styles.input,
-            { flex: 1, maxHeight: 110, paddingVertical: 11 },
-          ]}
-        />
-        <Pressable
-          style={[
-            styles.button,
-            {
-              paddingHorizontal: 15,
-              opacity: (!draft.trim() && !attachments.length) || busy ? 0.5 : 1,
-            },
-          ]}
-          disabled={(!draft.trim() && !attachments.length) || busy}
-          onPress={() => void send()}
-        >
-          <Text style={styles.buttonText}>Send</Text>
-        </Pressable>
-      </View>
-    </KeyboardAvoidingView>
+          <View style={mobileStyles.composerRow}>
+            <Pressable
+              style={styles.ghost}
+              disabled={busy || attachments.length >= 8}
+              onPress={() => void pickAttachment()}
+            >
+              <Text style={mobileStyles.attach}>＋</Text>
+            </Pressable>
+            <TextInput
+              value={draft}
+              onChangeText={setDraft}
+              multiline
+              placeholder="Message your bot…"
+              placeholderTextColor={colors.muted}
+              style={[styles.input, mobileStyles.editor]}
+            />
+            <Pressable
+              style={[
+                styles.button,
+                {
+                  paddingHorizontal: 15,
+                  opacity:
+                    (!draft.trim() && !attachments.length) || busy ? 0.5 : 1,
+                },
+              ]}
+              disabled={(!draft.trim() && !attachments.length) || busy}
+              onPress={() => void send()}
+            >
+              <Text style={styles.buttonText}>Send</Text>
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
+
+const mobileStyles = {
+  header: {
+    paddingTop: 8,
+    paddingHorizontal: 18,
+    paddingBottom: 10,
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  back: { color: colors.accent, fontSize: 30, lineHeight: 30 },
+  more: { color: colors.muted, fontSize: 17, letterSpacing: 2 },
+  title: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: "600" as const,
+    marginTop: 3,
+  },
+  scroll: { padding: 16, paddingBottom: 24, gap: 12 },
+  messageRow: { width: "100%" as const },
+  message: {
+    maxWidth: "100%" as const,
+    backgroundColor: "transparent",
+    borderColor: colors.line,
+    borderWidth: 0,
+    borderRadius: 0,
+    paddingVertical: 10,
+    paddingHorizontal: 0,
+  },
+  userMessage: {
+    backgroundColor: colors.panel,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  toolOnly: {
+    width: "100%" as const,
+    maxWidth: "100%" as const,
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    borderBottomWidth: 1,
+    borderRadius: 0,
+    paddingHorizontal: 0,
+    paddingVertical: 5,
+  },
+  messageLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    marginBottom: 7,
+    textTransform: "uppercase" as const,
+    letterSpacing: 0.8,
+  },
+  toolRow: {
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    paddingVertical: 5,
+  },
+  toolHeader: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 8,
+    minHeight: 28,
+  },
+  toolIcon: {
+    width: 18,
+    color: colors.muted,
+    fontSize: 14,
+    textAlign: "center" as const,
+  },
+  toolName: { color: colors.text, fontSize: 12, fontWeight: "600" as const },
+  toolTarget: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  chevron: { color: colors.muted, fontSize: 18, paddingHorizontal: 3 },
+  toolPreview: {
+    color: colors.muted,
+    fontSize: 12,
+    marginLeft: 26,
+    marginTop: 2,
+  },
+  toolDetail: {
+    color: colors.muted,
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    fontSize: 12,
+    lineHeight: 15,
+    margin: 8,
+    padding: 8,
+    backgroundColor: colors.bg,
+  },
+  historyFile: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    marginTop: 9,
+    paddingTop: 9,
+  },
+  fileIcon: { color: colors.muted, fontSize: 18 },
+  fileName: { color: colors.text, fontSize: 12 },
+  fileMeta: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  notice: {
+    borderLeftWidth: 2,
+    borderLeftColor: colors.line,
+    paddingLeft: 10,
+    paddingVertical: 4,
+  },
+  noticeTitle: { color: colors.text, fontSize: 12 },
+  noticeText: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  approvalTitle: { color: colors.accent, fontWeight: "700" as const },
+  actions: { flexDirection: "row" as const, gap: 9, marginTop: 14 },
+  progress: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingTop: 12,
+  },
+  progressTitle: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "600" as const,
+  },
+  progressMeta: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  empty: { paddingVertical: 70, alignItems: "center" as const, gap: 8 },
+  emptyTitle: { color: colors.text, fontSize: 20, fontWeight: "700" as const },
+  rename: {
+    padding: 12,
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  composer: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 10,
+    backgroundColor: colors.bg,
+  },
+  composerTop: {
+    flexDirection: "row" as const,
+    flexWrap: "wrap" as const,
+    gap: 5,
+    marginBottom: 5,
+  },
+  chip: {
+    backgroundColor: colors.panel2,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  chipText: { color: colors.text, fontSize: 12, maxWidth: 160 },
+  composerRow: {
+    flexDirection: "row" as const,
+    alignItems: "flex-end" as const,
+    gap: 7,
+  },
+  attach: { color: colors.text, fontSize: 18 },
+  editor: { flex: 1, maxHeight: 110, paddingVertical: 10 },
+};

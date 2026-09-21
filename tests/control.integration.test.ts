@@ -757,3 +757,22 @@ it('hydrates 100 run summaries with bounded query count and preserves per-run or
   for(const run of result.body.runs){expect(run.events.map((e:any)=>e.sequence)).toEqual(Array.from({length:30},(_,i)=>i+6));expect(run.startedAt).toBe(run.createdAt);}
   expect(f.queries.filter(q=>q.includes('FROM events'))).toHaveLength(2);
 });
+
+it('reacquires a durable object stub once for a read interrupted by an update', async () => {
+  const f = fixture();
+  const fetch = vi.fn().mockRejectedValueOnce(new Error('Durable Object reset because its code was updated.')).mockResolvedValueOnce(Response.json({ bots: [], threads: [], runs: [] }));
+  const get = vi.fn(() => ({ fetch })); f.env.WORKSPACE.get = get;
+  expect((await f.request('/api/state')).status).toBe(200);
+  expect(get).toHaveBeenCalledTimes(2);
+});
+it('returns a bounded reconnect response without replaying mutations', async () => {
+  const f = fixture(); const fetch = vi.fn().mockRejectedValue(new Error('Durable Object reset because its code was updated.'));
+  f.env.WORKSPACE.get = () => ({ fetch });
+  const result = await f.request('/api/bots', 'POST', { name: 'Once' });
+  expect(result.status).toBe(503); expect(result.body.code).toBe('app_reconnecting'); expect(fetch).toHaveBeenCalledTimes(1);
+  fetch.mockClear(); expect((await f.request('/api/state')).status).toBe(503); expect(fetch).toHaveBeenCalledTimes(2);
+});
+it('does not disguise an unrelated worker defect as a reconnect', async () => {
+  const f = fixture(); f.env.WORKSPACE.get = () => ({ fetch: async () => { throw new Error('unexpected defect'); } });
+  await expect(f.request('/api/state')).rejects.toThrow('unexpected defect');
+});

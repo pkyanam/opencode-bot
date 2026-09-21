@@ -41,6 +41,7 @@ export type Run = {
   id: string;
   threadId: string;
   status: string;
+  startedAt?: string;
   events?: RunEvent[];
   result?: string;
   error?: string;

@@ -920,7 +920,7 @@ export class Workspace {
       throw new HttpError(404, "not found");
     } catch (error) {
       if (error instanceof PairingError) return response({ error: error.message }, error.status);
-      if (computerDependent && /timeout|timed out|container.*start|not.*running|port.*available/i.test(error instanceof Error ? error.message : String(error))) {
+      if (computerDependent && /timeout|timed out|container.*start|not.*running|port.*available|durable object reset|code was updated|containerstate/i.test(error instanceof Error ? error.message : String(error))) {
         this.startup.invalidate();
         const readiness = this.computerReadiness();
         return response({ ...readiness, code: "computer_starting", error: "Your computer is reconnecting. Please try again shortly." }, 503, { "retry-after": "3" });
@@ -3432,6 +3432,7 @@ function clientRouteAllowed(request: Request, url: URL): boolean {
   if (/^\/api\/(files|catalog)(?:\/|$)/.test(url.pathname)) return true;
   if (/^\/api\/uploads(?:\/|$)/.test(url.pathname)) return true;
   if (/^\/api\/computer\/(readiness|status|preview)$/.test(url.pathname)) return true;
+  if (url.pathname === "/api/computer/checkpoint" && request.method === "POST") return true;
   if (/^\/api\/terminal(?:\/|$)/.test(url.pathname)) return true;
   // Trusted clients can manage workspace skills; installation/admin routes remain owner-only.
   if (url.pathname === "/api/skills" || /^\/api\/skills\//.test(url.pathname)) return true;
@@ -3470,7 +3471,15 @@ const worker = {
         "www-authenticate": "Bearer",
       });
     const idObject = env.WORKSPACE.idFromName("owner");
-    return env.WORKSPACE.get(idObject).fetch(request);
+    const dispatch = () => env.WORKSPACE.get(idObject).fetch(request);
+    try { return await dispatch(); } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const resetPattern = /durable object reset|code was updated|containerstate|disconnected/i;
+      const transient = resetPattern.test(message);
+      if (transient && ["GET", "HEAD"].includes(request.method)) { try { return await env.WORKSPACE.get(idObject).fetch(request); } catch (retryError) { if (!resetPattern.test(retryError instanceof Error ? retryError.message : String(retryError))) throw retryError; } }
+      if (transient) return response({ error: "The workspace is reconnecting after an update. Please retry shortly.", code: "app_reconnecting" }, 503, { "retry-after": "3" });
+      throw error;
+    }
   },
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     const idObject = env.WORKSPACE.idFromName("owner");

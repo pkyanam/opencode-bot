@@ -219,3 +219,19 @@ the app has its own `typecheck` script.
 The iOS configuration enables Expo's scene lifecycle support for builds made
 with Xcode 27. Without it, iOS 27 terminates the app during launch. See
 [Expo's scene lifecycle migration guide](https://github.com/expo/fyi/blob/main/ios-scene-lifecycle.md).
+
+## Native preview: current screens
+
+The mobile shell uses the web client's charcoal/ivory theme and wordmark, with
+fixed Chats, Bots, Workspace, and Settings navigation. Empty workspaces can
+create a bot and their first conversation. Bot settings support name, model
+selection, instructions, and deletion; conversations support rename/deletion.
+Workspace exposes skill instructions, folder browsing and small text-file
+previews, computer status/checkpoints, and routine pause/resume controls.
+
+Workspace state refreshes every five seconds while foregrounded and immediately
+on return to the app. Conversation polling uses three seconds during active
+work and five seconds otherwise. Background requests pause; automatic polling
+does not activate the pull-to-refresh indicator. This is data synchronization,
+not an over-the-air binary/UI update service: UI changes still require a new
+signed app build.

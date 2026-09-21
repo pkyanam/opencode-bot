@@ -1,4 +1,5 @@
 import { Stack } from "expo-router";
+import { colors } from "../src/ui";
 import { StoreProvider } from "../src/store";
 export default function Layout() {
   return (
@@ -6,7 +7,7 @@ export default function Layout() {
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: "#111313" },
+          contentStyle: { backgroundColor: colors.bg },
         }}
       />
     </StoreProvider>

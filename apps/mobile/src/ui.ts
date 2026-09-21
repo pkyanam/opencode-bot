@@ -1,21 +1,21 @@
 import { StyleSheet } from "react-native";
 export const colors = {
-  bg: "#111313",
-  panel: "#181b1b",
-  panel2: "#202424",
-  text: "#f0f1ec",
-  muted: "#9b9f99",
-  line: "#303533",
-  accent: "#d7f26b",
-  danger: "#f08b83",
-  blue: "#9fd5ff",
+  bg: "#121110",
+  panel: "#191817",
+  panel2: "#242121",
+  text: "#f2eded",
+  muted: "#98938f",
+  line: "#343230",
+  accent: "#f2eded",
+  danger: "#b75d54",
+  blue: "#b9c7d0",
 };
 export const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   safe: { flex: 1, paddingHorizontal: 20 },
   title: {
     color: colors.text,
-    fontSize: 30,
+    fontSize: 24,
     fontWeight: "700",
     letterSpacing: -0.8,
   },
@@ -42,7 +42,7 @@ export const styles = StyleSheet.create({
     paddingVertical: 13,
     alignItems: "center",
   },
-  buttonText: { color: "#141712", fontWeight: "700", fontSize: 15 },
+  buttonText: { color: "#191817", fontWeight: "700", fontSize: 15 },
   ghost: {
     borderColor: colors.line,
     borderWidth: 1,

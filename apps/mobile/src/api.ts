@@ -288,9 +288,9 @@ export function normalizeMessages(input: unknown[]): Message[] {
       const as = messageSequence(a.message);
       const bs = messageSequence(b.message);
       if (as !== bs) return as - bs;
-      const aid = String(a.message.id ?? "");
-      const bid = String(b.message.id ?? "");
-      return aid.localeCompare(bid) || a.index - b.index;
+      // Arbitrary IDs are not timestamps; preserve source order when time and
+      // sequence cannot distinguish records.
+      return a.index - b.index;
     })
     .map(({ message }) => message);
 }

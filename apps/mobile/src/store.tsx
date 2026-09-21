@@ -36,30 +36,57 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const connectionGeneration = useRef(0);
   useEffect(() => {
     let alive = true;
-    void readConnection().then((connection) => {
-      if (!alive || !connection) { if (alive) setLoading(false); return; }
-      setBaseUrl(connection.baseUrl);
-      setCachedToken(connection.token);
-      setConnected(true);
-      void api(connection.baseUrl).state().then((next) => {
-        if (alive) { setState(next); setError(""); }
-      }).catch((e) => {
-        if (!alive) return;
-        if (e instanceof ApiError && e.status === 401) setConnected(false);
-        setError(e instanceof Error ? e.message : "Could not reach the workspace.");
-      }).finally(() => { if (alive) setLoading(false); });
-    }).catch((e) => {
-      // SecureStore can reject (for example after an OS restore). Leave the
-      // signed-out screen usable instead of keeping its spinner forever.
-      if (alive) { setError(e instanceof Error ? e.message : "Could not load saved connection."); setLoading(false); }
-    });
-    return () => { alive = false; };
+    void readConnection()
+      .then((connection) => {
+        if (!alive || !connection) {
+          if (alive) setLoading(false);
+          return;
+        }
+        setBaseUrl(connection.baseUrl);
+        setCachedToken(connection.token);
+        setConnected(true);
+        void api(connection.baseUrl)
+          .state()
+          .then((next) => {
+            if (alive) {
+              setState(next);
+              setError("");
+            }
+          })
+          .catch((e) => {
+            if (!alive) return;
+            if (e instanceof ApiError && e.status === 401) setConnected(false);
+            setError(
+              e instanceof Error ? e.message : "Could not reach the workspace.",
+            );
+          })
+          .finally(() => {
+            if (alive) setLoading(false);
+          });
+      })
+      .catch((e) => {
+        // SecureStore can reject (for example after an OS restore). Leave the
+        // signed-out screen usable instead of keeping its spinner forever.
+        if (alive) {
+          setError(
+            e instanceof Error ? e.message : "Could not load saved connection.",
+          );
+          setLoading(false);
+        }
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
-  useEffect(() => onAuthInvalidated(() => {
-    connectionGeneration.current += 1;
-    setConnected(false);
-    setState(null);
-  }), []);
+  useEffect(
+    () =>
+      onAuthInvalidated(() => {
+        connectionGeneration.current += 1;
+        setConnected(false);
+        setState(null);
+      }),
+    [],
+  );
   const refresh = useCallback(async () => {
     if (refreshInFlight.current || !baseUrl) return;
     refreshInFlight.current = true;
@@ -69,7 +96,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       setError("");
       const next = await api(requestBaseUrl).state();
-      if (generation === connectionGeneration.current && requestBaseUrl === baseUrl) {
+      if (
+        generation === connectionGeneration.current &&
+        requestBaseUrl === baseUrl
+      ) {
         setState(next);
         setConnected(true);
       }
@@ -78,7 +108,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setError(
         e instanceof Error ? e.message : "Could not reach the workspace.",
       );
-    } finally { refreshInFlight.current = false; setRefreshing(false); }
+    } finally {
+      refreshInFlight.current = false;
+      setRefreshing(false);
+    }
   }, [baseUrl]);
   useEffect(() => {
     if (!connected || !baseUrl) return;
@@ -94,7 +127,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       schedule();
     });
     schedule();
-    return () => { subscription.remove(); if (timer) clearInterval(timer); };
+    return () => {
+      subscription.remove();
+      if (timer) clearInterval(timer);
+    };
   }, [connected, baseUrl, refresh]);
   async function pairing(url: string, secret: string, name: string) {
     const result = await api(url).redeem(secret, name);
@@ -104,8 +140,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setCachedToken(result.deviceToken);
     setBaseUrl(nextBaseUrl);
     setConnected(true);
-    try { setState(await api(nextBaseUrl).state()); }
-    catch (error) { setConnected(false); throw error; }
+    try {
+      setState(await api(nextBaseUrl).state());
+    } catch (error) {
+      setConnected(false);
+      throw error;
+    }
   }
   async function disconnect() {
     connectionGeneration.current += 1;
