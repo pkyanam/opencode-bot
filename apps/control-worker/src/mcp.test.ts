@@ -162,3 +162,13 @@ it("accepts a 1 MiB upload through the JSON envelope and enforces a bounded requ
   const tooLarge = await handler(request({jsonrpc:"2.0",id:1,method:"ping"},{"content-length":String(15 * 1024 * 1024)}));
   expect(tooLarge.status).toBe(413);
 });
+
+it("preserves provider credential IDs for activation, labeling, and removal", async () => {
+  const invoke = vi.fn().mockResolvedValue({status:200,body:{ok:true}});
+  const handler = createMcpHandler({authorize:()=>true,invoke});
+  for (const operation of ["credentials/activate", "credentials/label", "credentials/remove"]) {
+    const result = await handler(request({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"provider_configure",arguments:{operation,credentialID:"credential-test",label:"Work"}}}));
+    expect(result.status).toBe(200);
+    expect(invoke).toHaveBeenLastCalledWith({path:`/api/providers/${operation}`,method:"POST",body:{credentialID:"credential-test",label:"Work"}});
+  }
+});
