@@ -1,42 +1,366 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenCode Bot — Give your agents a computer.</title>
-<meta name="description" content="Named bots, a browser you can watch, and a workspace you host. Powered by OpenCode. Deploy to your Cloudflare account with one command.">
-<meta name="theme-color" content="#131210"><meta property="og:title" content="OpenCode Bot — Give your agents a computer."><meta property="og:description" content="Your bots. Your models. Your infrastructure. A self-hosted workspace powered by OpenCode."><meta property="og:type" content="website"><meta property="og:image" content="https://pkyanam.github.io/opencode-bot/assets/wordmark.png">
-<link rel="canonical" href="https://pkyanam.github.io/opencode-bot/"><link rel="icon" href="assets/opencode.png"><link rel="stylesheet" href="style.css"><script src="site.js" defer></script>
-</head>
-<body>
-<a class="skip" href="#main">Skip to content</a>
-<div class="page">
-<header><a class="brand" href="#" aria-label="OpenCode Bot home"><img src="assets/wordmark.png" alt="opencode bot" width="2172" height="724"></a><nav aria-label="Main navigation"><a href="#features">Features</a><a href="https://github.com/pkyanam/opencode-bot/tree/main/docs">Docs</a><a href="https://github.com/pkyanam/opencode-bot">GitHub ↗</a><a class="button small" href="#install">Install <span>↓</span></a></nav></header>
-<main id="main">
-<section class="hero">
-<div class="eyebrow"><span>OPEN SOURCE / SELF-HOSTED</span><a href="https://github.com/pkyanam/opencode-bot/releases">Public preview ↗</a></div>
-<h1>Give your agents<br>a computer.<span class="cursor" aria-hidden="true">_</span></h1>
-<p class="intro">A name. A job. A browser of their own.<br>Put OpenCode to work in a workspace you host—and take the conversation with you.</p>
-<div class="hero-actions"><a class="button" href="#install">Set up your workspace <span>↗</span></a><a class="text-link" href="https://github.com/pkyanam/opencode-bot">Explore the source <span>↗</span></a></div>
-<a class="powered" href="https://opencode.ai"><span>Powered by</span><img src="assets/opencode.png" alt="" width="26" height="26"><strong>OpenCode</strong><span aria-hidden="true">↗</span></a>
-</section>
-<section class="showcase" aria-label="Illustrated workspace example">
-<div class="section-label"><span>01 / A WORKSPACE FOR DOING</span><span>Illustrative conversation</span></div>
-<div class="workspace">
-<aside class="demo-sidebar"><div class="demo-brand">YOUR WORKSPACE</div><div class="demo-new">＋ New conversation</div><div class="mini-label">BOTS</div><div class="bot selected"><b>S</b><span>Scout<small>Research & writing</small></span></div><div class="bot"><b>B</b><span>Builder<small>Code & prototypes</small></span></div><div class="mini-label">CONVERSATIONS</div><div class="demo-thread">The weekend field guide</div><div class="side-bottom">Skills &nbsp; / &nbsp; Files</div></aside>
-<div class="demo-chat"><div class="chat-title"><span>Scout <span class="muted">/</span> The weekend field guide</span><span class="mono">↗</span></div><div class="chat-body"><div class="speaker">YOU <span>09:41</span></div><p>Make a little website for our weekend in the Catskills. Ask Builder to put it together.</p><div class="speaker scout">SCOUT <span>09:41</span></div><p>I’ll collect the stops and ask Builder to turn them into a field guide.</p><div class="tool"><span>↳</span> Browse sources <small>3 pages read</small></div><div class="handoff"><div><b>B</b><strong>Builder</strong><span>Finished</span></div><p>The guide is ready. Opening it in our browser.</p></div><div class="tool"><span>↳</span> Open page <small>weekend-guide.html</small></div><p class="final-line">Ready when you are. Take a look →</p></div><div class="demo-compose">Message Scout… <span>↑</span></div></div>
-<div class="demo-computer"><div class="computer-bar">COMPUTER <span>↗</span></div><div class="browser-address">localhost / weekend-guide</div><div class="field-guide"><div class="guide-top">FIELD NOTES &nbsp; Nº 024</div><h3>A little<br>further<br>upstate.</h3><div class="landscape" aria-hidden="true"><div></div><div></div><div></div><span>42°12′ N &nbsp; 74°20′ W</span></div><div class="guide-bottom"><span>THE CATSKILLS</span><span>A WEEKEND GUIDE ↗</span></div></div><p class="computer-caption">The browser your bots actually control.</p></div>
-</div><div class="figure-caption"><span>Follow the conversation, the handoff, and the browser in one place.</span><span>YOUR INFRASTRUCTURE. YOUR VIEW.</span></div>
-</section>
-<section class="features" id="features"><div class="section-heading"><span class="index">02 / THE TOOLKIT</span><h2>More than a chat window.</h2><p>OpenCode does the work. Bot gives it a place to live.</p></div><div class="feature-grid">
-<article><span class="feature-no">[01]</span><h3>A bot for each job.</h3><p>Give each bot its own instructions, model, and skills. Start as many conversations as the work needs. Bots can ask one another for help.</p></article>
-<article><span class="feature-no">[02]</span><h3>Watch the work happen.</h3><p>Read tool calls as they happen. Expand the shared browser. Review approvals, send a follow-up mid-turn, or stop a task.</p></article>
-<article><span class="feature-no">[03]</span><h3>Choose what’s underneath.</h3><p>Connect model providers and API keys. Use OpenCode commands, install skills, and configure plugins for the way you work.</p></article>
-<article><span class="feature-no">[04]</span><h3>Bring the conversation along.</h3><p>Chat on the web or connect a Telegram bot. Pair another client with a code or QR. Native iOS and Android clients are in preview.</p></article>
-<article><span class="feature-no">[05]</span><h3>Files belong in the workflow.</h3><p>Attach a reference image or document. Browse the Computer’s folders, preview text, and upload or download the finished work.</p></article>
-<article><span class="feature-no">[06]</span><h3>Let your tools talk to it.</h3><p>Connect an external agent through authenticated MCP. List bots, start tasks, and follow results without opening another chat window.</p><a href="https://github.com/pkyanam/opencode-bot/blob/main/docs/mcp.md">MCP setup ↗</a></article>
-</div></section>
-<section class="ownership"><div><span class="index">03 / MAKE YOURSELF AT HOME</span><h2>Hosted by you.<br>Reached from anywhere.</h2></div><div><p>Start with a Computer on your Cloudflare account. Add a Mac, Linux machine, or Windows computer with the node installer and a pairing token.</p><p>One workspace connects your bots and trusted clients. Revoke a paired device when it’s no longer yours.</p><a class="text-link" href="https://github.com/pkyanam/opencode-bot/tree/main/packages/nodes">Meet the node system ↗</a></div></section>
-<section class="install" id="install"><span class="index">04 / YOUR FIRST COMPUTER</span><h2>One command to get started.</h2><p>The installer deploys to your Cloudflare account and opens your workspace.<br>No local Docker. No Docker Hub account.</p><div class="terminal"><div class="terminal-head"><span>BASH / macOS · Linux · Windows via WSL2</span><a href="https://github.com/pkyanam/opencode-bot/blob/main/install.sh">Read the script ↗</a></div><div class="command-row"><code id="install-command">curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash</code><button id="copy" type="button" aria-label="Copy install command">Copy</button></div><span id="copy-result" role="status" aria-live="polite"></span></div><div class="prerequisites"><b>Before you begin</b><p>Bash, curl, Git, and a Cloudflare account with Workers Paid, Containers access, and R2 enabled. Setup installs Node.js 24+ when needed and prompts for Cloudflare login. Hosting and models are billed separately by their providers.</p></div><a class="text-link" href="https://github.com/pkyanam/opencode-bot/blob/main/docs/getting-started.md">Read the setup guide ↗</a></section>
-<section class="faq"><h2>A few things worth knowing.</h2><details><summary>Is this an official OpenCode product?</summary><p>No. OpenCode Bot is an independent, open-source project built on OpenCode. OpenCode’s name and logo belong to their respective owners.</p></details><details><summary>What is ready today?</summary><p>The web workspace, Telegram integration, model configuration, bot conversations, live Computer browser, file tools, pairing, and MCP are available in the public preview. Native mobile is a development preview, not an App Store or Play Store release. Additional-node desktop streaming and native desktop packaging are still in development.</p></details><details><summary>Where does my data live?</summary><p>Your control server and artifacts live in your Cloudflare account; model requests go to your configured provider. Bots sharing a Computer also share its files, browser, and credentials. Cloudflare Sandbox disk is temporary: save checkpoints for recovery, and keep important files backed up. Checkpoints currently have a 32 MiB compressed limit.</p></details><details><summary>Can I update or remove it?</summary><p>Updates are available in Settings after you configure deployment access. The setup utility also includes an uninstaller with a resource preview before deletion.</p><a href="https://github.com/pkyanam/opencode-bot#uninstall">Uninstall instructions ↗</a></details></section>
-</main><footer><div class="footer-line"><a class="brand" href="#" aria-label="Back to top"><img src="assets/wordmark.png" alt="opencode bot" width="2172" height="724" loading="lazy"></a><a href="https://github.com/pkyanam/opencode-bot">GitHub ↗</a><a href="https://github.com/pkyanam/opencode-bot/releases">Releases ↗</a><a href="https://github.com/pkyanam/opencode-bot/issues">Feedback ↗</a></div><div class="footer-note"><span>Built in the open. Yours to run.</span><span>Independent project · MIT licensed</span></div></footer>
-</div></body></html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenCode Bot — Give your agents a computer.</title>
+    <meta
+      name="description"
+      content="Named bots, a browser you can watch, and a workspace you host. Powered by OpenCode. Deploy to your Cloudflare account with one command."
+    />
+    <meta name="theme-color" content="#131210" />
+    <meta
+      property="og:title"
+      content="OpenCode Bot — Give your agents a computer."
+    />
+    <meta
+      property="og:description"
+      content="Your bots. Your models. Your infrastructure. A self-hosted workspace powered by OpenCode."
+    />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:image"
+      content="https://pkyanam.github.io/opencode-bot/assets/wordmark.png"
+    />
+    <link rel="canonical" href="https://pkyanam.github.io/opencode-bot/" />
+    <link rel="icon" href="assets/opencode.png" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="page">
+      <header>
+        <a class="brand" href="#" aria-label="OpenCode Bot home"
+          ><img
+            src="assets/wordmark.png"
+            alt="opencode bot"
+            width="2172"
+            height="724"
+        /></a>
+        <nav aria-label="Main navigation">
+          <a href="#features">Features</a
+          ><a href="https://github.com/pkyanam/opencode-bot/tree/main/docs"
+            >Docs</a
+          ><a href="https://github.com/pkyanam/opencode-bot">GitHub ↗</a
+          ><a class="button small" href="#install">Install <span>↓</span></a>
+        </nav>
+      </header>
+      <main id="main">
+        <section class="hero">
+          <div class="eyebrow">
+            <span>OPEN SOURCE / SELF-HOSTED</span
+            ><a href="https://github.com/pkyanam/opencode-bot/releases"
+              >Public preview ↗</a
+            >
+          </div>
+          <h1>
+            Give your agents<br />a computer.<span
+              class="cursor"
+              aria-hidden="true"
+              >_</span
+            >
+          </h1>
+          <p class="intro">
+            A name. A job. A browser of their own.<br />Put OpenCode to work in
+            a workspace you host—and take the conversation with you.
+          </p>
+          <div class="hero-actions">
+            <a class="button" href="#install"
+              >Set up your workspace <span>↗</span></a
+            ><a class="text-link" href="https://github.com/pkyanam/opencode-bot"
+              >Explore the source <span>↗</span></a
+            >
+          </div>
+          <a class="powered" href="https://opencode.ai"
+            ><span>Powered by</span
+            ><img
+              src="assets/opencode.png"
+              alt=""
+              width="26"
+              height="26"
+            /><strong>OpenCode</strong><span aria-hidden="true">↗</span></a
+          >
+        </section>
+        <section class="showcase" aria-label="Illustrated workspace example">
+          <div class="section-label">
+            <span>01 / A WORKSPACE FOR DOING</span
+            ><span>Illustrative conversation</span>
+          </div>
+          <div class="workspace">
+            <aside class="demo-sidebar">
+              <div class="demo-brand">YOUR WORKSPACE</div>
+              <div class="demo-new">＋ New conversation</div>
+              <div class="mini-label">BOTS</div>
+              <div class="bot selected">
+                <b>S</b><span>Scout<small>Research & writing</small></span>
+              </div>
+              <div class="bot">
+                <b>B</b><span>Builder<small>Code & prototypes</small></span>
+              </div>
+              <div class="mini-label">CONVERSATIONS</div>
+              <div class="demo-thread">The weekend field guide</div>
+              <div class="side-bottom">Skills &nbsp; / &nbsp; Files</div>
+            </aside>
+            <div class="demo-chat">
+              <div class="chat-title">
+                <span
+                  >Scout <span class="muted">/</span> The weekend field
+                  guide</span
+                ><span class="mono">↗</span>
+              </div>
+              <div class="chat-body">
+                <div class="speaker">YOU <span>09:41</span></div>
+                <p>
+                  Make a little website for our weekend in the Catskills. Ask
+                  Builder to put it together.
+                </p>
+                <div class="speaker scout">SCOUT <span>09:41</span></div>
+                <p>
+                  I’ll collect the stops and ask Builder to turn them into a
+                  field guide.
+                </p>
+                <div class="tool">
+                  <span>↳</span> Browse sources <small>3 pages read</small>
+                </div>
+                <div class="handoff">
+                  <div>
+                    <b>B</b><strong>Builder</strong><span>Finished</span>
+                  </div>
+                  <p>The guide is ready. Opening it in our browser.</p>
+                </div>
+                <div class="tool">
+                  <span>↳</span> Open page <small>weekend-guide.html</small>
+                </div>
+                <p class="final-line">Ready when you are. Take a look →</p>
+              </div>
+              <div class="demo-compose">Message Scout… <span>↑</span></div>
+            </div>
+            <div class="demo-computer">
+              <div class="computer-bar">COMPUTER <span>↗</span></div>
+              <div class="browser-address">localhost / weekend-guide</div>
+              <div class="field-guide">
+                <div class="guide-top">FIELD NOTES &nbsp; Nº 024</div>
+                <h3>A little<br />further<br />upstate.</h3>
+                <div class="landscape" aria-hidden="true">
+                  <div></div>
+                  <div></div>
+                  <div></div>
+                  <span>42°12′ N &nbsp; 74°20′ W</span>
+                </div>
+                <div class="guide-bottom">
+                  <span>THE CATSKILLS</span><span>A WEEKEND GUIDE ↗</span>
+                </div>
+              </div>
+              <p class="computer-caption">
+                The browser your bots actually control.
+              </p>
+            </div>
+          </div>
+          <div class="figure-caption">
+            <span
+              >Follow the conversation, the handoff, and the browser in one
+              place.</span
+            ><span>YOUR INFRASTRUCTURE. YOUR VIEW.</span>
+          </div>
+        </section>
+        <section class="features" id="features">
+          <div class="section-heading">
+            <span class="index">02 / THE TOOLKIT</span>
+            <h2>More than a chat window.</h2>
+            <p>OpenCode does the work. Bot gives it a place to live.</p>
+          </div>
+          <div class="feature-grid">
+            <article>
+              <span class="feature-no">[01]</span>
+              <h3>A bot for each job.</h3>
+              <p>
+                Give each bot its own instructions, model, and skills. Start as
+                many conversations as the work needs. Bots can ask one another
+                for help.
+              </p>
+            </article>
+            <article>
+              <span class="feature-no">[02]</span>
+              <h3>Watch the work happen.</h3>
+              <p>
+                Read tool calls as they happen. Expand the shared browser.
+                Review approvals, send a follow-up mid-turn, or stop a task.
+              </p>
+            </article>
+            <article>
+              <span class="feature-no">[03]</span>
+              <h3>Choose what’s underneath.</h3>
+              <p>
+                Connect model providers and API keys. Use OpenCode commands,
+                install skills, and configure plugins for the way you work.
+              </p>
+            </article>
+            <article>
+              <span class="feature-no">[04]</span>
+              <h3>Bring the conversation along.</h3>
+              <p>
+                Chat on the web or connect a Telegram bot. Pair another client
+                with a code or QR. Native iOS and Android clients are in
+                preview.
+              </p>
+            </article>
+            <article>
+              <span class="feature-no">[05]</span>
+              <h3>Files belong in the workflow.</h3>
+              <p>
+                Attach a reference image or document. Browse the Computer’s
+                folders, preview text, and upload or download the finished work.
+              </p>
+            </article>
+            <article>
+              <span class="feature-no">[06]</span>
+              <h3>Let your tools talk to it.</h3>
+              <p>
+                Connect an external agent through authenticated MCP. List bots,
+                start tasks, and follow results without opening another chat
+                window.
+              </p>
+              <a
+                href="https://github.com/pkyanam/opencode-bot/blob/main/docs/mcp.md"
+                >MCP setup ↗</a
+              >
+            </article>
+          </div>
+        </section>
+        <section class="ownership">
+          <div>
+            <span class="index">03 / MAKE YOURSELF AT HOME</span>
+            <h2>Hosted by you.<br />Reached from anywhere.</h2>
+          </div>
+          <div>
+            <p>
+              Start with a Computer on your Cloudflare account. Add a Mac, Linux
+              machine, or Windows computer with the node installer and a pairing
+              token.
+            </p>
+            <p>
+              One workspace connects your bots and trusted clients. Revoke a
+              paired device when it’s no longer yours.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/pkyanam/opencode-bot/tree/main/packages/nodes"
+              >Meet the node system ↗</a
+            >
+          </div>
+        </section>
+        <section class="install" id="install">
+          <span class="index">04 / YOUR FIRST COMPUTER</span>
+          <h2>One command to get started.</h2>
+          <p>
+            The installer deploys to your Cloudflare account and opens your
+            workspace.<br />No local Docker. No Docker Hub account.
+          </p>
+          <div class="terminal">
+            <div class="terminal-head">
+              <span>BASH / macOS · Linux · Windows via WSL2</span
+              ><a
+                href="https://github.com/pkyanam/opencode-bot/blob/main/install.sh"
+                >Read the script ↗</a
+              >
+            </div>
+            <div class="command-row">
+              <code id="install-command"
+                >curl -fsSL
+                https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh
+                | bash</code
+              ><button
+                id="copy"
+                type="button"
+                aria-label="Copy install command"
+              >
+                Copy
+              </button>
+            </div>
+            <span id="copy-result" role="status" aria-live="polite"></span>
+          </div>
+          <div class="prerequisites">
+            <b>Before you begin</b>
+            <p>
+              Bash, curl, Git, and a Cloudflare account with Workers Paid,
+              Containers access, and R2 enabled. Setup installs Node.js 24+ when
+              needed and prompts for Cloudflare login. Hosting and models are
+              billed separately by their providers.
+            </p>
+          </div>
+          <a
+            class="text-link"
+            href="https://github.com/pkyanam/opencode-bot/blob/main/docs/getting-started.md"
+            >Read the setup guide ↗</a
+          >
+        </section>
+        <section class="faq">
+          <h2>A few things worth knowing.</h2>
+          <details>
+            <summary>Is this an official OpenCode product?</summary>
+            <p>
+              No. OpenCode Bot is an independent, open-source project built on
+              OpenCode. OpenCode’s name and logo belong to their respective
+              owners.
+            </p>
+          </details>
+          <details>
+            <summary>What is ready today?</summary>
+            <p>
+              The web workspace, Telegram integration, model configuration, bot
+              conversations, live Computer browser, file tools, pairing, and MCP
+              are available in the public preview. Native mobile is a
+              development preview, not an App Store or Play Store release.
+              Additional-node desktop streaming and native desktop packaging are
+              still in development.
+            </p>
+          </details>
+          <details>
+            <summary>Where does my data live?</summary>
+            <p>
+              Your control server and artifacts live in your Cloudflare account;
+              model requests go to your configured provider. Bots sharing a
+              Computer also share its files, browser, and credentials.
+              Cloudflare Sandbox disk is temporary: save checkpoints for
+              recovery, and keep important files backed up. Checkpoints
+              currently have a 32 MiB compressed limit.
+            </p>
+          </details>
+          <details>
+            <summary>Can I update or remove it?</summary>
+            <p>
+              Updates are available in Settings after you configure deployment
+              access. The setup utility also includes an uninstaller with a
+              resource preview before deletion.
+            </p>
+            <a href="https://github.com/pkyanam/opencode-bot#uninstall"
+              >Uninstall instructions ↗</a
+            >
+          </details>
+        </section>
+      </main>
+      <footer>
+        <div class="footer-line">
+          <a class="brand" href="#" aria-label="Back to top"
+            ><img
+              src="assets/wordmark.png"
+              alt="opencode bot"
+              width="2172"
+              height="724"
+              loading="lazy" /></a
+          ><a href="https://github.com/pkyanam/opencode-bot">GitHub ↗</a
+          ><a href="https://github.com/pkyanam/opencode-bot/releases"
+            >Releases ↗</a
+          ><a href="https://github.com/pkyanam/opencode-bot/issues"
+            >Feedback ↗</a
+          >
+        </div>
+        <div class="footer-note">
+          <span>Built in the open. Yours to run.</span
+          ><span>Independent project · MIT licensed</span>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>
