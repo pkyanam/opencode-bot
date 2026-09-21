@@ -15,6 +15,7 @@ docker run --rm --entrypoint /bin/sh "$image" -ceu '
   browser=$(find /opt/ms-playwright -type f -path "*/chrome-linux64/chrome" -perm -111 -print -quit)
   test -n "$browser" && test -x "$browser"
   xvfb-run -a "$browser" --headless --no-sandbox --disable-dev-shm-usage --dump-dom about:blank >/dev/null
+  node /opt/opencode-bot/runner/smoke-desktop.mjs
   test -d /workspace/state && test -d /workspace/shared && test -d /workspace/browser
   printf "node=%s opencode=%s sandbox=%s browser=%s\n" "$node_version" "$(opencode --version | head -n1)" "'"$expected_sandbox"'" "$browser"
 '

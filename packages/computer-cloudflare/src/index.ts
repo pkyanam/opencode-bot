@@ -3,7 +3,16 @@ import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 
 export type CheckpointBucket = {
   put(key: string, value: ArrayBuffer | ArrayBufferView, options?: Record<string, unknown>): Promise<unknown>;
-  get(key: string): Promise<{ size?: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
+  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<{ size?: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
+  head?: (key: string) => Promise<{ size?: number } | null>;
+  createMultipartUpload?: (key: string, options?: Record<string, unknown>) => Promise<CheckpointMultipartUpload>;
+};
+
+export type CheckpointMultipartUpload = {
+  uploadId?: string;
+  uploadPart(partNumber: number, value: ArrayBuffer | ArrayBufferView): Promise<{ etag?: string; ETag?: string }>;
+  complete(parts: Array<{ partNumber: number; etag: string }>): Promise<unknown>;
+  abort(): Promise<unknown>;
 };
 
 /** Capabilities are deliberately explicit: a caller must not infer isolation from a provider name. */
@@ -133,6 +142,8 @@ const DEFAULT_WORKSPACE = "/workspace/shared";
 const DEFAULT_PORT = 8787;
 // Bound buffering during checkpoint upload and checksum verification.
 const DEFAULT_MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+const STREAMING_MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024 * 1024;
+const CHECKPOINT_PART_BYTES = 5 * 1024 * 1024;
 // Chromium rebuilds these files; preserving them adds size without preserving
 // user state such as cookies, history, or local storage.
 const DEFAULT_CHECKPOINT_EXCLUDES = [
@@ -253,16 +264,20 @@ export class CloudflareComputerProvider implements ComputerProvider {
           `tar -czf ${shellQuote(archiveName)} ${DEFAULT_CHECKPOINT_EXCLUDES.map((path) => `--exclude=${shellQuote(path.replace(/^\/+/, ""))}`).join(" ")} -C / ${paths.map((path) => shellQuote(path.replace(/^\/+/, ""))).join(" ")}`,
         );
         if (!archive.success) throw new Error(`Checkpoint archive failed: ${archive.stderr || archive.stdout}`);
-        const maxBytes = this.options.maxCheckpointBytes ?? DEFAULT_MAX_CHECKPOINT_BYTES;
+        const streaming = typeof bucket.createMultipartUpload === "function";
+        const maxBytes = this.options.maxCheckpointBytes ?? (streaming ? STREAMING_MAX_CHECKPOINT_BYTES : DEFAULT_MAX_CHECKPOINT_BYTES);
         const size = await archiveSize(managed.sandbox, archiveName);
         if (size > maxBytes) throw new Error(`Checkpoint archive is ${size} bytes; maximum is ${maxBytes}`);
-        const bytes = await readArchiveBytes(managed.sandbox, archiveName, maxBytes);
-        const digest = await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer);
-        const sha256 = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
         const checkpointId = `${id}:${managed.generation}:${Date.now()}`;
         const key = `${this.options.checkpointPrefix ?? "checkpoints"}/${safeId(id)}/${checkpointId.replaceAll(":", "-")}.tar.gz`;
-        await bucket.put(key, bytes, { httpMetadata: { contentType: "application/gzip" }, customMetadata: { computerId: id, sha256 } });
-        return { id: checkpointId, computerId: id, createdAt: new Date().toISOString(), supported: true, durable: true, checkpointKey: key, sha256, bytes: bytes.byteLength, paths };
+        const sha256 = await archiveSha256(managed.sandbox, archiveName);
+        if (streaming) {
+          await multipartUpload(bucket, key, managed.sandbox, archiveName, size, id, sha256);
+        } else {
+          const bytes = await readArchiveBytes(managed.sandbox, archiveName, maxBytes);
+          await bucket.put(key, bytes, { httpMetadata: { contentType: "application/gzip" }, customMetadata: { computerId: id, sha256 } });
+        }
+        return { id: checkpointId, computerId: id, createdAt: new Date().toISOString(), supported: true, durable: true, checkpointKey: key, sha256, bytes: size, paths };
       } catch (error) {
         checkpointFailure = error;
         throw error;
@@ -294,23 +309,35 @@ export class CloudflareComputerProvider implements ComputerProvider {
     const managed = this.computers.get(id);
     const bucket = this.options.checkpointBucket;
     if (!managed || !bucket || !checkpoint.checkpointKey) throw new Error("R2 checkpoint restore is not configured for this provider");
-    const object = await bucket.get(checkpoint.checkpointKey);
-    if (!object) throw new Error(`Checkpoint object not found: ${checkpoint.checkpointKey}`);
-    const maxBytes = this.options.maxCheckpointBytes ?? DEFAULT_MAX_CHECKPOINT_BYTES;
-    if (typeof object.size !== "number" || !Number.isFinite(object.size) || object.size < 0) throw new Error("Checkpoint object does not expose a trusted size");
-    if (object.size > maxBytes) throw new Error(`Checkpoint object is ${object.size} bytes; maximum is ${maxBytes}`);
-    const bytes = new Uint8Array(await object.arrayBuffer());
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const sha256 = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
-    if (checkpoint.sha256 && checkpoint.sha256 !== sha256) throw new Error("Checkpoint checksum mismatch");
+    const ranged = typeof bucket.createMultipartUpload === "function" && typeof bucket.head === "function";
+    let objectSize: number | undefined;
+    let fullObject: Awaited<ReturnType<CheckpointBucket["get"]>> = null;
+    if (ranged && bucket.head) {
+      const metadata = await bucket.head(checkpoint.checkpointKey);
+      if (!metadata) throw new Error(`Checkpoint object not found: ${checkpoint.checkpointKey}`);
+      objectSize = metadata.size;
+    } else {
+      fullObject = await bucket.get(checkpoint.checkpointKey);
+      if (!fullObject) throw new Error(`Checkpoint object not found: ${checkpoint.checkpointKey}`);
+      objectSize = fullObject.size;
+    }
+    const maxBytes = this.options.maxCheckpointBytes ?? (ranged ? STREAMING_MAX_CHECKPOINT_BYTES : DEFAULT_MAX_CHECKPOINT_BYTES);
+    if (typeof objectSize !== "number" || !Number.isFinite(objectSize) || objectSize < 0) throw new Error("Checkpoint object does not expose a trusted size");
+    if (objectSize > maxBytes) throw new Error(`Checkpoint object is ${objectSize} bytes; maximum is ${maxBytes}`);
     const archiveName = `/tmp/opencode-bot-restore-${safeId(id)}.tar.gz`;
     const transport = this.transport(managed, managed.generation, managed.spec.runnerToken);
     const quiesced = await transport.fetch("/checkpoint/quiesce", { method: "POST" });
     if (!quiesced.ok) throw new Error(`Runner refused restore quiesce (HTTP ${quiesced.status})`);
-    const content = toBase64(bytes);
     try {
-      const written = await managed.sandbox.writeFile(archiveName, content, { encoding: "base64" });
-      if (!written.success) throw new Error(`Could not write checkpoint archive: ${archiveName}`);
+      if (ranged && bucket.head) {
+        await rangedRestore(bucket, checkpoint.checkpointKey, objectSize, managed.sandbox, archiveName);
+      } else {
+        const bytes = new Uint8Array(await fullObject!.arrayBuffer());
+        const written = await managed.sandbox.writeFile(archiveName, toBase64(bytes), { encoding: "base64" });
+        if (!written.success) throw new Error(`Could not write checkpoint archive: ${archiveName}`);
+      }
+      const sha256 = await archiveSha256(managed.sandbox, archiveName);
+      if (checkpoint.sha256 && checkpoint.sha256 !== sha256) throw new Error("Checkpoint checksum mismatch");
       const roots = checkpoint.paths ?? ["/workspace/state", managed.spec.workspacePath, "/workspace/browser"];
       validateCheckpointPaths(roots, managed.spec.workspacePath);
       const listing = await managed.sandbox.exec(`tar -tzf ${shellQuote(archiveName)}`);
@@ -462,6 +489,97 @@ function toBase64(bytes: Uint8Array): string {
     output += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(output);
+}
+
+async function archiveSha256(sandbox: Sandbox<unknown>, archiveName: string): Promise<string> {
+  const result = await sandbox.exec(`sha256sum ${shellQuote(archiveName)}`);
+  if (!result.success) throw new Error(`Could not hash checkpoint archive: ${result.stderr || result.stdout}`);
+  const digest = result.stdout.trim().split(/\s+/)[0];
+  if (!/^[a-f0-9]{64}$/i.test(digest)) throw new Error("Checkpoint archive returned an invalid SHA-256 digest");
+  return digest.toLowerCase();
+}
+
+async function multipartUpload(
+  bucket: CheckpointBucket,
+  key: string,
+  sandbox: Sandbox<unknown>,
+  archiveName: string,
+  size: number,
+  computerId: string,
+  sha256: string,
+): Promise<void> {
+  if (!bucket.createMultipartUpload) throw new Error("Multipart checkpoint upload is unavailable");
+  const upload = await bucket.createMultipartUpload(key, {
+    httpMetadata: { contentType: "application/gzip" },
+    customMetadata: { computerId, sha256 },
+  });
+  const parts: Array<{ partNumber: number; etag: string }> = [];
+  try {
+    const streamed = await sandbox.readFile(archiveName, { encoding: "none" });
+    if (streamed.size !== size) throw new Error("Checkpoint archive changed while uploading");
+    const reader = streamed.content.getReader();
+    let pending = new Uint8Array(0);
+    let partNumber = 1;
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        const merged = new Uint8Array(pending.byteLength + next.value.byteLength);
+        merged.set(pending);
+        merged.set(next.value, pending.byteLength);
+        let offset = 0;
+        while (merged.byteLength - offset >= CHECKPOINT_PART_BYTES) {
+          const part = merged.slice(offset, offset + CHECKPOINT_PART_BYTES);
+          const uploaded = await upload.uploadPart(partNumber, part);
+          const etag = uploaded.etag ?? uploaded.ETag;
+          if (!etag) throw new Error(`Checkpoint multipart upload returned no ETag for part ${partNumber}`);
+          parts.push({ partNumber, etag });
+          partNumber += 1;
+          offset += CHECKPOINT_PART_BYTES;
+        }
+        pending = merged.slice(offset);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (pending.byteLength > 0 || parts.length === 0) {
+      const uploaded = await upload.uploadPart(partNumber, pending);
+      const etag = uploaded.etag ?? uploaded.ETag;
+      if (!etag) throw new Error(`Checkpoint multipart upload returned no ETag for part ${partNumber}`);
+      parts.push({ partNumber, etag });
+    }
+    await upload.complete(parts);
+  } catch (error) {
+    await upload.abort().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function rangedRestore(
+  bucket: CheckpointBucket,
+  key: string,
+  size: number,
+  sandbox: Sandbox<unknown>,
+  archiveName: string,
+): Promise<void> {
+  const partPaths: string[] = [];
+  try {
+    for (let offset = 0, partNumber = 0; offset < size; offset += CHECKPOINT_PART_BYTES, partNumber += 1) {
+      const length = Math.min(CHECKPOINT_PART_BYTES, size - offset);
+      const object = await bucket.get(key, { range: { offset, length } });
+      if (!object) throw new Error(`Checkpoint range not found at offset ${offset}`);
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      if (bytes.byteLength !== length) throw new Error(`Checkpoint range returned ${bytes.byteLength} bytes; expected ${length}`);
+      const partPath = `${archiveName}.part-${partNumber}`;
+      const written = await sandbox.writeFile(partPath, toBase64(bytes), { encoding: "base64" });
+      if (!written.success) throw new Error(`Could not write checkpoint range ${partNumber}`);
+      partPaths.push(partPath);
+    }
+    const joined = await sandbox.exec(`cat ${partPaths.map(shellQuote).join(" ")} > ${shellQuote(archiveName)}`);
+    if (!joined.success) throw new Error(`Could not assemble checkpoint archive: ${joined.stderr || joined.stdout}`);
+  } finally {
+    if (partPaths.length) await sandbox.exec(`rm -f ${partPaths.map(shellQuote).join(" ")}`).catch(() => undefined);
+  }
 }
 
 async function archiveSize(sandbox: Sandbox<unknown>, archiveName: string): Promise<number> {

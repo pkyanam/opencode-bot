@@ -29,7 +29,7 @@ function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number;
     getProcess: async () => starts ? process : null,
     stop: async () => undefined,
     destroy: async () => undefined,
-    exec: async (command: string) => { options.execs?.push(command); return { success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archiveStatBytes ?? options.archive?.byteLength ?? 0) : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }; },
+    exec: async (command: string) => { options.execs?.push(command); return { success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archiveStatBytes ?? options.archive?.byteLength ?? 0) : command.startsWith("sha256sum") ? `${"a".repeat(64)}  archive\n` : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }; },
     readFile: async (_path: string, readOptions?: { encoding?: string }) => {
       if (readOptions?.encoding === "none" && options.streamArchive) {
         if (options.streamReads) options.streamReads.value += 1;
@@ -194,4 +194,68 @@ it("stops consuming a raw stream at the configured checkpoint bound", async () =
   await assert.rejects(() => provider.checkpoint("streamed-oversized", 1), /maximum/);
   assert.equal(streamReads.value, 1);
   assert.equal(uploads, 0);
+});
+
+it("uploads large checkpoints with bounded multipart parts and aborts failed uploads", async () => {
+  const archive = new Uint8Array(6 * 1024 * 1024 + 17);
+  const sandbox = fakeSandbox({ archive, streamArchive: true });
+  const uploaded: Uint8Array[] = [];
+  let aborted = false;
+  const bucket = {
+    createMultipartUpload: async () => ({
+      uploadPart: async (_part: number, value: ArrayBuffer | ArrayBufferView) => {
+        uploaded.push(new Uint8Array(value instanceof ArrayBuffer ? value : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)));
+        return { etag: `etag-${uploaded.length}` };
+      },
+      complete: async () => undefined,
+      abort: async () => { aborted = true; },
+    }),
+    put: async () => undefined,
+    get: async () => null,
+  };
+  const provider = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => sandbox as never, checkpointBucket: bucket as never });
+  await provider.ensure({ computerId: "multipart", runnerToken: "secret" });
+  const manifest = await provider.checkpoint("multipart", 1);
+  assert.equal(manifest.bytes, archive.byteLength);
+  assert.deepEqual(uploaded.map((part) => part.byteLength), [5 * 1024 * 1024, 1 * 1024 * 1024 + 17]);
+  assert.equal(aborted, false);
+
+  const failing = {
+    ...bucket,
+    createMultipartUpload: async () => ({
+      uploadPart: async () => { throw new Error("R2 unavailable"); },
+      complete: async () => undefined,
+      abort: async () => { aborted = true; },
+    }),
+  };
+  const second = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => fakeSandbox({ archive, streamArchive: true }) as never, checkpointBucket: failing as never });
+  await second.ensure({ computerId: "multipart-fail", runnerToken: "secret" });
+  await assert.rejects(() => second.checkpoint("multipart-fail", 1), /R2 unavailable/);
+  assert.equal(aborted, true);
+});
+
+it("verifies ranged restore checksum before deleting checkpoint roots", async () => {
+  const archive = new TextEncoder().encode("checkpoint");
+  const writes: string[] = [];
+  const sandbox = fakeSandbox({ archive });
+  const originalWrite = sandbox.writeFile as (...args: any[]) => Promise<any>;
+  (sandbox as any).writeFile = async (path: string, content: string, options?: { encoding?: string }) => {
+    writes.push(path);
+    return originalWrite(path, content, options);
+  };
+  const bucket = {
+    put: async () => undefined,
+    head: async () => ({ size: archive.byteLength }),
+    get: async (_key: string, options?: { range?: { offset?: number; length?: number } }) => {
+      if (!options?.range) return { size: archive.byteLength, arrayBuffer: async () => archive.buffer };
+      const offset = options.range.offset ?? 0;
+      const length = options.range.length ?? archive.byteLength;
+      return { size: length, arrayBuffer: async () => archive.slice(offset, offset + length).buffer };
+    },
+  };
+  const provider = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => sandbox as never, checkpointBucket: bucket as never });
+  await provider.ensure({ computerId: "restore-checksum", runnerToken: "secret" });
+  await assert.rejects(() => provider.restore("restore-checksum", { id: "bad", computerId: "restore-checksum", createdAt: "", supported: true, durable: true, checkpointKey: "key", sha256: "b".repeat(64), bytes: archive.byteLength, paths: ["/workspace/state"] }), /checksum mismatch/);
+  assert.ok(writes.some((path) => path.includes("restore-checksum")));
+  assert.doesNotMatch(writes.join("\n"), /workspace\/state/);
 });

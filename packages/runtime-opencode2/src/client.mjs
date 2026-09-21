@@ -249,6 +249,62 @@ export class OpenCode2Runtime {
     };
   }
 
+  /** Manage location-scoped MCP servers through OpenCode's native API. */
+  async mcpList(directory = this.directory) {
+    await this.start();
+    if (!this.client.mcp?.list) throw new Error("OpenCode MCP API is unavailable");
+    const location = nativeLocation(directory);
+    const [result, integrations] = await Promise.all([
+      this.client.mcp.list(location),
+      this.client.integration?.list ? this.client.integration.list(location) : { data: [] },
+    ]);
+    return {
+      location: directory,
+      servers: (result?.data ?? []).map(({ name, status, integrationID }) => ({ name, status, ...(integrationID ? { integrationID } : {}) })),
+      integrations: (integrations?.data ?? []).map(sanitizeIntegration),
+    };
+  }
+
+  async mcpAdd({ server, config, directory } = {}) {
+    requireNonEmpty(server, "server");
+    if (!config || typeof config !== "object") throw new Error("config is required");
+    await this.start();
+    if (!this.client.mcp?.add) throw new Error("OpenCode MCP API is unavailable");
+    await this.client.mcp.add({ server, config, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, server };
+  }
+
+  async mcpRemove({ server, directory } = {}) {
+    requireNonEmpty(server, "server");
+    await this.start();
+    if (!this.client.mcp?.remove) throw new Error("OpenCode MCP API is unavailable");
+    await this.client.mcp.remove({ server, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, server };
+  }
+
+  async mcpConnect({ server, directory } = {}) {
+    requireNonEmpty(server, "server");
+    await this.start();
+    if (!this.client.mcp?.connect) throw new Error("OpenCode MCP API is unavailable");
+    await this.client.mcp.connect({ server, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, server };
+  }
+
+  async mcpDisconnect({ server, directory } = {}) {
+    requireNonEmpty(server, "server");
+    await this.start();
+    if (!this.client.mcp?.disconnect) throw new Error("OpenCode MCP API is unavailable");
+    await this.client.mcp.disconnect({ server, ...nativeLocation(directory ?? this.directory) });
+    return { ok: true, server };
+  }
+
+  async mcpResources(directory = this.directory) {
+    await this.start();
+    if (!this.client.mcp?.resource?.catalog) throw new Error("OpenCode MCP resource API is unavailable");
+    const result = await this.client.mcp.resource.catalog(nativeLocation(directory));
+    return { location: directory, ...(result?.data ?? { resources: [], templates: [] }) };
+  }
+
   /**
    * Return the native provider and integration registry for a location.
    *

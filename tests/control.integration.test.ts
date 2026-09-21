@@ -1,12 +1,18 @@
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[] }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async ensure() {
       return { transport: { fetch: async (path: string, init: RequestInit = {}) => {
         remote.calls.push(`${init.method ?? 'GET'} ${path}`);
+        if (remote.legacyMcp && path.startsWith('/mcps')) return Response.json({ error: 'not found' }, { status: 404 });
+        if (path === '/catalog') return Response.json({ mcp: [{ name: 'cloudflare', status: { status: 'needs_auth' }, integrationID: 'integration-cf' }] });
+        if (path === '/providers') return Response.json({ integrations: [{ id: 'integration-cf', methods: [{ id: 'login', type: 'oauth' }] }] });
+        if (path === '/providers/oauth/start') return Response.json({ attempt: { attemptID: 'attempt-cf' } });
+        if (path === '/mcps') return Response.json({ servers: [{ name: 'cloudflare', status: 'needs_auth', integrationID: 'integration-cf' }] });
+        if (path === '/desktop/control' && init.method === 'POST') return Response.json({ active: true, token: 'lease-test', expiresAt: new Date(Date.now() + 60000).toISOString() });
         if (path === '/runs' && init.method === 'POST') {
           const input = JSON.parse(String(init.body)); remote.submitted.push(input);
           const run = { runId: input.runId, sessionId: input.sessionId ?? `session-${input.runId}`, status: 'running', events: [], final: '' };
@@ -71,7 +77,7 @@ function fixture() {
   };
   return { db, request, create, env, alarms, queries, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('exposes the checkpoint and permits restore while runtime recovery is required', async () => {
@@ -834,4 +840,47 @@ it('preserves an approval when Computer recovery prevents submission', async () 
   expect((f.db.prepare('SELECT decision FROM approvals WHERE request_id=?').get('recovery') as any).decision).toBeNull();
   expect((await f.request(`/api/runs/${r.body.id}`)).body.status).toBe('waiting_approval');
  } finally {prepare.mockRestore();}
+});
+
+
+describe('Computer control and native MCP proxy', () => {
+  beforeEach(() => { vi.spyOn(Workspace.prototype as any, 'computerReadiness').mockReturnValue({ state: 'ready' }); });
+  afterEach(() => { vi.restoreAllMocks(); });
+  it('requires authentication for remote keyboard input', async () => {
+    const f = fixture();
+    expect((await f.request('/api/computer/control', 'POST', { action: 'acquire' }, null)).status).toBe(401);
+    expect((await f.request('/api/computer/control', 'POST', { action: 'shell', command: 'anything' })).status).toBe(400);
+  });
+  it('does not hand the Computer to a human while an agent is running', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Work', idempotencyKey: 'manual-control-race' });
+    await f.alarm();
+    const takeover = await f.request('/api/computer/control', 'POST', { action: 'acquire' });
+    expect(takeover.status).toBe(409);
+    expect(takeover.body.error).toContain('Finish or stop');
+    expect(remote.calls).not.toContain('POST /desktop/control');
+  });
+  it('forwards an idle control acquisition without recording input in run history', async () => {
+    const f = fixture();
+    const result = await f.request('/api/computer/control', 'POST', { action: 'acquire' });
+    expect(result.status).toBe(200);
+    expect(result.body.token).toBe('lease-test');
+    expect((await f.request('/api/state')).body.runs).toEqual([]);
+  });
+  it('uses existing integration APIs for OAuth on older running Computers', async () => {
+    const f = fixture(); remote.legacyMcp = true;
+    const list = await f.request('/api/mcps');
+    expect(list.status).toBe(200);
+    expect(list.body.integrations[0].methods[0].type).toBe('oauth');
+    const login = await f.request('/api/mcps/oauth/start', 'POST', { integrationID: 'integration-cf', methodID: 'login' });
+    expect(login.body.attempt.attemptID).toBe('attempt-cf');
+    expect(remote.calls).toContain('POST /providers/oauth/start');
+  });
+  it('lists native MCP services separately from the external agent MCP endpoint', async () => {
+    const f = fixture();
+    const result = await f.request('/api/mcps');
+    expect(result.status).toBe(200);
+    expect(result.body.servers[0].name).toBe('cloudflare');
+    expect((await f.request('/api/mcps/execute-anything', 'POST', {})).status).toBe(404);
+  });
 });

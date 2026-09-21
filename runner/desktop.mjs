@@ -2,10 +2,25 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
+import { randomUUID } from "node:crypto";
 
 const BOUNDARY = "opencode-bot-frame";
 const DEFAULT_BROWSER_PROFILE = "/workspace/browser/profile";
 const DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222";
+const CONTROL_LEASE_MS = 60_000;
+const MAX_CONTROL_TEXT = 16_000;
+const MODIFIERS = new Set(["Alt", "Control", "Meta", "Shift"]);
+const NAVIGATION_KEYS = new Set(["Backspace", "Delete", "Enter", "Escape", "Tab", "Space", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home", "PageDown", "PageUp"]);
+const ALLOWED_SHORTCUTS = new Set([
+  "Control+A", "Control+C", "Control+L", "Control+V", "Control+X",
+  "Meta+A", "Meta+C", "Meta+L", "Meta+V", "Meta+X",
+  "Alt+ArrowLeft", "Alt+ArrowRight", "Shift+Tab",
+]);
+const X11_KEYS = new Map([
+  ["Backspace", "BackSpace"], ["Enter", "Return"], ["Escape", "Escape"], ["Tab", "Tab"], ["Space", "space"],
+  ["ArrowDown", "Down"], ["ArrowLeft", "Left"], ["ArrowRight", "Right"], ["ArrowUp", "Up"], ["PageDown", "Next"], ["PageUp", "Prior"],
+  ["Control", "ctrl"], ["Meta", "super"], ["Shift", "shift"], ["Alt", "alt"],
+]);
 const WELCOME_HTML = `<!doctype html><meta charset="utf-8"><title>OpenCode Bot Desktop</title><style>html,body{margin:0;width:100%;height:100%;background:#111827;color:#e5e7eb;font:16px system-ui,sans-serif}main{display:grid;place-content:center;height:100%;text-align:center}h1{font-size:32px;margin:0 0 12px}p{color:#9ca3af}</style><main><h1>OpenCode Bot</h1><p>Shared headed browser is ready.</p></main>`;
 
 /**
@@ -36,6 +51,7 @@ export class DesktopController {
       timeoutMs: this.browserStartupTimeoutMs,
     }));
     this.stopBrowser = options.stopBrowser ?? ((handle) => stopHeadedBrowser(handle, this.browserCloseTimeoutMs));
+    this.runCommand = options.runCommand ?? runCommand;
     this.clients = new Map();
     this.nextClientId = 1;
     this.captureTask = undefined;
@@ -43,6 +59,12 @@ export class DesktopController {
     this.browserHandle = undefined;
     this.state = "stopped";
     this.error = undefined;
+    this.controlLease = undefined;
+    this.heldKeys = new Set();
+    this.heldButtons = new Set();
+    this.controlExpiryTimer = undefined;
+    this.controlInputQueue = Promise.resolve();
+    this.controlCleanupPending = false;
   }
 
   async start() {
@@ -79,7 +101,126 @@ export class DesktopController {
       browser: this.browserHandle ? "ready" : (this.state === "error" ? "unavailable" : "stopped"),
       cdpEndpoint: this.browserHandle ? this.cdpEndpoint : undefined,
       error: this.error,
+      control: this.controlStatus(),
     };
+  }
+
+  /** Acquire the exclusive human input lease. Expiry never resumes an agent. */
+  acquireControl(owner = "human") {
+    this.expireControlLease();
+    if (this.controlCleanupPending) throw httpError(409, "desktop control cleanup is still in progress");
+    if (this.controlLease) throw httpError(409, "desktop is already controlled");
+    const token = randomUUID();
+    this.controlLease = { token, owner: String(owner).slice(0, 120), expiresAt: Date.now() + CONTROL_LEASE_MS };
+    this.armControlExpiry();
+    return this.controlStatus(true);
+  }
+
+  renewControl(token) {
+    this.requireControl(token);
+    this.controlLease.expiresAt = Date.now() + CONTROL_LEASE_MS;
+    this.armControlExpiry();
+    return this.controlStatus(true);
+  }
+
+  async releaseControl(token) {
+    this.requireControl(token);
+    clearTimeout(this.controlExpiryTimer);
+    this.controlExpiryTimer = undefined;
+    this.controlCleanupPending = true;
+    try {
+      await this.controlInputQueue;
+      await this.releaseHeldInput();
+      this.controlLease = undefined;
+    } finally {
+      this.controlCleanupPending = false;
+    }
+    return this.controlStatus();
+  }
+
+  controlStatus(includeToken = false) {
+    this.expireControlLease();
+    if (!this.controlLease) return { active: false, ...(this.controlCleanupPending ? { cleaning: true } : {}) };
+    return {
+      active: true,
+      owner: this.controlLease.owner,
+      expiresAt: new Date(this.controlLease.expiresAt).toISOString(),
+      ...(includeToken ? { token: this.controlLease.token } : {}),
+    };
+  }
+
+  async input(token, action) {
+    const operation = this.controlInputQueue.then(() => this.performInput(token, action));
+    this.controlInputQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async performInput(token, action) {
+    this.requireControl(token);
+    switch (action?.type) {
+      case "move": {
+        const { x, y } = normalizedPoint(action);
+        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1)))], undefined, this.display);
+        return { ok: true };
+      }
+      case "click": {
+        const { x, y } = normalizedPoint(action);
+        const button = action.button ?? "left";
+        if (!["left", "middle", "right"].includes(button)) throw httpError(400, "invalid mouse button");
+        const clicks = action.clicks ?? 1;
+        if (!Number.isInteger(clicks) || clicks < 1 || clicks > 2) throw httpError(400, "invalid click count");
+        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), "click", "--repeat", String(clicks), String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
+        return { ok: true };
+      }
+      case "down":
+      case "up": {
+        const { x, y } = normalizedPoint(action);
+        const button = action.button ?? "left";
+        if (!["left", "middle", "right"].includes(button)) throw httpError(400, "invalid mouse button");
+        await this.runCommand("xdotool", ["mousemove", "--sync", String(Math.round(x * (this.width - 1))), String(Math.round(y * (this.height - 1))), action.type === "down" ? "mousedown" : "mouseup", String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display);
+        if (action.type === "down") this.heldButtons.add(button); else this.heldButtons.delete(button);
+        return { ok: true };
+      }
+      case "scroll": {
+        const deltaX = finiteBound(action.deltaX ?? 0, -10_000, 10_000, "deltaX");
+        const deltaY = finiteBound(action.deltaY ?? 0, -10_000, 10_000, "deltaY");
+        if (!deltaX && !deltaY) throw httpError(400, "scroll delta is required");
+        const verticalButton = deltaY < 0 ? 4 : 5;
+        const horizontalButton = deltaX < 0 ? 6 : 7;
+        const count = Math.min(100, Math.max(1, Math.round(Math.abs(deltaY || deltaX) / 100)));
+        const button = deltaY ? verticalButton : horizontalButton;
+        await this.runCommand("xdotool", ["click", "--repeat", String(count), "--button", String(button)], undefined, this.display);
+        return { ok: true };
+      }
+      case "key": {
+        const key = allowedKey(action.key, action.action ?? "press");
+        const x11Key = x11KeyName(key);
+        const keyCommand = action.action === "down" ? "keydown" : action.action === "up" ? "keyup" : "key";
+        await this.runCommand("xdotool", [keyCommand, ...(action.action === "press" ? ["--clearmodifiers"] : []), x11Key], undefined, this.display);
+        if (action.action === "down") this.heldKeys.add(x11Key); else if (action.action === "up") this.heldKeys.delete(x11Key);
+        return { ok: true };
+      }
+      case "text": {
+        if (typeof action.text !== "string" || !action.text.length || action.text.length > MAX_CONTROL_TEXT) throw httpError(400, "text must contain 1 to 16000 characters");
+        // Feed text over stdin so secrets never appear in argv or process listings.
+        await this.runCommand("xdotool", ["type", "--clearmodifiers", "--delay", "0", "--file", "-"], action.text, this.display);
+        return { ok: true };
+      }
+      case "clipboard": {
+        if (action.action === "write") {
+          if (typeof action.text !== "string" || action.text.length > MAX_CONTROL_TEXT) throw httpError(400, "clipboard text is invalid");
+          await this.runCommand("xclip", ["-selection", "clipboard", "-in"], action.text, this.display);
+          return { ok: true };
+        }
+        if (action.action === "read") return { text: await this.runCommand("xclip", ["-selection", "clipboard", "-out"], undefined, this.display) };
+        throw httpError(400, "clipboard action must be read or write");
+      }
+      case "releaseHeldKeys":
+        await this.releaseHeldInput();
+        return { ok: true };
+      default:
+        throw httpError(400, "unsupported desktop input action");
+    }
   }
 
   async stream() {
@@ -112,6 +253,13 @@ export class DesktopController {
     this.clients.clear();
     if (this.captureTask) await this.captureTask.catch(() => undefined);
     this.captureTask = undefined;
+    clearTimeout(this.controlExpiryTimer);
+    this.controlExpiryTimer = undefined;
+    this.controlCleanupPending = true;
+    await this.controlInputQueue.catch(() => undefined);
+    await this.releaseHeldInput();
+    this.controlLease = undefined;
+    this.controlCleanupPending = false;
     await this.stopBrowser(this.browserHandle);
     this.browserHandle = undefined;
     await this.stopDisplay(this.displayHandle);
@@ -121,6 +269,46 @@ export class DesktopController {
 
   removeClient(id) {
     this.clients.delete(id);
+  }
+
+  requireControl(token) {
+    this.expireControlLease();
+    if (!this.controlLease || typeof token !== "string" || token !== this.controlLease.token) throw httpError(409, "desktop control lease is required");
+  }
+
+  expireControlLease() {
+    if (this.controlLease && this.controlLease.expiresAt <= Date.now()) {
+      clearTimeout(this.controlExpiryTimer);
+      this.controlExpiryTimer = undefined;
+      this.controlLease = undefined;
+      this.controlCleanupPending = true;
+      const cleanup = this.controlInputQueue.then(() => this.releaseHeldInput());
+      this.controlInputQueue = cleanup.catch(() => undefined);
+      void cleanup.then(() => { this.controlCleanupPending = false; }, () => { this.controlCleanupPending = false; });
+    }
+  }
+
+  armControlExpiry() {
+    clearTimeout(this.controlExpiryTimer);
+    this.controlExpiryTimer = setTimeout(() => {
+      if (!this.controlLease || this.controlLease.expiresAt > Date.now()) return this.armControlExpiry();
+      this.controlLease = undefined;
+      this.controlExpiryTimer = undefined;
+      this.controlCleanupPending = true;
+      const cleanup = this.controlInputQueue.then(() => this.releaseHeldInput());
+      this.controlInputQueue = cleanup.catch(() => undefined);
+      void cleanup.then(() => { this.controlCleanupPending = false; }, () => { this.controlCleanupPending = false; });
+    }, Math.max(0, this.controlLease ? this.controlLease.expiresAt - Date.now() + 25 : CONTROL_LEASE_MS));
+    this.controlExpiryTimer.unref?.();
+  }
+
+  async releaseHeldInput() {
+    const commands = [];
+    for (const key of this.heldKeys) commands.push(this.runCommand("xdotool", ["keyup", key], undefined, this.display).catch(() => undefined));
+    for (const button of this.heldButtons) commands.push(this.runCommand("xdotool", ["mouseup", String({ left: 1, middle: 2, right: 3 }[button])], undefined, this.display).catch(() => undefined));
+    this.heldKeys.clear();
+    this.heldButtons.clear();
+    await Promise.all(commands);
   }
 
   startCaptureLoop() {
@@ -184,6 +372,52 @@ async function stopHeadedBrowser(handle, timeoutMs) {
     catch { return; }
     await delay(50);
   }
+}
+
+function normalizedPoint(action) {
+  const x = finiteBound(action?.x, 0, 1, "x");
+  const y = finiteBound(action?.y, 0, 1, "y");
+  return { x, y };
+}
+
+function finiteBound(value, minimum, maximum, name) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) throw httpError(400, `${name} must be between ${minimum} and ${maximum}`);
+  return value;
+}
+
+function allowedKey(value, action) {
+  if (typeof value !== "string" || !value || value.length > 80) throw httpError(400, "key is invalid");
+  if (!["press", "down", "up"].includes(action)) throw httpError(400, "key action is invalid");
+  if (value.includes("+")) {
+    if (action !== "press" || !ALLOWED_SHORTCUTS.has(value)) throw httpError(400, "shortcut is not allowed");
+    return value;
+  }
+  if (!(MODIFIERS.has(value) || NAVIGATION_KEYS.has(value) || /^F(?:[1-9]|1[0-2])$/.test(value) || /^[a-zA-Z0-9]$/.test(value))) throw httpError(400, "key is not allowed");
+  return value;
+}
+
+function x11KeyName(value) {
+  if (value.includes("+")) return value.split("+").map((part) => X11_KEYS.get(part) ?? part.toLowerCase()).join("+");
+  return X11_KEYS.get(value) ?? value;
+}
+
+function runCommand(command, args, input, display) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env: { ...process.env, DISPLAY: display }, stdio: ["pipe", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    let size = 0;
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(httpError(504, `${command} timed out`)); }, 5_000);
+    child.stdout.on("data", (chunk) => { size += chunk.byteLength; if (size <= 256 * 1024) stdout.push(chunk); });
+    child.stderr.on("data", (chunk) => { if (stderr.reduce((n, part) => n + part.byteLength, 0) <= 32 * 1024) stderr.push(chunk); });
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(httpError(502, `${command} failed: ${Buffer.concat(stderr).toString().slice(0, 400)}`));
+      resolve(Buffer.concat(stdout).toString());
+    });
+    if (input !== undefined) child.stdin.end(input); else child.stdin.end();
+  });
 }
 
 function withTimeout(promise, timeoutMs, message) {

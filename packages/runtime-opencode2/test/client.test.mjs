@@ -99,6 +99,29 @@ test("catalog hydration retries only the model readiness endpoint", async () => 
   assert.deepEqual(calls, { provider: 1, agent: 1, command: 1, mcp: 1 });
 });
 
+test("MCP controls use location-scoped native APIs and omit credentials from listings", async () => {
+  const calls = [];
+  const fake = {
+    mcp: {
+      list: async input => ({ data: [{ name: 'cloudflare', status: { status: 'needs_auth', error: 'authenticate' }, integrationID: 'cf' }], location: input.location }),
+      add: async input => calls.push(['add', input]),
+      remove: async input => calls.push(['remove', input]),
+      connect: async input => calls.push(['connect', input]),
+      disconnect: async input => calls.push(['disconnect', input]),
+      resource: { catalog: async input => ({ data: { resources: [], templates: [] }, location: input.location }) },
+    },
+  };
+  const runtime = new OpenCode2Runtime({ client: fake, directory: '/workspace/shared' });
+  assert.deepEqual(await runtime.mcpList(), { location: '/workspace/shared', servers: [{ name: 'cloudflare', status: { status: 'needs_auth', error: 'authenticate' }, integrationID: 'cf' }], integrations: [] });
+  await runtime.mcpAdd({ server: 'cloudflare', config: { type: 'remote', url: 'https://mcp.example', oauth: { client_secret: 'private' } } });
+  await runtime.mcpConnect({ server: 'cloudflare' });
+  await runtime.mcpDisconnect({ server: 'cloudflare' });
+  await runtime.mcpRemove({ server: 'cloudflare' });
+  assert.equal(calls[0][1].config.oauth.client_secret, 'private');
+  assert.deepEqual(calls.map(([name]) => name), ['add', 'connect', 'disconnect', 'remove']);
+  assert.deepEqual(await runtime.mcpResources(), { location: '/workspace/shared', resources: [], templates: [] });
+});
+
 test("native session actions map to v2 compact and revert APIs", async () => {
   const calls = [];
   const fake = {

@@ -28,6 +28,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { OpenCodeProviders } from "./opencode-providers";
 import { AppUpdates } from "./app-updates";
+import { McpSettings } from "./mcp-settings";
 
 type Node = {
   id: string;
@@ -43,14 +44,18 @@ export function SettingsModal({
   bots,
   onClose,
   onSaved,
+  initialTab = "connection",
+  onOpenComputer,
 }: {
   bots: Bot[];
   onClose: () => void;
   onSaved: () => void;
+  initialTab?: string;
+  onOpenComputer?: (url: string) => void;
 }) {
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
   useEffect(() => { void readClientIdentity().then(setIdentity).catch(() => {}); }, []);
-  const [tab, setTab] = useState("connection");
+  const [tab, setTab] = useState(initialTab);
   const [token, setValue] = useState(getToken());
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -193,6 +198,10 @@ export function SettingsModal({
             {identity?.role === "owner" && <TabsTrigger value="runtime">
               <Server size={16} />
               OpenCode
+            </TabsTrigger>}
+            {identity?.role === "owner" && <TabsTrigger value="mcp">
+              <Server size={16} />
+              MCP
             </TabsTrigger>}
             {identity?.role === "owner" && <TabsTrigger value="updates">
               <RefreshCw size={16} />
@@ -647,6 +656,9 @@ export function SettingsModal({
                 conversation to use its full command catalog and provider
                 controls.
               </p>
+            </TabsContent>
+            <TabsContent value="mcp">
+              <McpSettings onSaved={() => { onSaved(); void action(async () => setCatalog(await api.catalog())); }} onOpenComputer={onOpenComputer} />
             </TabsContent>
             <TabsContent value="updates">
               <AppUpdates />

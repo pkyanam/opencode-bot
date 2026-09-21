@@ -224,6 +224,23 @@ test("catalog is authenticated and native commands use the session command API",
   server.close();
 });
 
+test('MCP control routes proxy native list and mutations without exposing config', async () => {
+  const fake = new FakeRuntime();
+  fake.mcpList = async directory => ({ location: directory, servers: [{ name: 'cloudflare', status: { status: 'needs_auth', error: 'authenticate' } }] });
+  fake.mcpAdd = async input => { fake.mcpAdded = input; return { ok: true, server: input.server }; };
+  const server = createServer({ store: new RunStore(fake), authToken: 'secret' });
+  await new Promise(resolve => server.listen(0, resolve));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const headers = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+    const listed = await fetch(`${base}/mcps`, { headers }).then(response => response.json());
+    assert.equal(listed.servers[0].name, 'cloudflare');
+    const added = await fetch(`${base}/mcps/add`, { method: 'POST', headers, body: JSON.stringify({ server: 'cloudflare', config: { type: 'remote', url: 'https://mcp.example' } }) }).then(response => response.json());
+    assert.deepEqual(added, { ok: true, server: 'cloudflare' });
+    assert.equal(fake.mcpAdded.server, 'cloudflare');
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('provider failures retain their explanation instead of an empty success', async () => {
   const runtime = new FakeRuntime();
   runtime.events = undefined;

@@ -213,6 +213,19 @@ export type Catalog = {
   actions?: CatalogAction[];
   mcp?: unknown[];
 };
+export type McpServerStatus =
+  | { status: "connected" }
+  | { status: "pending" }
+  | { status: "disabled" }
+  | { status: "failed"; error: string }
+  | { status: "needs_auth"; error: string };
+export type McpServer = {
+  name: string;
+  status: McpServerStatus;
+  integrationID?: string;
+};
+export type McpAuthMethod = { id: string; type?: string; label?: string; form?: Record<string, unknown> };
+export type McpServerList = { location?: string; servers: McpServer[]; integrations?: Array<{ id: string; methods?: McpAuthMethod[] }> };
 export type State = {
   pendingMessages?: Array<{
     id: string;
@@ -618,6 +631,22 @@ export const api = {
       { method: "DELETE" },
     ),
   catalog,
+  mcp: {
+    list: () => request<McpServerList>("/api/mcps"),
+    resources: () => request<{ location?: string; resources: unknown[]; templates: unknown[] }>("/api/mcps/resources"),
+    connect: (server: string) =>
+      request<{ ok: boolean; server: string }>("/api/mcps/connect", { method: "POST", body: JSON.stringify({ server }) }),
+    disconnect: (server: string) =>
+      request<{ ok: boolean; server: string }>("/api/mcps/disconnect", { method: "POST", body: JSON.stringify({ server }) }),
+    authStart: (payload: { integrationID: string; methodID: string; answer?: Record<string, unknown> }) =>
+      request<{ attempt?: { attemptID?: string; url?: string; instructions?: string; mode?: string } }>("/api/mcps/oauth/start", { method: "POST", body: JSON.stringify(payload) }),
+    authStatus: (payload: { integrationID: string; attemptID: string }) =>
+      request<Record<string, unknown>>("/api/mcps/oauth/status", { method: "POST", body: JSON.stringify(payload) }),
+    authComplete: (payload: { integrationID: string; attemptID: string; code?: string }) =>
+      request<{ ok: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
+    authCancel: (payload: { integrationID: string; attemptID: string }) =>
+      request<{ ok: boolean }>("/api/mcps/oauth/cancel", { method: "POST", body: JSON.stringify(payload) }),
+  },
   preview: async (signal?: AbortSignal) => {
     const token = getToken();
     const headers = new Headers({

@@ -674,7 +674,7 @@ export class Workspace {
         },
       })(request);
     }
-    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/preview|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
+    const computerDependent = /^\/api\/(catalog|mcps(?:\/.*)?|providers(?:\/.*)?|computer\/(?:preview|control)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
       if (url.pathname === "/api/pairing/redeem" && request.method === "POST")
         {
@@ -767,6 +767,10 @@ export class Workspace {
         url.pathname.startsWith("/api/providers/")
       )
         return await this.providerProxy(request, url);
+      if (url.pathname === "/api/mcps" || url.pathname.startsWith("/api/mcps/"))
+        return await this.mcpServiceProxy(request, url);
+      if (url.pathname === "/api/computer/control" && request.method === "POST")
+        return await this.desktopControl(request);
       if (url.pathname === "/api/catalog" && request.method === "GET")
         return await this.catalog();
       if (url.pathname === "/api/computer/preview" && request.method === "GET")
@@ -2688,6 +2692,7 @@ export class Workspace {
         ? `Your name is ${identity.name}. You are this user’s persistent bot, powered by OpenCode. Use your configured name when asked who you are.`
         : "",
       thread.instructions,
+      "This workspace exposes MCP service connections in Settings → MCP services and through /mcps (alias /mcp). If authentication is pending, say configuration is complete but sign-in is still required; do not claim the service is connected. For browser login, ask the user to expand Computer and take control after you finish or stop your turn. The user signs in directly in that shared browser; never ask them to paste passwords or MFA codes into chat. Native OpenCode remains available for commands that require its interactive terminal.",
       "When creating or modifying a website or web app, include a favicon that suits that project and a descriptive document title. Preserve an existing project favicon unless asked to replace it. For a single-file HTML deliverable, an inline SVG data-URL favicon keeps it self-contained; for multi-file projects, add a local favicon.svg and link it in the HTML head. Avoid generic sparkle icons. Verify the icon link resolves when you open the finished page.",
       "For a multi-step task, send a brief plain-language progress message before starting tool work, then short updates when you make a meaningful finding, switch approach, or begin a longer operation. Describe concrete actions and findings for the user; keep private reasoning private. Do not narrate every trivial step or repeat tool output. Keep working after each progress message until the requested task is complete or genuinely blocked.",
       !thread.node_id ? "Your computer has its own headed Chromium browser, visible in the app’s Computer preview. Use the computer_browser MCP tools (including computer_browser_browser_navigate, browser_snapshot, browser_click, browser_type and browser_tabs) to control that exact browser. These tools attach to the same browser shown in the live stream. The unrelated built-in tools.browser namespace expects an OpenCode desktop-app connection; do not use it for this computer. No desktop app, extension, or experimental browser setting is required. When asked to open or interact with a page, navigate with computer_browser and verify its page snapshot; fetching page text alone does not operate the live browser." : "",
@@ -2842,6 +2847,46 @@ export class Workspace {
         "cache-control": "no-store",
       },
     });
+  }
+  private async mcpServiceProxy(request: Request, url: URL): Promise<Response> {
+    if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
+    const path = url.pathname.slice(4);
+    const allowed = (request.method === "GET" && ["/mcps", "/mcps/resources"].includes(path)) ||
+      (request.method === "POST" && /^\/mcps\/(add|remove|connect|disconnect|oauth\/(start|status|complete|cancel))$/.test(path));
+    if (!allowed) throw new HttpError(404, "MCP service operation not found.");
+    const input = request.method === "POST" ? await body(request) : undefined;
+    const transport = await this.transport();
+    const result = await transport.fetch(path, { method: request.method, ...(input ? { headers: { "content-type": "application/json" }, body: JSON.stringify(input) } : {}) });
+    if (result.status === 404) {
+      // Older runners already expose native integrations and MCP catalog data.
+      // Keep sign-in usable without replacing the user's running Computer.
+      if (path === "/mcps" && request.method === "GET") {
+        const [catalog, providers] = await Promise.all([transport.fetch("/catalog"), transport.fetch("/providers")]);
+        if (catalog.ok && providers.ok) {
+          const listing = await catalog.json() as any;
+          const integrationData = await providers.json() as any;
+          return response({ servers: listing.mcp ?? [], integrations: integrationData.integrations ?? [] });
+        }
+      }
+      if (/^\/mcps\/oauth\/(start|status|complete|cancel)$/.test(path)) {
+        const legacy = await transport.fetch(path.replace("/mcps/", "/providers/"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+        return new Response(legacy.body, { status: legacy.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+      }
+      return response({ error: "This Computer version does not yet support this MCP operation. Use Native OpenCode → /mcps, or update the Computer." }, 501);
+    }
+    return new Response(result.body, { status: result.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+  }
+  private async desktopControl(request: Request): Promise<Response> {
+    if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
+    const input = await body(request);
+    if (!["acquire", "renew", "release", "input"].includes(String(input.action))) throw new HttpError(400, "Unknown Computer control action.");
+    if (JSON.stringify(input).length > 20_000) throw new HttpError(413, "Computer input is too large.");
+    if (input.action === "acquire" && this.one<any>("SELECT 1 FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NULL AND r.status IN ('provisioning','running','waiting_approval','waiting_human','cancelling','recovering') LIMIT 1"))
+      throw new HttpError(409, "Finish or stop the active task before taking control of the shared Computer.");
+    const transport = await this.transport();
+    const result = await transport.fetch("/desktop/control", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+    if (result.status === 404) return response({ error: "This Computer version supports viewing only. Update the Computer to enable keyboard and mouse control." }, 501);
+    return new Response(result.body, { status: result.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
   }
   private async preview(request: Request): Promise<Response> {
     if (this.maintenance)
@@ -3323,6 +3368,12 @@ export class Workspace {
       }),
     });
     if (!result.ok) {
+      const rejection = await result.clone().json().catch(() => null) as any;
+      if (result.status === 409 && rejection?.code === "human_control_active" && rejection?.notAdmitted === true) {
+        this.state.storage.sql.exec("UPDATE runs SET status='queued',updated_at=? WHERE id=? AND status='provisioning'", isoNow(), run.id);
+        this.state.storage.setAlarm(Date.now() + 3000);
+        return;
+      }
       const current = this.one<any>(
         "SELECT status FROM runs WHERE id=?",
         run.id,
@@ -3463,7 +3514,7 @@ function clientRouteAllowed(request: Request, url: URL): boolean {
   if (/^\/api\/(bots|threads|runs|routines)(?:\/|$)/.test(url.pathname) || url.pathname === "/api/bots" || url.pathname === "/api/threads" || url.pathname === "/api/runs" || url.pathname === "/api/routines") return true;
   if (/^\/api\/(files|catalog)(?:\/|$)/.test(url.pathname)) return true;
   if (/^\/api\/uploads(?:\/|$)/.test(url.pathname)) return true;
-  if (/^\/api\/computer\/(readiness|status|preview)$/.test(url.pathname)) return true;
+  if (/^\/api\/computer\/(readiness|status|preview|control)$/.test(url.pathname)) return true;
   if (url.pathname === "/api/computer/checkpoint" && request.method === "POST") return true;
   if (/^\/api\/terminal(?:\/|$)/.test(url.pathname)) return true;
   // Trusted clients can manage workspace skills; installation/admin routes remain owner-only.

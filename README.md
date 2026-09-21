@@ -70,7 +70,8 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 - **Bots with their own identity.** Instructions, models, memory, and assigned
   skills carry into every new conversation. Rename or delete threads and bots.
 - **See the work.** Markdown replies, live tool activity, approvals, and an
-  expandable view of the browser your bots control.
+  expandable view of the browser your bots control. Take over the shared desktop
+  to sign in directly, then return control. [Computer controls](docs/computer-control.md).
 - **Talk to the right bot.** Bots can ask peers for help and bring their replies
   back into your conversation, and create new persistent bots on request.
 - **OpenCode underneath.** Model and provider setup, API keys, native commands,
@@ -112,7 +113,7 @@ browser, and credentials. Desktop streaming, deletion, and extension installatio
 along with native desktop packaging, are still in development.
 
 Sandbox disk is ephemeral. Use **Computer → Checkpoint** while idle to preserve
-it in R2; compressed checkpoints currently have a 32 MiB limit. Keep your owner
+it in R2; Cloudflare checkpoints support archives up to 2 GiB using multipart R2 storage. Keep your owner
 token private. See [operations](docs/05-operations.md) and [security](SECURITY.md).
 
 ## Develop

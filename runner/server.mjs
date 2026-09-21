@@ -89,7 +89,7 @@ export class RunStore {
 
   async updateConfiguration(fn) {
     await this.recoverNativeOwnership();
-    if (this.paused || this.configuring || this.ownershipUncertain || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
+    if (this.paused || this.configuring || this.ownershipUncertain || this.desktop?.controlStatus?.().active || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
     this.configuring = true;
     try { await this.waitForRuntimeIdle(); return await fn(); }
     finally { this.configuring = false; }
@@ -115,6 +115,7 @@ export class RunStore {
   async start(input) {
     await this.recoverNativeOwnership();
     if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
+    if (this.desktop?.controlStatus?.().active) throw Object.assign(new Error('Computer is under manual control'), { statusCode: 409, code: 'human_control_active', notAdmitted: true });
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
     const commandPrompt = input?.command?.name ? `/${input.command.name} ${input.command.text ?? ""}`.trim() : "";
     const hasAction = Boolean(input?.sessionAction?.name);
@@ -454,7 +455,7 @@ export class RunStore {
 
   async checkpoint() {
     await this.recoverNativeOwnership();
-    if (this.configuring || this.paused || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
+    if (this.configuring || this.paused || this.ownershipUncertain || this.desktop?.controlStatus?.().active) throw httpError(409, "computer settings or checkpoint are being updated");
     this.paused = true;
     // Preserve the fast conflict response for ordinary active work. A run
     // already in review may still be unwinding after an ownership loss, so it
@@ -525,6 +526,7 @@ function loadStableInstanceId(filename) {
 
 export function createServer({ store, authToken = token, botToolToken, workspace = process.env.WORKSPACE_DIRECTORY ?? '/workspace/shared', desktop, terminalRoutes } = {}) {
   if (!authToken) throw new Error('RUNNER_TOKEN is required');
+  store.desktop = desktop;
   const terminals = terminalRoutes ?? createTerminalRoutes({
     resolveConnection: async (sessionId) => {
       if (store.paused || [...store.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish the active task before opening OpenCode.');
@@ -561,6 +563,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (store.paused && req.method !== 'GET') return json(res, 409, { error: 'runner is quiesced' });
         if (await dispatchArtifactRequest(req, res, workspace)) return;
       }
+      if (desktop?.controlStatus?.().active && /^\/(?:terminal|terminals)(?:\/|$)/.test(new URL(req.url, 'http://runner').pathname) && req.method === 'POST' && /\/(?:attach)?$/.test(new URL(req.url, 'http://runner').pathname)) return json(res, 409, { error: 'Computer is under manual control', code: 'human_control_active', notAdmitted: true });
       if (await terminals.handle(req, res)) return;
       if (req.url === "/checkpoint/quiesce" && req.method === "POST") return json(res, 200, await store.checkpoint());
       if (req.url === "/checkpoint/resume" && req.method === "POST") return json(res, 200, await store.resume());
@@ -570,6 +573,23 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       if (store.paused && req.method !== "GET") return json(res, 409, { error: "runner is quiesced" });
       if (await extensions.handle(req, res)) return;
       if (await plugins.handle(req, res)) return;
+      if (desktop && new URL(req.url, 'http://runner').pathname === '/desktop/control' && req.method === 'POST') {
+        const input = await readJson(req);
+        const action = input?.action;
+        if (action === 'acquire') {
+          if (store.paused || store.configuring || store.ownershipUncertain || store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'Finish active work before taking desktop control', code: 'human_control_active', notAdmitted: true });
+          const lease = await store.updateConfiguration(async () => {
+            await desktop.start();
+            return desktop.acquireControl(input.owner ?? 'human');
+          });
+          return json(res, 200, lease);
+        }
+        const leaseId = input.leaseId ?? input.token;
+        if (action === 'renew') return json(res, 200, desktop.renewControl(leaseId));
+        if (action === 'release') return json(res, 200, await desktop.releaseControl(leaseId));
+        if (action === 'input') return json(res, 200, await desktop.input(leaseId, input.input));
+        return json(res, 400, { error: 'unsupported desktop control action' });
+      }
       if (desktop && req.method === "GET" && new URL(req.url, 'http://runner').pathname === "/desktop/status") return json(res, 200, desktop.status());
       if (desktop && req.method === "GET" && ["/desktop/stream", "/preview"].includes(new URL(req.url, 'http://runner').pathname)) {
         if (store.paused) return json(res, 409, { error: "runner is quiesced" });
@@ -596,6 +616,47 @@ export function createServer({ store, authToken = token, botToolToken, workspace
           if (!res.destroyed) res.end();
         }
         return;
+      }
+      const mcpPath = new URL(req.url, 'http://runner').pathname;
+      if (mcpPath === '/mcp' || mcpPath === '/mcps' || mcpPath.startsWith('/mcp/') || mcpPath.startsWith('/mcps/')) {
+        const suffix = mcpPath.replace(/^\/mcps?\/?/, '');
+        const runtime = store.runtime;
+        if (req.method === 'GET' && !suffix) {
+          if (!runtime.mcpList) return json(res, 501, { error: 'MCP API is unavailable' });
+          return json(res, 200, await store.withRuntime(() => runtime.mcpList(workspace)));
+        }
+        if (req.method === 'GET' && suffix === 'resources') {
+          if (!runtime.mcpResources) return json(res, 501, { error: 'MCP resource API is unavailable' });
+          return json(res, 200, await store.withRuntime(() => runtime.mcpResources(workspace)));
+        }
+        const oauthMethods = { 'oauth/start': 'providerOAuthStart', 'oauth/status': 'providerOAuthStatus', 'oauth/complete': 'providerOAuthComplete', 'oauth/cancel': 'providerOAuthCancel' };
+        const oauthMethod = oauthMethods[suffix];
+        if (oauthMethod) {
+          if (req.method !== 'POST' || !runtime[oauthMethod]) return json(res, req.method === 'POST' ? 501 : 405, { error: 'MCP OAuth API is unavailable' });
+          const input = await readJson(req);
+          if (store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'Finish the active request or close Native OpenCode before changing MCP settings.' });
+          try {
+            const invoke = () => runtime[oauthMethod]({ ...input, directory: workspace });
+            const result = await (suffix === 'oauth/status' ? store.withRuntime(invoke) : store.updateConfiguration(invoke));
+            return json(res, 200, result);
+          } catch (error) {
+            if (error?.statusCode === 409) return json(res, 409, { error: 'Finish active work before changing computer settings' });
+            return json(res, 400, { error: 'OpenCode could not complete MCP OAuth. Check integrationID, methodID, and the native OAuth flow.' });
+          }
+        }
+        const methods = { add: 'mcpAdd', remove: 'mcpRemove', connect: 'mcpConnect', disconnect: 'mcpDisconnect' };
+        const method = methods[suffix];
+        if (req.method !== 'POST' || !method) return json(res, 404, { error: 'MCP operation not found' });
+        if (!runtime[method]) return json(res, 501, { error: 'MCP API is unavailable' });
+        const input = await readJson(req);
+        if (store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'Finish the active request or close Native OpenCode before changing MCP settings.' });
+        try {
+          const result = await store.updateConfiguration(() => runtime[method]({ ...input, directory: workspace }));
+          return json(res, 200, result);
+        } catch (error) {
+          if (error?.statusCode === 409) return json(res, 409, { error: 'Finish active work before changing computer settings' });
+          return json(res, 400, { error: 'OpenCode could not complete the MCP operation. Check the server name, configuration, and credentials.' });
+        }
       }
       const providerPath = new URL(req.url,'http://runner').pathname;
       if (providerPath === '/providers' || providerPath.startsWith('/providers/')) {
@@ -667,7 +728,10 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       }
       if (!match) return json(res, 404, { error: "not found" });
       const body = await readJson(req);
-      if (req.method === "POST" && !match[1]) return json(res, 202, await store.start(body));
+      if (req.method === "POST" && !match[1]) {
+        if (desktop?.controlStatus().active) return json(res, 409, { error: 'Computer is under manual control', code: 'human_control_active', notAdmitted: true });
+        return json(res, 202, await store.start(body));
+      }
       if (req.method === "GET" && match[1]) {
         const run = store.get(match[1]);
         if (run && !store.paused) await store.withRuntime(() => store.refresh(run));

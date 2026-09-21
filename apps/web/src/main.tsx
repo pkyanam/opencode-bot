@@ -70,6 +70,7 @@ import { AttachmentCards, ChatAttachments, uploadFiles } from "./components/chat
 import { ToolActivity } from "./components/tool-activity";
 import { FilesExplorer } from "./components/files-explorer";
 import { RunProgress } from "./components/run-progress";
+import { InteractiveComputer } from "./components/interactive-computer";
 const NativeTerminal = React.lazy(() =>
   import("./components/native-terminal").then((module) => ({
     default: module.NativeTerminal,
@@ -193,6 +194,7 @@ function App() {
   const [error, setError] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("connection");
   const [showBot, setShowBot] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const sendInFlight = useRef(false);
@@ -211,6 +213,7 @@ function App() {
   const [computerWarming, setComputerWarming] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [requestedLoginUrl, setRequestedLoginUrl] = useState<string>();
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [liveMessages, setLiveMessages] = useState<Message[]>([]);
   const [threadSessionId, setThreadSessionId] = useState<string>();
@@ -663,6 +666,8 @@ function App() {
             "computer",
             "terminal",
             "help",
+            "mcp",
+            "mcps",
           ].includes(slash[1])
         ) {
           setPrompt("");
@@ -734,6 +739,10 @@ function App() {
     else if (name === "files") setSurface("files");
     else if (name === "computer") setComputerOpen(true);
     else if (name === "terminal") setTerminalOpen(true);
+    else if (name === "mcp" || name === "mcps") {
+      setSettingsTab("mcp");
+      setShowSettings(true);
+    }
     else if (name === "help")
       setError(
         "Use the live palette to run native session commands, or choose a workspace tool.",
@@ -1229,12 +1238,13 @@ function App() {
           </main>
         )}
         {surface === "chat" && (
-          <ComputerPreview
-            key={`${connectionRevision}:${thread?.nodeId ?? "cloudflare"}`}
-            nodeId={thread?.nodeId}
-            open={computerOpen}
-            onToggle={() => setComputerOpen((value) => !value)}
-          />
+            <ComputerPreview
+              key={`${connectionRevision}:${thread?.nodeId ?? "cloudflare"}`}
+              nodeId={thread?.nodeId}
+              open={computerOpen}
+              loginUrl={requestedLoginUrl}
+              onToggle={() => setComputerOpen((value) => !value)}
+            />
         )}
       </div>
       {renaming && (
@@ -1317,6 +1327,8 @@ function App() {
       {showSettings && (
         <SettingsModal
           bots={state.bots}
+          initialTab={settingsTab}
+          onOpenComputer={(url) => { setRequestedLoginUrl(url); setComputerOpen(true); }}
           onClose={() => setShowSettings(false)}
           onSaved={() => {
             setConnected(true);
@@ -1444,6 +1456,8 @@ function CommandPalette({
     { name: "files", description: "Open shared files" },
     { name: "computer", description: "Show the shared computer" },
     { name: "terminal", description: "Open Native OpenCode" },
+    { name: "mcps", description: "Manage MCP services and sign in" },
+    { name: "mcp", description: "Alias for MCP service settings" },
     { name: "help", description: "Show command help" },
   ].filter((entry) =>
     `${entry.name} ${entry.description}`
@@ -1634,10 +1648,12 @@ function CommandPalette({
 function ComputerPreview({
   nodeId,
   open,
+  loginUrl,
   onToggle,
 }: {
   nodeId?: string;
   open: boolean;
+  loginUrl?: string;
   onToggle: () => void;
 }) {
   const [frame, setFrame] = useState<string>();
@@ -1843,16 +1859,12 @@ function ComputerPreview({
               </div>
             )}
             <Dialog open={expanded} onOpenChange={setExpanded}>
-              <DialogContent className="computer-preview-dialog">
+              <DialogContent className="computer-preview-dialog" onEscapeKeyDown={(event) => event.preventDefault()}>
                 <DialogTitle className="computer-preview-dialog-title">
                   Live computer preview
                 </DialogTitle>
                 {frame && (
-                  <img
-                    src={frame}
-                    alt="Live view of the shared computer"
-                    className="computer-preview-expanded-frame"
-                  />
+                  <InteractiveComputer frame={frame} initialUrl={loginUrl} onClose={() => setExpanded(false)} />
                 )}
               </DialogContent>
             </Dialog>
