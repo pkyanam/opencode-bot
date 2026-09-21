@@ -44,10 +44,12 @@ export function normalizeNativeMessages(input: any[]): Message[] {
       const parts: MessagePart[] = [];
       const toolPositions = new Map<string, number>();
       const attachments: Attachment[] = [];
+      const attachmentIds = new Set<string>();
       const addAttachment = (part: any) => {
         const nativeAttachmentId = String(part?.id ?? part?.fileId ?? '').match(/^att_[0-9a-f-]{20,80}$/i)?.[0] ?? String(part?.url ?? part?.uri ?? part?.source ?? '').match(/(?:^|\/)uploads\/(att_[0-9a-f-]{20,80})(?:\/|$)/i)?.[1];
         if (!nativeAttachmentId) return;
-        if (attachments.some(item => item.id === nativeAttachmentId)) return;
+        if (attachmentIds.has(nativeAttachmentId)) return;
+        attachmentIds.add(nativeAttachmentId);
         attachments.push({ id: nativeAttachmentId, name: String(part?.name ?? part?.filename ?? 'Attachment'), mimeType: String(part?.mimeType ?? part?.mime ?? 'application/octet-stream'), size: Number(part?.size ?? 0) || 0 });
       };
       for (const attachment of [...(m.attachments ?? []), ...(m.files ?? [])]) addAttachment(attachment);
@@ -88,11 +90,33 @@ export function mergeActivityMessages(messages: Message[], runs: import('../api'
       notices.push({id:`activity-${event.id ?? `${run.id}-${type}`}`,role:'system',content,createdAt:event.createdAt ?? run.updatedAt});
     }
   }
-  const orderedRuns = [...runs].sort((a,b)=>(a.createdAt??'').localeCompare(b.createdAt??''));
+  // Tool parts are commonly numerous during a run. Resolve their owning run
+  // once with a binary search instead of filtering every run for every tool.
+  // The previous scan was O(toolParts * runs), which became visible on long
+  // transcripts with several concurrent runs.
+  const terminalRuns = runs
+    .filter(run => !['queued','waiting_dependency'].includes(run.status) && (run.startedAt ?? run.createdAt))
+    .sort((a,b) => (a.startedAt ?? a.createdAt ?? '').localeCompare(b.startedAt ?? b.createdAt ?? ''));
+  const ownerFor = (started?: string) => {
+    if (!started) return undefined;
+    let low = 0;
+    let high = terminalRuns.length - 1;
+    let owner: import('../api').Run | undefined;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const candidate = terminalRuns[middle];
+      const candidateStarted = candidate.startedAt ?? candidate.createdAt ?? '';
+      if (candidateStarted <= started) {
+        owner = candidate;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    return owner;
+  };
   const settledMessages = messages.map(message=>({...message, parts:message.parts?.map(part=>{
     if(part.type !== 'tool' || !['running','queued'].includes(part.status)) return part;
     const started = part.startedAt ?? message.createdAt;
-    const owner = started ? orderedRuns.filter(run=>!['queued','waiting_dependency'].includes(run.status) && (run.startedAt??run.createdAt) && (run.startedAt??run.createdAt)! <= started).at(-1) : undefined;
+    const owner = ownerFor(started);
     if(!owner || !['failed','cancelled','succeeded','needs_review'].includes(owner.status)) return part;
     return {...part, status:'interrupted' as const, error:part.error ?? 'This task ended before the tool reported a result.'};
   })}));

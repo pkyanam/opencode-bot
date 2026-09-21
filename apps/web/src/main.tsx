@@ -383,9 +383,13 @@ function App() {
   useEffect(() => {
     setComposerModel(bot?.model ?? "");
   }, [bot?.id, bot?.model]);
-  const runs = state.runs
-    .filter((r) => r.threadId === thread?.id)
-    .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+  const runs = useMemo(
+    () => state.runs
+      .filter((r) => r.threadId === thread?.id)
+      .slice()
+      .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "")),
+    [state.runs, thread?.id],
+  );
   const latestTerminal = runs[runs.length - 1];
   const latest =
     runs
@@ -548,13 +552,13 @@ function App() {
   const conversation = mergeDelegationTimeline(transcript, delegations);
   const working = latest && isActive(latest.status);
   const latestStatus = (latest?.status ?? "").toLowerCase();
-  const botWorking = Boolean(
-    bot &&
-      state.runs.some((run) => {
-        const runThread = state.threads.find((item) => item.id === run.threadId);
-        return runThread?.botId === bot.id && isActive(run.status);
-      }),
-  );
+  const botWorking = useMemo(() => {
+    if (!bot) return false;
+    const botThreadIds = new Set(
+      state.threads.filter((item) => item.botId === bot.id).map((item) => item.id),
+    );
+    return state.runs.some((run) => botThreadIds.has(run.threadId) && isActive(run.status));
+  }, [bot, state.runs, state.threads]);
   const nativeSessionLocked = terminalOpen || Boolean(working) || submitting;
   const composerBusy = submitting || attachmentsUploading;
   const chatScroll = useRef<HTMLDivElement>(null);
