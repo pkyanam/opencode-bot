@@ -2314,6 +2314,38 @@ a:focus-visible {
   font-size: 13px;
   color: #aaa09a;
 }
+.computer-warmup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 16px 24px 0;
+  padding: 14px 16px;
+  border: 1px solid #3a342f;
+  border-radius: 6px;
+  background: #1d1a18;
+  color: #d7cec6;
+}
+.computer-warmup div {
+  display: grid;
+  gap: 4px;
+}
+.computer-warmup strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.computer-warmup span {
+  color: #a99d94;
+  font-size: 11px;
+  line-height: 1.5;
+}
+@media (max-width: 700px) {
+  .computer-warmup {
+    align-items: flex-start;
+    flex-direction: column;
+    margin: 12px 14px 0;
+  }
+}
 .computer-rail {
   flex-shrink: 0;
   background: #191817;
@@ -3534,6 +3566,67 @@ a:focus-visible {
 }
 .custom-provider-grid > label:nth-child(n + 3) {
   grid-column: 1/-1;
+}
+.app-updates {
+  display: grid;
+  gap: 16px;
+}
+.app-updates .settings-section-head {
+  margin-bottom: 0;
+}
+.app-update-copy,
+.update-config p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+}
+.update-config {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  display: grid;
+  gap: 10px;
+}
+.update-config h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.update-config .primary-btn {
+  justify-self: start;
+  margin-top: 6px;
+}
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--cream);
+  font-size: 12px;
+}
+.update-recovery {
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--cream);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.update-recovery span {
+  color: var(--muted);
+}
+.update-recovery .primary-btn {
+  justify-self: start;
+  margin-top: 4px;
+}
+.app-updates .settings-actions {
+  flex-wrap: wrap;
+}
+.app-updates .settings-actions a {
+  text-decoration: none;
 }
 .custom-provider textarea {
   resize: vertical;

@@ -119,6 +119,30 @@ export type ComputerStatus = {
   durable?: boolean;
   computerId?: string;
 };
+export type ComputerReadiness = {
+  state: "starting" | "ready" | "error" | string;
+  startedAt?: string;
+  error?: string;
+  retryAfterMs?: number;
+};
+export type UpdateJob = {
+  id?: string;
+  phase?: string;
+  requestedVersion?: string;
+  error?: string;
+  startedAt?: string;
+  updatedAt?: string;
+};
+export type UpdateStatus = {
+  currentVersion: string;
+  latestVersion?: string;
+  available: boolean;
+  configured: boolean;
+  configuration?: { accountId?: string; workerName?: string };
+  job?: UpdateJob;
+  releaseUrl?: string;
+  checkError?: string;
+};
 export type Skill = {
   id: string;
   name: string;
@@ -190,6 +214,18 @@ if (typeof window !== "undefined") {
   consumeConnectionFragment(window.location, window.history, window.localStorage);
 }
 export const CONNECTION_EVENT = "opencode-bot-connection-change";
+/** True when the shared Computer is still coming online. */
+export const isComputerWarmingUpError = (error: unknown) => {
+  const status = error && typeof error === "object" && "status" in error
+    ? Number((error as { status?: unknown }).status)
+    : undefined;
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (code) return code === "computer_starting";
+  return (status === undefined || status === 503) && /computer (?:is )?(?:starting|warming up)|warming up in the background/i.test(message);
+};
 // Connection credentials belong to this installation, not one browser tab.
 // Migrate existing tabs once and share subsequent changes across the origin.
 export const getToken = () => {
@@ -230,9 +266,11 @@ export async function request<T>(
     const body = await response.text();
     if (response.status === 401) {
       if (getToken() && getToken() !== token) return request<T>(path, init);
-      throw new Error(
+      const error = new Error(
         "Connection needs attention. Update the application token in Settings.",
-      );
+      ) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
     }
     let message = body;
     try {
@@ -241,7 +279,15 @@ export async function request<T>(
     } catch {
       /* plain text response */
     }
-    throw new Error(message || `${response.status} ${response.statusText}`);
+    const error = new Error(message || `${response.status} ${response.statusText}`) as Error & { status?: number; code?: string };
+    error.status = response.status;
+    try {
+      const parsed = JSON.parse(body) as { code?: unknown };
+      if (typeof parsed.code === "string") error.code = parsed.code;
+    } catch {
+      /* plain text response */
+    }
+    throw error;
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -372,6 +418,21 @@ export const api = {
       method: "DELETE",
     }),
   computerStatus: () => request<ComputerStatus>("/api/computer/status"),
+  computerReadiness: () => request<ComputerReadiness>("/api/computer/readiness"),
+  updates: () => request<UpdateStatus>("/api/updates"),
+  configureUpdates: (payload: { accountId: string; workerName: string; token: string }) =>
+    request<UpdateStatus>("/api/updates/configure", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  removeUpdatesConfiguration: () =>
+    request<void>("/api/updates/configure", { method: "DELETE" }),
+  startUpdate: (version: string) =>
+    request<UpdateStatus>("/api/updates", {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    }),
+  recoverUpdate: () => request<UpdateStatus>("/api/updates/recover", { method: "POST" }),
   checkpoint: () =>
     request<ComputerStatus>("/api/computer/checkpoint", { method: "POST" }),
   restoreCheckpoint: (checkpointId?: string) =>

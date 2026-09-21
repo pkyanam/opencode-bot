@@ -10,6 +10,13 @@ deployment contract and cost model, see [Cloudflare setup](03-cloudflare-setup.m
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash
 ```
 
+Before running it, have Bash, `curl`, internet access, and Git available on
+macOS or Linux; use WSL2 on Windows. Homebrew is the only Git installation the
+installer performs automatically. Node.js 24+ and npm are optional because a
+missing or older Node runtime is installed in the user-local runtime directory.
+The pinned Wrangler package is installed by project `npm ci`; no global
+Cloudflare CLI is replaced.
+
 The installer downloads a release manifest and checks out its exact Git commit.
 Schema 2 manifests pin the computer image by Docker Hub digest; Cloudflare
 pulls that public image directly during deployment. The installer
@@ -25,6 +32,14 @@ asks which to use. For unattended setup, supply `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` through your agent's secret environment. A recorded
 account cannot silently switch on a later run.
 
+If Wrangler is not authenticated, the installer starts its browser login flow.
+Because the command is piped through Bash, interactive login and ambiguous
+account selection require `/dev/tty`; a noninteractive run should provide
+`CLOUDFLARE_ACCOUNT_ID` and an existing Wrangler/API-token login. The Cloudflare
+account must already have Workers Paid, Containers access, and R2 enabled.
+Account creation, login consent, billing activation, and terms acceptance remain
+manual steps.
+
 The installer does not enable paid services or accept account terms. If R2
 reports error `10042`, enable it in the Cloudflare dashboard and rerun the same
 command. Workers Paid/Containers eligibility and initial workers.dev account
@@ -37,10 +52,35 @@ in a URL fragment; the app consumes and removes that fragment. The file and
 cannot open a browser, open `open.html` yourself. The printed app URL contains
 no token.
 
+The first cloud computer can take a few minutes to boot. After it is ready, the
+browser workspace exposes it and work continues while the browser is closed.
+
 To choose a different checkout, download the script and set `OCBOT_INSTALL_DIR`
 when invoking Bash. Existing dirty or unrelated checkouts are never overwritten.
 Resource names live in `infra/deployment.json` and `wrangler.jsonc`; change both
 before a manual setup apply if you need a separate deployment.
+
+## Updates from Settings
+
+Open **Settings → Updates** to check the installed release. Enable update access
+once using a Cloudflare API token for the hosting account with Workers Scripts
+Write and Containers Write permissions. The account and Worker name are filled
+from your installation. This deployment token stays in the control server's
+private storage; it is never supplied to bots or returned to the browser.
+The owner token that signs you into the app is a separate credential.
+
+When a newer compatible release is available, finish active tasks and click
+**Update**. The app verifies the release bundle, saves and verifies an R2
+checkpoint, updates Worker code and web assets, rolls out the pinned computer
+image, restores its checkpoint, and checks readiness. Cloudflare performs a
+deployment behind the scenes; no terminal or local Docker is needed. Reload
+when Settings reports completion.
+
+If an update pauses after activation, the app keeps its checkpoint and prevents
+new work. Settings shows the failed step and a **Resume update** action. Correct
+expired deployment access if needed, then resume. It does not claim an automatic
+rollback or discard the checkpoint. Releases requiring a new infrastructure
+binding or migration may require the documented manual setup path.
 
 ## Local preview
 

@@ -438,6 +438,24 @@ it('reconciles runner bot requests exactly once and resumes the source after the
   expect(remote.submitted).toHaveLength(before);
 });
 
+it('reconciles bot creation requests into persisted bots and reports the result', async () => {
+  const f = fixture();
+  const source = await f.request('/api/bots', 'POST', { name: 'Architect', model: 'test/model' });
+  const thread = await f.request('/api/threads', 'POST', { botId: source.body.id, title: 'Create a teammate' });
+  const run = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Create a writer bot', idempotencyKey: 'tool-create-writer' });
+  await f.alarm();
+  const remoteRun = remote.runs.get(run.body.id);
+  remoteRun.botCreationRequests = [{ id: 'create-1', name: 'Writer', instructions: 'Draft reports.', model: 'test/model', agent: '' }];
+  remoteRun.status = 'succeeded'; remoteRun.final = 'Queued bot creation.';
+  for (let i = 0; i < 4; i++) await f.alarm();
+  const bots = (await f.request('/api/bots')).body;
+  expect(bots.map((item: any) => item.name)).toContain('Writer');
+  expect((await f.request('/api/state')).body.threads).toHaveLength(1);
+  expect(remote.submitted.some((item: any) => item.allowBotMessaging === false && String(item.prompt).includes('Created Writer'))).toBe(true);
+  for (let i = 0; i < 4; i++) await f.alarm();
+  expect((await f.request('/api/bots')).body.filter((item: any) => item.name === 'Writer')).toHaveLength(1);
+});
+
 it('records invalid and ancestor bot requests without retrying or creating a loop', async () => {
   const f = fixture();
   const source = await f.request('/api/bots', 'POST', { name: 'Source', model: 'test/model' });

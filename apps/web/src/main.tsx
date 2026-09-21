@@ -48,6 +48,7 @@ import {
   ComputerStatus,
   FileArtifact,
   getToken,
+  isComputerWarmingUpError,
   MemoryItem,
   Message,
   Routine,
@@ -160,6 +161,8 @@ function App() {
   const [composerModel, setComposerModel] = useState("");
   const [catalog, setCatalog] = useState<Catalog>({});
   const [catalogError, setCatalogError] = useState("");
+  const [catalogWarming, setCatalogWarming] = useState(false);
+  const [computerWarming, setComputerWarming] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -199,15 +202,66 @@ function App() {
       .then((value) => {
         setCatalog(value);
         setCatalogError("");
+        setCatalogWarming(false);
       })
-      .catch((e) =>
+      .catch((e) => {
+        if (isComputerWarmingUpError(e)) {
+          setCatalogWarming(true);
+          setCatalogError("");
+          return;
+        }
+        setCatalogWarming(false);
         setCatalogError(
           e instanceof Error ? e.message : "Live catalog unavailable",
-        ),
-      );
+        );
+      });
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    const pollReadiness = async () => {
+      try {
+        const readiness = await api.computerReadiness();
+        if (cancelled) return;
+        if (readiness.state === "ready") {
+          setComputerWarming(false);
+          return;
+        }
+        if (readiness.state === "error") {
+          setComputerWarming(false);
+          return;
+        }
+        setComputerWarming(true);
+      } catch (e) {
+        if (!cancelled && isComputerWarmingUpError(e)) setComputerWarming(true);
+      }
+      if (!cancelled) retryTimer = window.setTimeout(pollReadiness, 3000);
+    };
+    void pollReadiness();
     const id = window.setInterval(() => refresh(true), 4000);
-    return () => window.clearInterval(id);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(retryTimer);
+      window.clearInterval(id);
+    };
   }, [connectionRevision]);
+  useEffect(() => {
+    if (!catalogWarming || !getToken()) return;
+    const timer = window.setInterval(() => {
+      api
+        .catalog()
+        .then((value) => {
+          setCatalog(value);
+          setCatalogError("");
+          setCatalogWarming(false);
+        })
+        .catch((e) => {
+          if (!isComputerWarmingUpError(e)) {
+            setCatalogWarming(false);
+            setCatalogError(e instanceof Error ? e.message : "Live catalog unavailable");
+          }
+        });
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [catalogWarming]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -721,6 +775,20 @@ function App() {
           <FilesWorkspace />
         ) : (
           <main className="main">
+            {(computerWarming || catalogWarming) && (
+              <div className="computer-warmup" role="status">
+                <div>
+                  <strong>Your Computer is starting in the background</strong>
+                  <span>
+                    You can explore bots, skills, and Settings while it
+                    gets ready. Computer features will reconnect automatically.
+                  </span>
+                </div>
+                <button className="soft-btn" onClick={() => setComputerOpen(true)}>
+                  View Computer
+                </button>
+              </div>
+            )}
             <div className="conversation-head">
               <div>
                 {bot ? (
@@ -1439,7 +1507,11 @@ function ComputerPreview({
         if (!cancelled) {
           const message =
             e instanceof Error ? e.message : "Computer preview unavailable";
-          setError(message);
+          setError(
+            isComputerWarmingUpError(e)
+              ? "Your Computer is still starting. The preview will reconnect automatically."
+              : message,
+          );
           setFrame(undefined);
           if (
             !message.includes("Connection needs attention") &&

@@ -25,6 +25,7 @@ import {
 } from "./ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { OpenCodeProviders } from "./opencode-providers";
+import { AppUpdates } from "./app-updates";
 
 type Node = {
   id: string;
@@ -156,6 +157,10 @@ export function SettingsModal({
             <TabsTrigger value="runtime">
               <Server size={16} />
               OpenCode
+            </TabsTrigger>
+            <TabsTrigger value="updates">
+              <RefreshCw size={16} />
+              Updates
             </TabsTrigger>
           </TabsList>
           <div className="settings-body">
@@ -615,6 +620,9 @@ export function SettingsModal({
                 conversation to use its full command catalog and provider
                 controls.
               </p>
+            </TabsContent>
+            <TabsContent value="updates">
+              <AppUpdates />
             </TabsContent>
           </div>
         </Tabs>

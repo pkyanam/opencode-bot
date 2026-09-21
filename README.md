@@ -21,18 +21,25 @@ watch them work, and let them ask each other for help. Powered by
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash
 ```
 
-The installer downloads the app, checks prerequisites, signs in to Cloudflare,
-and deploys the release’s pinned prebuilt computer image directly from Docker
-Hub. Cloudflare pulls the image; the installer never downloads, builds, or
-uploads a local image and never needs Docker Hub credentials. It creates the
-Worker, database, Sandbox computer, and R2 bucket, then opens your workspace.
-macOS and Linux are supported; on Windows, use WSL2. **Docker is not required
-for installation.** You'll need a Cloudflare account with
-Workers Paid, Containers access, and R2 enabled. Hosting and model usage are billed
-by their providers. Account signup, billing activation, and login may need you.
+The installer deploys a pinned release to your Cloudflare account and opens the
+workspace in your browser. Cloudflare pulls the prebuilt computer image directly;
+**you do not need Docker or a Docker Hub account.**
 
-The default checkout is `~/.local/share/opencode-bot`. Rerun the same command to
-resume installation. Releases pin the app source and computer image together.
+**Prerequisites**
+
+- macOS, Linux, or Windows with WSL2; Bash, `curl`, Git, and internet access.
+- Cloudflare account with Workers Paid, Containers access, and R2 enabled.
+- An interactive terminal for browser login and account selection, unless your
+  agent already has Cloudflare credentials.
+
+The script installs Node.js 24+ locally when needed and installs its pinned
+**Wrangler** CLI through npm. It opens Cloudflare login if you are signed out.
+On macOS, existing Homebrew can install missing Git; elsewhere, install Git first.
+Cloudflare signup, billing activation, and login consent may need you.
+
+Your first computer can take a few minutes to start; explore the workspace while
+it boots. The default checkout is `~/.local/share/opencode-bot`. Rerun the command
+to resume installation. Hosting and models are billed by their providers.
 [Setup details and troubleshooting →](docs/getting-started.md)
 
 ### Or hand it to your agent
@@ -48,12 +55,14 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 - **See the work.** Markdown replies, live tool activity, approvals, and an
   expandable view of the browser your bots control.
 - **Talk to the right bot.** Bots can ask peers for help and bring their replies
-  back into your conversation.
+  back into your conversation, and create new persistent bots on request.
 - **OpenCode underneath.** Model and provider setup, API keys, native commands,
   and a built-in terminal. Browse skills and plugin resources under Skills.
 - **Take it to Telegram.** Connect a BotFather bot, scan the pairing link, and
   receive formatted replies and progress. Local mode uses polling; Cloudflare
   uses HTTPS webhooks.
+- **Update from Settings.** Connect deployment access once, then update the app
+  and computer together with a saved checkpoint.
 - **Bring another computer.** An outbound node agent can pair your Mac, Linux,
   or Windows machine. Cloudflare is the default computer.
 

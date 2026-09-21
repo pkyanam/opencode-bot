@@ -71,6 +71,7 @@ function writeDeploymentConfig(config, image) {
   const absolute = (value) => typeof value === "string" ? resolve(root, value) : value;
   delete source.$schema;
   source.account_id = cloudflareAccount(config);
+  source.vars = { ...source.vars, APP_ACCOUNT_ID: source.account_id, APP_WORKER_NAME: source.name };
   source.main = absolute(source.main);
   if (source.assets?.directory) source.assets.directory = absolute(source.assets.directory);
   if (source.containers?.[0]) {

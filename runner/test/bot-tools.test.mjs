@@ -43,10 +43,28 @@ test('native MCP stdio handshake and tool call reach only bot capabilities', asy
   const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../bot-mcp.mjs',import.meta.url))],env:{BOT_TOOLS_URL:`http://127.0.0.1:${server.address().port}/bot-tools`,BOT_TOOLS_TOKEN:'limited'}});
   try {
     await client.connect(transport);
-    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','get_replies']);
+    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','get_replies','create_bot']);
     const result=await client.callTool({name:'send_message',arguments:{targetBotId:'scout',prompt:'Say hello'}});
     assert.equal(result.isError,undefined);
     assert.equal(JSON.parse(result.content[0].text).status,'queued');
     assert.equal(store.public(store.get('r2')).delegationRequests.length,1);
   } finally { await client.close(); server.close(); }
+});
+
+test('create_bot is bounded, idempotent per turn, and never exposes runner auth', async () => {
+  const store=new RunStore({});
+  store.runs.set('r3',{id:'r3',status:'running',allowBotMessaging:true,botDirectory:[],events:[],delegationRequests:[],botCreationRequests:[]});
+  const server=createServer({store,authToken:'owner',botToolToken:'limited'});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const call=(name,args={},token='limited')=>fetch(`http://127.0.0.1:${server.address().port}/bot-tools`,{method:'POST',headers:{authorization:`Bearer ${token}`},body:JSON.stringify({name,arguments:args})});
+  try {
+    const args={name:'Writer',instructions:'Draft concise reports.',model:'test/model'};
+    const first=await (await call('create_bot',args)).json();
+    assert.equal(first.status,'queued');
+    assert.equal((await (await call('create_bot',args)).json()).id,first.id);
+    assert.equal(store.get('r3').botCreationRequests.length,1);
+    assert.equal((await call('create_bot',{name:'x'.repeat(161)})).status,400);
+    assert.equal((await call('create_bot',{name:'No token'})).status,200);
+    assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/runs/r3`,{headers:{authorization:'Bearer limited'}})).status,401);
+  } finally { server.close(); }
 });

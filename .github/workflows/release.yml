@@ -54,6 +54,14 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || inputs.version) || github.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install application dependencies
+        run: npm ci
+      - name: Build web assets
+        run: npm run build
       - id: release
         shell: bash
         env:
@@ -117,16 +125,21 @@ jobs:
           IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
           BUILD_DIGEST: ${{ steps.push.outputs.digest }}
         run: |
+          node scripts/release/build-bundle.mjs \
+            --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --image-reference "$IMAGE_REFERENCE" --image-digest "$BUILD_DIGEST"
           node scripts/release/write-manifest.mjs --output release-manifest.json \
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
-            --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE"
-          sha256sum release-manifest.json > SHA256SUMS
+            --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE" --bundle .tmp/update-bundle/app-bundle.json
+          cp .tmp/update-bundle/app-bundle.json app-bundle.json
+          sha256sum release-manifest.json app-bundle.json > SHA256SUMS
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: release-bundle
           retention-days: 3
           path: |
             release-manifest.json
+            app-bundle.json
             SHA256SUMS
           if-no-files-found: error
   publish:
@@ -149,11 +162,11 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
             test "$draft" = true || { echo "release $RELEASE_TAG already exists and is published" >&2; exit 1; }
-            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json SHA256SUMS
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json app-bundle.json SHA256SUMS
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
-              --generate-notes --draft release-manifest.json SHA256SUMS
+              --generate-notes --draft release-manifest.json app-bundle.json SHA256SUMS
           fi
       - name: Publish release atomically
         env:

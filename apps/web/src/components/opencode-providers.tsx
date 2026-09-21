@@ -13,7 +13,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { request } from "../api";
+import { isComputerWarmingUpError, request } from "../api";
 
 type FormField = {
   key: string;
@@ -134,6 +134,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const [editingConnection, setEditingConnection] = useState("");
   const [connectionLabel, setConnectionLabel] = useState("");
   const [customOpen, setCustomOpen] = useState(false);
+  const computerWarming = isComputerWarmingUpError(error);
   const integrations = data?.integrations ?? [];
   const providers = data?.providers ?? [];
   const providerChoices = useMemo(
@@ -196,6 +197,11 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => {
+    if (!computerWarming) return;
+    const timer = window.setInterval(() => void load(), 3500);
+    return () => window.clearInterval(timer);
+  }, [computerWarming]);
   useEffect(() => {
     const next: ProviderValues = {};
     for (const method of methods) {
@@ -419,7 +425,9 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
       </div>
       {error && (
         <div className="inline-error" role="alert">
-          {error}
+          {computerWarming
+            ? "Your Computer is starting. Provider connections will appear automatically when OpenCode is ready."
+            : error}
         </div>
       )}
       {notice && (
@@ -485,7 +493,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
           );
         })}
         {!filtered.length && (
-          <p className="settings-muted">{busy && !data ? "Loading native provider catalog…" : "No providers match this search."}</p>
+          <p className="settings-muted">{computerWarming ? "Waiting for OpenCode to finish starting…" : busy && !data ? "Loading native provider catalog…" : "No providers match this search."}</p>
         )}
       </div>
       {integration && (

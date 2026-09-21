@@ -82,7 +82,7 @@ export class RunStore {
       return this.public(existing);
     }
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -99,6 +99,26 @@ export class RunStore {
     if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
     if (name === 'list_bots') return { bots: run.botDirectory ?? [] };
     if (name === 'get_replies') return { replies: run.delegationHistory ?? [], pending: run.delegationRequests ?? [] };
+    if (name === 'create_bot') {
+      if (!run.allowBotMessaging) throw httpError(409, 'This turn cannot create bots while receiving replies.');
+      const nameValue = typeof args.name === 'string' ? args.name.trim() : '';
+      if (!nameValue || nameValue.length > 160) throw httpError(400, 'Bot name must contain between 1 and 160 characters');
+      const instructions = args.instructions === undefined ? '' : args.instructions;
+      const model = args.model === undefined ? '' : args.model;
+      const agent = args.agent === undefined ? '' : args.agent;
+      if (typeof instructions !== 'string' || instructions.length > 20000) throw httpError(400, 'Bot instructions must contain 0 to 20000 characters');
+      if (typeof model !== 'string' || model.length > 320) throw httpError(400, 'Bot model must contain 0 to 320 characters');
+      if (typeof agent !== 'string' || agent.length > 160) throw httpError(400, 'Bot agent must contain 0 to 160 characters');
+      run.botCreationRequests ??= [];
+      const existing = run.botCreationRequests.find(item => item.name === nameValue && item.instructions === instructions && item.model === model && item.agent === agent);
+      if (existing) return { ...existing, status: 'queued', instruction: 'End this turn to create the bot. Its settings and conversations will be available afterward.' };
+      if (run.botCreationRequests.length >= 4) throw httpError(429, 'Maximum four bot creations per turn');
+      const request = { id: randomUUID(), name: nameValue, instructions, model, agent };
+      run.botCreationRequests.push(request);
+      this.emit(run, 'bot.creation.queued', request);
+      this.persist(run);
+      return { ...request, status: 'queued', instruction: 'End this turn to create the bot. Its settings and conversations will be available afterward.' };
+    }
     if (name !== 'send_message') throw httpError(404, 'Unknown bot tool');
     if (!run.allowBotMessaging) throw httpError(409, 'This turn is receiving replies. Summarize them for the user instead of sending more messages.');
     if (typeof args.targetBotId !== 'string' || !(run.botDirectory ?? []).some(bot=>bot.id===args.targetBotId)) throw httpError(400, 'Choose an exact target ID from list_bots');
@@ -301,7 +321,7 @@ export class RunStore {
   }
 
   emit(run, type, data) { run.events.push({ seq: run.events.length + 1, type, data }); this.persist(run); }
-  public(run) { return { delegationRequests: run.delegationRequests ?? [], runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
+  public(run) { return { delegationRequests: run.delegationRequests ?? [], botCreationRequests: run.botCreationRequests ?? [], runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
   load() {
     fs.mkdirSync(this.stateDir, { recursive: true });
     for (const file of fs.readdirSync(this.stateDir).filter((name) => name.endsWith(".json"))) {

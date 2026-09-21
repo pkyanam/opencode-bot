@@ -13,7 +13,9 @@ Each release contains:
   commit. Deployments use the immutable digest reference.
 - `release-manifest.json`, with schema version 2, the exact source commit,
   runtime versions, platform, and `image.reference`.
-- `SHA256SUMS` for the manifest asset.
+- `app-bundle.json`, containing the compiled Worker modules, web assets, routing
+  configuration, and pinned computer image for Settings → Updates.
+- A manifest checksum and size for that bundle, plus `SHA256SUMS` for both files.
 
 The workflow requires the repository secret `DOCKERHUB_TOKEN` and the optional
 repository variable `DOCKERHUB_USERNAME` (default `preethamk`). The token is
@@ -26,7 +28,7 @@ used only in the image publishing job and is never available to pull requests.
 3. Push a matching version tag, for example `git tag v0.1.2 && git push origin v0.1.2`.
 4. Watch the Release workflow. It verifies the app, builds and smoke-tests the
    image, pushes both the version and commit tags, resolves the public digest,
-   and publishes a GitHub Release only after the manifest is ready.
+   and publishes a GitHub Release only after the image, manifest, and app bundle are ready.
 
 Published release versions are immutable. Re-running a failed workflow may
 complete an unpublished draft; a published release cannot be replaced.

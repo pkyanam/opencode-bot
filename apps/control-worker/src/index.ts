@@ -1,3 +1,6 @@
+import { UpdateController } from "./update-controller";
+import packageInfo from "../../../package.json";
+import { ComputerStartup } from "./computer-startup";
 import { telegramActivity } from "./telegram-activity";
 import { NodeRegistry } from "../../../packages/nodes/src/index";
 import {
@@ -30,6 +33,8 @@ type Env = {
   SANDBOX?: DurableObjectNamespace;
   ASSETS?: Fetcher;
   APP_TOKEN?: string;
+  APP_ACCOUNT_ID?: string;
+  APP_WORKER_NAME?: string;
   RUNNER_TOKEN?: string;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -102,6 +107,8 @@ class HttpError extends Error {
 export class Workspace {
   private initialized = false;
   private maintenance = false;
+  private readonly startup = new ComputerStartup();
+  private updateController?: UpdateController;
   private computerProvider?: CloudflareComputerProvider;
   private computerCoordinator?: ComputerManager;
   constructor(
@@ -503,6 +510,12 @@ export class Workspace {
       `CREATE TABLE IF NOT EXISTS delegation_continuations (source_run_id TEXT PRIMARY KEY, status TEXT NOT NULL, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
     sql.exec(
+      `CREATE TABLE IF NOT EXISTS bot_creation_requests (run_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, bot_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, request_id))`,
+    );
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS bot_creation_continuations (source_run_id TEXT PRIMARY KEY, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    );
+    sql.exec(
       `CREATE INDEX IF NOT EXISTS events_run_seq ON events(run_id, sequence)`,
     );
     sql.exec(
@@ -575,7 +588,26 @@ export class Workspace {
   async fetch(request: Request): Promise<Response> {
     this.init();
     const url = new URL(request.url);
+    const computerDependent = /^\/api\/(catalog|providers(?:\/.*)?|computer\/(status|preview)|terminal(?:\/.*)?)$/.test(url.pathname);
     try {
+      if (url.pathname === "/api/updates" || url.pathname.startsWith("/api/updates/"))
+        return await this.updateRoute(request, url);
+      if (typeof this.state.storage.get === "function" && await this.updates(url).active()) {
+        if (url.pathname === "/api/computer/readiness") return response({ state: "starting", reason: "app_updating", retryAfterMs: 5000 });
+        if (computerDependent || !["GET", "HEAD"].includes(request.method))
+          return response({ error: "The app is updating. You can follow its progress in Settings → Updates.", code: "app_updating" }, 503);
+      }
+      if (url.pathname === "/api/computer/readiness" && ["GET", "POST"].includes(request.method))
+        return response(this.computerReadiness(request.method === "POST"));
+      if (computerDependent) {
+        const readiness = this.computerReadiness();
+        if (readiness.state !== "ready") return response({
+          ...readiness,
+          code: readiness.state === "starting" ? "computer_starting" : "computer_unavailable",
+          error: readiness.error ?? "Your computer is starting. You can explore the app while it gets ready.",
+        }, 503, { "retry-after": "3" });
+      }
+
       if (
         url.pathname === "/api/nodes" ||
         url.pathname.startsWith("/api/nodes/")
@@ -748,6 +780,11 @@ export class Workspace {
         return response(await this.approve(approval[1], await body(request)));
       throw new HttpError(404, "not found");
     } catch (error) {
+      if (computerDependent && /timeout|timed out|container.*start|not.*running|port.*available/i.test(error instanceof Error ? error.message : String(error))) {
+        this.startup.invalidate();
+        const readiness = this.computerReadiness();
+        return response({ ...readiness, code: "computer_starting", error: "Your computer is reconnecting. Please try again shortly." }, 503, { "retry-after": "3" });
+      }
       if (error instanceof HttpError)
         return response({ error: error.message }, error.status);
       console.error(error);
@@ -877,8 +914,16 @@ export class Workspace {
     return { deleted: true, id: routineId };
   }
   private createBot(input: any): any {
-    if (!input.name || typeof input.name !== "string")
+    if (typeof input.name !== "string" || !input.name.trim())
       throw new HttpError(400, "name is required");
+    if (input.name.trim().length > 160)
+      throw new HttpError(400, "name must contain 1–160 characters");
+    if (input.instructions !== undefined && String(input.instructions).length > 20000)
+      throw new HttpError(400, "instructions must contain 0–20000 characters");
+    if (input.model !== undefined && String(input.model).length > 320)
+      throw new HttpError(400, "model must contain 0–320 characters");
+    if (input.agent !== undefined && String(input.agent).length > 160)
+      throw new HttpError(400, "agent must contain 0–160 characters");
     const nodeId =
       input.nodeId === undefined || input.nodeId === null || input.nodeId === ""
         ? null
@@ -1796,6 +1841,12 @@ export class Workspace {
 
   async alarm(): Promise<void> {
     this.init();
+    if (typeof this.state.storage.get === "function" && await this.updates().active()) {
+      this.maintenance = true;
+      try { await this.updates().resume(); }
+      finally { this.maintenance = await this.updates().active(); }
+      return;
+    }
     if (this.maintenance) {
       this.state.storage.setAlarm(Date.now() + 1000);
       return;
@@ -1980,6 +2031,77 @@ export class Workspace {
     if (typeof this.state.storage.get !== "function") return 1;
     return (await this.state.storage.get<number>("computer-generation")) ?? 1;
   }
+  private updates(origin?: URL): UpdateController {
+    return this.updateController ??= new UpdateController({
+      storage: this.state.storage,
+      currentVersion: packageInfo.version,
+      identity: {
+        accountId: this.env.APP_ACCOUNT_ID,
+        workerName: this.env.APP_WORKER_NAME ?? (origin?.hostname.endsWith(".workers.dev") ? origin.hostname.split(".")[0] : undefined),
+      },
+      schedule: () => { this.state.storage.setAlarm(Date.now() + 5000); },
+      lifecycle: {
+        assertIdle: async () => {
+          const active = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('succeeded','failed','cancelled','needs_review')")?.n ?? 0;
+          if (active) throw new Error("Finish or stop active work before updating the app.");
+        },
+        checkpoint: async () => {
+          const ready = await this.computerManager().prepare(await this.computerSpec());
+          if (ready.state !== "ready") throw new Error("Restore the computer before updating the app.");
+          const pointer = await this.computerManager().checkpoint("shared", await this.computerGeneration(), 0, ready.runnerState?.instanceId);
+          const manifest = pointer.manifest;
+          if (!manifest.supported || !manifest.durable || !manifest.sha256 || !manifest.checkpointKey || !this.env.ARTIFACTS) throw new Error("A durable Computer checkpoint is required before updating.");
+          const saved = await this.env.ARTIFACTS.get(manifest.checkpointKey);
+          if (!saved || saved.size !== manifest.bytes) throw new Error("Checkpoint verification failed. The app has not been changed.");
+          const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await saved.arrayBuffer()))].map(v => v.toString(16).padStart(2, "0")).join("");
+          if (digest !== manifest.sha256) throw new Error("Checkpoint verification failed. The app has not been changed.");
+          return { id: manifest.id, sha256: `sha256:${manifest.sha256}` };
+        },
+        restore: async checkpointId => {
+          this.computerProvider = undefined;
+          this.computerCoordinator = undefined;
+          this.startup.invalidate();
+          const ready = await this.computerManager().prepare(await this.computerSpec());
+          if (ready.committedCheckpoint?.manifest.id !== checkpointId) throw new Error("The saved update checkpoint could not be located.");
+          if (ready.state !== "ready") await this.computerManager().restore("shared", ready.committedCheckpoint);
+        },
+        healthCheck: async () => {
+          const ready = await this.computerManager().prepare(await this.computerSpec());
+          if (ready.state !== "ready") throw new Error("The updated Computer is not ready yet.");
+          const health = await ready.handle.transport.fetch("/health");
+          if (!health.ok) throw new Error("The updated Computer did not pass its health check.");
+          this.startup.invalidate();
+        },
+      },
+    });
+  }
+
+  private async updateRoute(request: Request, url: URL): Promise<Response> {
+    const updater = this.updates(url);
+    try {
+      if (url.pathname === "/api/updates" && request.method === "GET") return response(await updater.status(url.searchParams.has("refresh")));
+      if (url.pathname === "/api/updates/configure" && request.method === "POST") return response(await updater.configure(await body(request)));
+      if (url.pathname === "/api/updates/configure" && request.method === "DELETE") return response(await updater.removeConfiguration());
+      if (request.method === "POST" && ["/api/updates", "/api/updates/recover"].includes(url.pathname)) {
+        this.maintenance = true;
+        try {
+          const result = url.pathname.endsWith("/recover") ? await updater.recover() : await updater.start((await body(request)).version);
+          return response(result, 202);
+        } finally { this.maintenance = await updater.active(); }
+      }
+      throw new HttpError(404, "not found");
+    } catch (error) {
+      return response({ error: error instanceof Error ? error.message : "The update could not proceed." }, error instanceof HttpError ? error.status : 400);
+    }
+  }
+
+  private computerReadiness(retry = false) {
+    return this.startup.read(async () => {
+      const readiness = await this.computerManager().prepare(await this.computerSpec());
+      if (readiness.state !== "ready") throw new Error(`Computer recovery required (${readiness.state})`);
+    }, (work) => this.state.waitUntil(work), retry);
+  }
+
   private async computerStatus(): Promise<any> {
     const readiness = await this.computerManager().prepare(
       await this.computerSpec(),
@@ -2048,6 +2170,7 @@ export class Workspace {
         "UPDATE runs SET status='queued',updated_at=? WHERE status='waiting_dependency'",
         isoNow(),
       );
+      this.startup.invalidate();
       this.state.storage.setAlarm(Date.now() + 100);
       return {
         status: "restored",
@@ -2168,7 +2291,7 @@ export class Workspace {
       thread.instructions,
       "For a multi-step task, send a brief plain-language progress message before starting tool work, then short updates when you make a meaningful finding, switch approach, or begin a longer operation. Describe concrete actions and findings for the user; keep private reasoning private. Do not narrate every trivial step or repeat tool output. Keep working after each progress message until the requested task is complete or genuinely blocked.",
       !thread.node_id ? "Your computer has its own headed Chromium browser, visible in the app’s Computer preview. Use the computer_browser MCP tools (including computer_browser_browser_navigate, browser_snapshot, browser_click, browser_type and browser_tabs) to control that exact browser. These tools attach to the same browser shown in the live stream. The unrelated built-in tools.browser namespace expects an OpenCode desktop-app connection; do not use it for this computer. No desktop app, extension, or experimental browser setting is required. When asked to open or interact with a page, navigate with computer_browser and verify its page snapshot; fetching page text alone does not operate the live browser." : "",
-      `Bot communication is available through the runner MCP server named \`bots\`. Use \`list_bots\` to inspect peers, \`send_message\` to queue work for a peer, and \`get_replies\` to inspect requests and completed results. These are independent persistent bots, not OpenCode subagents. For requests involving another named workspace bot, use these messaging tools rather than subagent mode. After sending, end your turn with a short natural acknowledgment (for example, "I’m asking Llama."). The recipient runs after your turn and its reply automatically resumes this conversation; never ask the user to send another message to retrieve it. Do not poll in a loop, display internal bot/request IDs, or claim a reply before it arrives. Available peers: ${peers || "none"}.`,
+      `Bot communication and creation are available through the runner MCP server named \`bots\`. Use \`list_bots\` to inspect peers, \`send_message\` to queue work for a peer, \`get_replies\` to inspect requests and completed results, and \`create_bot\` when the user asks you to define a new persistent workspace bot. New bots are created after this turn ends with their own persisted settings and conversations; they are independent persistent bots, not OpenCode subagents. Creation accepts a unique name, instructions, and optional model/agent. Never include owner credentials or tokens in bot definitions. For requests involving another named workspace bot, use these tools rather than subagent mode. After sending or creating, end your turn with a short natural acknowledgment. The recipient or newly created bot is available after the turn; never ask the user to send another message to retrieve it. Do not poll in a loop, display internal bot/request IDs, or claim a reply before it arrives. Available peers: ${peers || "none"}.`,
       memories ? `Relevant bot memory:\n${memories}` : "",
       selectedSkills
         ? `Assigned skills (workspace instruction bundles):\n${selectedSkills}`
@@ -2623,6 +2746,57 @@ export class Workspace {
     await this.maybeContinueAfterDelegations(run.id);
     this.state.storage.setAlarm(Date.now() + 1000);
   }
+  private async reconcileBotCreationRequests(run: any, remote: any): Promise<void> {
+    if (Number(run.bot_messaging ?? 1) === 0 || remote.status !== "succeeded") return;
+    const requests = Array.isArray(remote.botCreationRequests)
+      ? remote.botCreationRequests.slice(0, 4)
+      : [];
+    const created: any[] = [];
+    const rejected: string[] = [];
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index] && typeof requests[index] === "object" ? requests[index] : {};
+      const requestId = typeof request.id === "string" && request.id.trim() ? request.id.trim().slice(0, 160) : `invalid-${index}`;
+      if (this.one("SELECT request_id FROM bot_creation_requests WHERE run_id=? AND request_id=?", run.id, requestId)) continue;
+      const now = isoNow();
+      this.state.storage.sql.exec(
+        "INSERT INTO bot_creation_requests (run_id,request_id,status,created_at,updated_at) VALUES (?,?,?,?,?)",
+        run.id, requestId, "pending", now, now,
+      );
+      try {
+        if (requestId.startsWith("invalid-") || typeof request.name !== "string") throw new HttpError(400, "bot creation requires a name");
+        if (this.one("SELECT id FROM bots WHERE lower(name)=lower(?)", request.name.trim())) throw new HttpError(409, "A bot with that name already exists. Choose another name.");
+        const parent = this.one<any>("SELECT b.model,b.agent,b.node_id FROM bots b JOIN threads t ON t.bot_id=b.id WHERE t.id=?", run.thread_id);
+        const item = this.createBot({
+          name: request.name,
+          instructions: request.instructions ?? "",
+          model: request.model || parent?.model || "",
+          agent: request.agent || parent?.agent || "",
+          nodeId: parent?.node_id,
+        });
+        this.state.storage.sql.exec("UPDATE bot_creation_requests SET status='created',bot_id=?,updated_at=? WHERE run_id=? AND request_id=?", item.id, isoNow(), run.id, requestId);
+        created.push(item);
+        this.event(run.id, "bot.created", { requestId, botId: item.id, name: item.name });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.state.storage.sql.exec("UPDATE bot_creation_requests SET status='rejected',error=?,updated_at=? WHERE run_id=? AND request_id=?", message, isoNow(), run.id, requestId);
+        rejected.push(message);
+        this.event(run.id, "bot.creation.rejected", { requestId, error: message });
+      }
+    }
+    if (!created.length && !rejected.length) return;
+    if (this.one("SELECT source_run_id FROM bot_creation_continuations WHERE source_run_id=?", run.id)) return;
+    const source = this.one<any>("SELECT * FROM runs WHERE id=?", run.id);
+    if (!source || !TERMINAL.has(source.status)) return;
+    const summary = created.map((item) => `Created ${item.name} (${item.id}) with its own persisted settings and conversations.`).join("\n");
+    const errors = rejected.map((error) => `[Bot creation rejected] ${error}`).join("\n");
+    const continuation = this.createRun({
+      threadId: source.thread_id,
+      prompt: `Continue the original task and tell the user what happened with the requested bot creation.\n\n${summary}${errors ? `\n\n${errors}` : ""}`,
+      idempotencyKey: `tool-bot-creation:${run.id}`,
+      allowBotMessaging: false,
+    });
+    this.state.storage.sql.exec("INSERT INTO bot_creation_continuations (source_run_id,continuation_run_id,created_at,updated_at) VALUES (?,?,?,?)", run.id, continuation.id, isoNow(), isoNow());
+  }
   private async maybeContinueAfterDelegations(sourceRunId: string): Promise<void> {
     const source = this.one<any>("SELECT * FROM runs WHERE id=?", sourceRunId);
     if (!source || Number(source.bot_messaging ?? 1) === 0 || !TERMINAL.has(source.status)) return;
@@ -2866,6 +3040,7 @@ export class Workspace {
       }
     }
     await this.reconcileDelegationRequests(run, remote);
+    await this.reconcileBotCreationRequests(run, remote);
   }
 }
 
