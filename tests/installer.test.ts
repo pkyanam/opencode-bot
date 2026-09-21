@@ -23,7 +23,7 @@ function fixture() {
   writeFileSync(log, "");
   executable(join(bin, "node"), `exec '${process.execPath}' "$@"`);
   executable(join(bin, "npm"), `printf 'npm %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"`);
-  executable(join(bin, "docker"), `printf 'docker %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"`);
+  executable(join(bin, "curl"), `url="$2"; out="$4"; case "$url" in *release-manifest.json) printf '{"schemaVersion":1,"version":"v0.1.1","commit":"1111111111111111111111111111111111111111"}\\n' > "$out" ;; *) printf 'node archive' > "$out" ;; esac`);
   executable(join(bin, "npx"), `
     printf 'npx %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"
     case "$*" in *--json) printf '[{"id":"acct","name":"Test Account"}]' ;; esac
@@ -32,12 +32,13 @@ function fixture() {
   executable(join(bin, "git"), `
     printf 'git %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"
     if [ "\${1-}" = "clone" ]; then
-      mkdir -p "$5/.git"
-      printf '#!/bin/sh\\nprintf "setup apply --apply --install-missing\\n" >> "\${OCBOT_TEST_LOG}"\\n' > "$5/setup.sh"
-      chmod 755 "$5/setup.sh"
+      mkdir -p "$7/.git"
+      printf '#!/bin/sh\\nprintf "setup apply --apply --install-missing\\n" >> "\${OCBOT_TEST_LOG}"\\n' > "$7/setup.sh"
+      chmod 755 "$7/setup.sh"
     elif [ "\${1-}" = "-C" ] && [ "\${3-}" = "remote" ]; then
       printf '%s\\n' "\${OCBOT_REPO_URL:-https://github.com/pkyanam/opencode-bot.git}"
     elif [ "\${1-}" = "-C" ] && [ "\${3-}" = "status" ]; then :
+    elif [ "\${1-}" = "-C" ] && [ "\${3-}" = "rev-parse" ]; then printf '1111111111111111111111111111111111111111\\n'
     fi
   `);
   return { dir, bin, log, home, install, runtime };
@@ -57,7 +58,7 @@ describe("public installer", () => {
   it("clones a fresh installation from piped stdin", () => {
     const f=fixture();
     expect(runScript(f)).toContain(`installed successfully at ${f.install}`);
-    expect(readFileSync(f.log,"utf8")).toContain("git clone --depth 1");
+    expect(readFileSync(f.log,"utf8")).toContain("git clone --branch v0.1.1 --depth 1");
     expect(readFileSync(f.log,"utf8")).toContain("setup apply --apply --install-missing");
   });
 
@@ -74,7 +75,7 @@ describe("public installer", () => {
     const calls = readFileSync(f.log, "utf8");
     expect(output).toContain(`installed successfully at ${f.install}`);
     expect(calls).toContain("npm ci");
-    expect(calls).toContain("docker info");
+    expect(calls).not.toContain("docker info");
     expect(calls).toContain("npx --no-install wrangler whoami");
     expect(calls).toContain("setup apply --apply --install-missing");
     expect(existsSync(join(f.install, "setup.sh"))).toBe(true);
@@ -113,7 +114,7 @@ describe("public installer", () => {
     executable(join(bootstrapBin, "node"), "printf '18\\n'");
     executable(join(bootstrapBin, "curl"), `
       url="$2"; out="$4"
-      case "$url" in *SHASUMS256.txt) printf 'deadbeef  node-v24.14.0-linux-x64.tar.xz\\ndeadbeef  node-v24.14.0-linux-arm64.tar.xz\\ndeadbeef  node-v24.14.0-darwin-x64.tar.gz\\ndeadbeef  node-v24.14.0-darwin-arm64.tar.gz\\n' > "$out";; *) printf 'not-a-node-archive' > "$out";; esac
+      case "$url" in *SHASUMS256.txt) printf 'deadbeef  node-v24.14.0-linux-x64.tar.xz\\ndeadbeef  node-v24.14.0-linux-arm64.tar.xz\\ndeadbeef  node-v24.14.0-darwin-x64.tar.gz\\ndeadbeef  node-v24.14.0-darwin-arm64.tar.gz\\n' > "$out";; *release-manifest.json) printf '{"schemaVersion":1,"version":"v0.1.1","commit":"1111111111111111111111111111111111111111"}\\n' > "$out";; *) printf 'not-a-node-archive' > "$out";; esac
     `);
     expect(() => runScript(f, { PATH: `${bootstrapBin}:/usr/bin:/bin` })).toThrow(/checksum verification failed/);
     expect(existsSync(join(f.install, ".git"))).toBe(false);

@@ -22,14 +22,16 @@ curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.s
 ```
 
 The installer downloads the app, checks prerequisites, signs in to Cloudflare,
-creates the Worker, database, Sandbox computer, and R2 bucket, then opens your
-workspace. macOS and Linux are supported; on Windows, use WSL2 with Docker
-integration. You'll need a running Docker daemon and a Cloudflare account with
+uploads the release’s prebuilt computer image to your account, creates the
+Worker, database, Sandbox computer, and R2 bucket, then opens your workspace.
+macOS and Linux are supported; on Windows, use WSL2. **Docker is not required
+for installation.** You'll need a Cloudflare account with
 Workers Paid, Containers access, and R2 enabled. Hosting and model usage are billed
 by their providers. Account signup, billing activation, and login may need you.
 
 The default checkout is `~/.local/share/opencode-bot`. Rerun the same command to
-resume installation. [Setup details and troubleshooting →](docs/getting-started.md)
+resume installation. Releases pin the app source and computer image together.
+[Setup details and troubleshooting →](docs/getting-started.md)
 
 ### Or hand it to your agent
 
@@ -87,7 +89,7 @@ React + shadcn/ui · Cloudflare Workers · SQLite Durable Objects · Sandbox · 
 
 [Getting started](docs/getting-started.md) · [Architecture](docs/02-design.md) ·
 [Research](docs/01-research.md) · [Skills & plugins](docs/10-extensions.md) ·
-[Desktop plan](docs/06-desktop.md) · [Test evidence](tests/qualification/README.md)
+[Desktop plan](docs/06-desktop.md) · [Release pipeline](docs/releasing.md) · [Test evidence](tests/qualification/README.md)
 
 [MIT licensed](LICENSE). Independent community project;
 [acknowledgments and trademarks](NOTICE.md).

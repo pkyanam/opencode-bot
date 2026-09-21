@@ -6,11 +6,14 @@
  * deployment state or invokes Wrangler. Secrets are generated in memory and
  * are never printed or stored in the deployment journal.
  */
-import { existsSync, readFileSync, mkdirSync, writeFileSync, chmodSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, rmSync, createReadStream, createWriteStream } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
+import { pipeline } from "node:stream/promises";
+import { createGunzip } from "node:zlib";
 import { spawnSync } from "node:child_process";
+import { validateManifest, verifyArchive, downloadReleaseArchive, assertSourceCommit, craneAsset } from "./release.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const argv = process.argv.slice(2);
@@ -43,9 +46,7 @@ function checkNode() {
 
 function checks() {
   const list = [checkNode(), { name: "platform", ok: ["darwin", "linux"].includes(process.platform), detail: `${process.platform}/${process.arch}` }];
-  for (const name of ["git", "docker", "npx"]) list.push({ name, ...commandVersion(name) });
-  const dockerInfo = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8", timeout: 8000 });
-  list.push({ name: "container daemon", ok: dockerInfo.status === 0, detail: dockerInfo.status === 0 ? `Docker ${dockerInfo.stdout.trim()}` : "not reachable (start Docker/compatible daemon)" });
+  for (const name of ["git", "npx"]) list.push({ name, ...commandVersion(name) });
   const wrangler = commandVersion("npx", ["--no-install", "wrangler", "--version"]);
   list.push({ name: "Wrangler", ok: wrangler.ok, detail: wrangler.ok ? wrangler.detail : "project-local Wrangler will be installed by npm install" });
   const auth = spawnSync("npx", ["--no-install", "wrangler", "whoami"], { cwd: root, encoding: "utf8", timeout: 15000 });
@@ -53,6 +54,33 @@ function checks() {
   const authenticated = auth.status === 0 && !/(not logged|not authenticated|no api token|unauthorized)/i.test(authText);
   list.push({ name: "Cloudflare auth", ok: authenticated, detail: authenticated ? authText.trim().split("\n").filter(Boolean).slice(-1)[0] : "not authenticated (run npm exec wrangler login)" });
   return list;
+}
+
+function readManifest() {
+  const file = resolve(stateDir, "release-manifest.json");
+  if (!existsSync(file)) throw new Error(`release manifest is required at ${file}; download a published release before applying`);
+  try { return validateManifest(JSON.parse(readFileSync(file, "utf8"))); } catch (error) { throw new Error(`invalid release manifest: ${error.message}`); }
+}
+
+function jsonc(file) {
+  return JSON.parse(readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s+|,)\/\/.*$/gm, "$1"));
+}
+
+function writeDeploymentConfig(config, image) {
+  const source = jsonc(resolve(root, "wrangler.jsonc"));
+  const absolute = (value) => typeof value === "string" ? resolve(root, value) : value;
+  delete source.$schema;
+  source.account_id = cloudflareAccount(config);
+  source.main = absolute(source.main);
+  if (source.assets?.directory) source.assets.directory = absolute(source.assets.directory);
+  if (source.containers?.[0]) {
+    source.containers[0].image = image;
+    delete source.containers[0].image_build_context;
+  }
+  const output = resolve(stateDir, "wrangler.deploy.json");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(output, `${JSON.stringify(source, null, 2)}\n`, { mode: 0o600 }); chmodSync(output, 0o600);
+  return output;
 }
 
 function readConfig() {
@@ -99,12 +127,116 @@ function writeDevVars() {
 }
 
 function runRequired(label, name, argv, options = {}) {
-  const result = spawnSync(name, argv, { cwd: root, encoding: "utf8", timeout: options.timeout ?? 1200000, maxBuffer: 32 * 1024 * 1024, stdio: options.inherit ? "inherit" : "pipe" });
+  const result = spawnSync(name, argv, { cwd: root, encoding: "utf8", timeout: options.timeout ?? 1200000, maxBuffer: 32 * 1024 * 1024, input: options.input, env: options.env ? { ...process.env, ...options.env } : process.env, stdio: options.inherit ? "inherit" : "pipe" });
   if (result.status !== 0) {
-    const detail = `${result.stderr || result.stdout || ""}`.trim().split("\n").filter(Boolean).slice(-8).join(" ").slice(0, 1200);
+    const detail = options.sensitive ? "" : `${result.stderr || result.stdout || ""}`.trim().split("\n").filter(Boolean).slice(-8).join(" ").slice(0, 1200);
     throw new Error(`${label} failed (exit ${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}`);
   }
   return result;
+}
+
+function bootstrapCrane() {
+  const dir = resolve(stateDir, "bin"); mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const binary = resolve(dir, "crane");
+  if (existsSync(binary)) return binary;
+  const asset = craneAsset();
+  const archive = resolve(dir, "crane.tar.gz");
+  // Download the pinned official archive, then verify before extraction.
+  const response = spawnSync("curl", ["--fail", "--location", "--proto", "=https", "--tlsv1.2", asset.url, "-o", archive], { cwd: root, encoding: "utf8", timeout: 120000 });
+  if (response.status !== 0) throw new Error("crane bootstrap download failed");
+  if (verifyArchive(archive, { size: readFileSync(archive).byteLength, sha256: asset.sha256 }).sha256 !== asset.sha256) throw new Error("crane bootstrap checksum mismatch");
+  runRequired("crane extraction", "tar", ["-xzf", archive, "-C", dir, "crane"], { timeout: 120000 });
+  chmodSync(binary, 0o700);
+  return binary;
+}
+
+function cloudflareAccount(config) {
+  const selected = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID;
+  if (selected && config.accountId && selected !== config.accountId) throw new Error("Cloudflare account selection does not match deployment config");
+  const account = config.accountId ?? selected;
+  if (!/^[a-f0-9]{32}$/i.test(account ?? "")) throw new Error("CLOUDFLARE_ACCOUNT_ID must identify your Cloudflare account");
+  return account;
+}
+
+function registryCredentials(account) {
+  const result = runRequired("registry credentials", "npx", ["--no-install", "wrangler", "containers", "registries", "credentials", "registry.cloudflare.com", "--push", "--pull", "--json", "--expiration-minutes", "60"], { sensitive: true });
+  let credentials;
+  try { credentials = JSON.parse(result.stdout); } catch { throw new Error("Cloudflare registry credentials response was not valid JSON"); }
+  const username = credentials.username ?? credentials.user; const password = credentials.password ?? credentials.token;
+  if (!username || !password) throw new Error("Cloudflare registry credentials response was incomplete");
+  if (credentials.account_id !== account || credentials.registry_host !== "registry.cloudflare.com") throw new Error("Cloudflare registry credentials do not match the selected account");
+  return { username, password };
+}
+
+async function publishImage(manifest, config) {
+  const account = cloudflareAccount(config);
+  const archive = resolve(stateDir, manifest.imageArchive.file);
+  if (!existsSync(archive)) throw new Error(`release archive is missing at ${archive}`);
+  verifyArchive(archive, manifest.imageArchive);
+  const crane = bootstrapCrane();
+  const credentials = registryCredentials(account);
+  const dockerConfig = resolve(stateDir, `docker-config-${process.pid}`); mkdirSync(dockerConfig, { recursive: true, mode: 0o700 });
+  const unpacked = resolve(stateDir, `computer-image-${process.pid}.tar`);
+  try {
+    await pipeline(createReadStream(archive), createGunzip(), createWriteStream(unpacked, { mode: 0o600, flags: "wx" }));
+    runRequired("registry login", crane, ["auth", "login", "registry.cloudflare.com", "--username", credentials.username, "--password-stdin"], { sensitive: true, input: `${credentials.password}\n`, env: { DOCKER_CONFIG: dockerConfig } });
+    const image = `registry.cloudflare.com/${account}/opencode-bot:${manifest.version}-${manifest.commit}`;
+    runRequired("image push", crane, ["push", unpacked, image], { timeout: 1800000, env: { DOCKER_CONFIG: dockerConfig } });
+    const digestResult = runRequired("image digest", crane, ["digest", image], { env: { DOCKER_CONFIG: dockerConfig } });
+    const digest = (digestResult.stdout ?? "").trim();
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error("registry returned an invalid image digest");
+    return { image: `registry.cloudflare.com/${account}/opencode-bot@${digest}`, digest };
+  } finally {
+    rmSync(unpacked, { force: true });
+    // Keep credentials isolated for the entire operation and remove the temporary config.
+    try { runRequired("registry logout", crane, ["auth", "logout", "registry.cloudflare.com"], { timeout: 30000, env: { DOCKER_CONFIG: dockerConfig } }); } catch {}
+    try { rmSync(dockerConfig, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function applyDaemonless(config) {
+  const manifest = readManifest();
+  assertSourceCommit(manifest, root);
+  const account = cloudflareAccount(config);
+  process.env.CLOUDFLARE_ACCOUNT_ID = account;
+  if (manifest.opencodeVersion !== (config.opencodeVersion ?? "2.0.11") || `@cloudflare/sandbox@${manifest.sandboxVersion}` !== (config.sandboxPackage ?? "@cloudflare/sandbox@0.12.9")) throw new Error("release runtime versions do not match deployment configuration");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const archive = resolve(stateDir, manifest.imageArchive.file);
+  if (!existsSync(archive)) {
+    console.log(`Downloading the verified computer image for ${manifest.version}. This may take several minutes.`);
+    await downloadReleaseArchive(manifest, archive);
+  }
+  verifyArchive(archive, manifest.imageArchive);
+  validateDeploymentConfig(config);
+  const list = checks(); printChecks(list);
+  if (list.some((item) => !item.ok && item.name !== "Wrangler")) throw new Error("required prerequisite failed; fix doctor output before applying");
+  if (!existsSync(resolve(root, "package.json"))) throw new Error("package.json is missing");
+  if (list.some((item) => item.name === "Wrangler" && !item.ok)) {
+    if (!install) throw new Error("Wrangler is missing; rerun with --install-missing");
+    runRequired("npm ci", "npm", ["ci"], { inherit: true });
+  }
+  const material = secretMaterial();
+  const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { schemaVersion: 1, project: config.name ?? "ocbot-personal", createdAt: new Date().toISOString(), resources: {}, journal: [] };
+  ensureWorkerOwnership(config, state);
+  state.secretDigests = { APP_TOKEN: digest(material.APP_TOKEN), RUNNER_TOKEN: digest(material.RUNNER_TOKEN) };
+  journal(state, "prepare", "started");
+  runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
+  runRequired("web build", "npm", ["run", "build"], { inherit: true }); journal(state, "build", "complete");
+  ensureBucket(config, state); journal(state, "r2", "complete");
+  console.log("Uploading the prebuilt computer image to your Cloudflare account. Docker is not required.");
+  const published = await publishImage(manifest, config);
+  const deploymentConfig = writeDeploymentConfig(config, published.image);
+  console.log("Deploying the application to Cloudflare.");
+  const deployed = runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", deploymentConfig]);
+  const workerName = config.name ?? "ocbot-personal";
+  const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
+  if (!appUrl || !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL");
+  state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.image = published.image; journal(state, "deploy", "complete", appUrl);
+  runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", deploymentConfig], { inherit: true }); journal(state, "secrets", "complete");
+  state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
+  journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 }); chmodSync(statePath, 0o600);
+  console.log(`Deployment complete: ${appUrl}`);
 }
 
 function journal(state, stage, status, detail) {
@@ -236,7 +368,8 @@ async function main() {
   if (command === "plan" || args.has("--plan")) { console.log(JSON.stringify(plan(config), null, 2)); return; }
   if (command === "apply") {
     if (!apply) throw new Error("apply requires explicit --apply");
-    await applyDeployment(config);
+    if (args.has("--build-local")) await applyDeployment(config);
+    else await applyDaemonless(config);
     return;
   }
   throw new Error(`unknown command ${command}`);
@@ -244,4 +377,4 @@ async function main() {
 
 try { await main(); } catch (error) { console.error(`setup error: ${error.message}`); process.exitCode = 1; }
 
-export { checkNode, checks, plan, digest };
+export { checkNode, checks, plan, digest, validateDeploymentConfig, writeDeploymentConfig, publishImage, applyDaemonless };

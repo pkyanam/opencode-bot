@@ -1,0 +1,142 @@
+name: Release
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing v*.*.* tag to release
+        required: true
+        type: string
+      ref:
+        description: Commit or ref to check out (defaults to version)
+        required: false
+        type: string
+permissions:
+  contents: read
+env:
+  NODE_VERSION: 24
+  OPENCODE_VERSION: 2.0.11
+  SANDBOX_VERSION: 0.12.9
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || inputs.version) || github.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix runner
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || inputs.version) || github.ref }}
+      - id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          commit=$(git rev-parse HEAD)
+          scripts/release/verify-source.sh "$tag" "$commit"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Build linux/amd64 image
+        run: >-
+          docker buildx build --platform linux/amd64 --file images/computer/Dockerfile
+          --tag opencode-bot:release --metadata-file image-metadata.json
+          --load .
+      - name: Smoke test image
+        run: scripts/release/smoke-image.sh opencode-bot:release "$OPENCODE_VERSION" "$SANDBOX_VERSION"
+      - id: digest
+        run: echo "digest=$(scripts/release/image-digest.sh image-metadata.json)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test runner health
+        run: |
+          set -euo pipefail
+          docker run --rm -d --name opencode-release-smoke -p 8787:8787 \
+            -e RUNNER_TOKEN=release-smoke-token --entrypoint /bin/sh opencode-bot:release \
+            -ceu 'node /opt/opencode-bot/runner/server.mjs'
+          trap 'docker rm -f opencode-release-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8787/health && exit 0
+            sleep 1
+          done
+          docker logs opencode-release-smoke
+          exit 1
+      - name: Export image archive
+        run: |
+          docker save opencode-bot:release | gzip -1 -n > computer-image.tar.gz
+          test "$(stat -c '%s' computer-image.tar.gz)" -lt 2147483648
+      - name: Write release manifest
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          RELEASE_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          sha256sum computer-image.tar.gz | cut -d' ' -f1 > computer-image.sha256
+          node scripts/release/write-manifest.mjs --output release-manifest.json \
+            --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --digest "$RELEASE_DIGEST" --archive computer-image.tar.gz \
+            --archive-sha256 "$(cat computer-image.sha256)"
+          sha256sum release-manifest.json computer-image.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: release-bundle
+          compression-level: 0
+          retention-days: 3
+          path: |
+            computer-image.tar.gz
+            release-manifest.json
+            SHA256SUMS
+          if-no-files-found: error
+  publish:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-bundle
+      - name: Create draft release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.image.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.image.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+            test "$draft" = true || { echo "release $RELEASE_TAG already exists and is published" >&2; exit 1; }
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json SHA256SUMS computer-image.tar.gz
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
+              --generate-notes --draft release-manifest.json SHA256SUMS computer-image.tar.gz
+          fi
+      - name: Publish release atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.image.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

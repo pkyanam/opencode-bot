@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 readonly REPO_URL="${OCBOT_REPO_URL:-https://github.com/pkyanam/opencode-bot.git}"
+readonly RELEASE_BASE="${OCBOT_RELEASE_BASE:-https://github.com/pkyanam/opencode-bot}"
 readonly NODE_VERSION="${OCBOT_NODE_VERSION:-24.14.0}"
 readonly INSTALL_DIR="${OCBOT_INSTALL_DIR:-${HOME}/.local/share/opencode-bot}"
 readonly NODE_ROOT="${OCBOT_NODE_ROOT:-${HOME}/.local/share/opencode-bot-runtime/node-v${NODE_VERSION}}"
@@ -94,36 +95,53 @@ ensure_git() {
 }
 
 checkout_repo() {
+  local manifest_file version commit manifest_url parsed
+  manifest_file="$(mktemp "${TMPDIR:-/tmp}/opencode-bot-release.XXXXXX.json")"
+  trap '[[ -n "${NODE_TMP:-}" ]] && rm -rf "$NODE_TMP"; [[ -n "${OCBOT_MANIFEST_TMP:-}" ]] && rm -f "$OCBOT_MANIFEST_TMP"' EXIT
+  OCBOT_MANIFEST_TMP="$manifest_file"
+  if [[ -n "${OCBOT_VERSION:-}" ]]; then
+    [[ "${OCBOT_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "OCBOT_VERSION must be a strict vSemVer tag such as v0.1.1"
+    manifest_url="${RELEASE_BASE}/releases/download/${OCBOT_VERSION}/release-manifest.json"
+  else
+    manifest_url="${RELEASE_BASE}/releases/latest/download/release-manifest.json"
+  fi
+  download "$manifest_url" "$manifest_file" || die "could not download release manifest from ${manifest_url}"
+  parsed="$(node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    try { const m=JSON.parse(readFileSync(process.argv[1], "utf8"));
+      if (m.schemaVersion !== 1 || typeof m.version !== "string" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(m.version) || typeof m.commit !== "string" || !/^[0-9a-f]{40}$/i.test(m.commit)) process.exit(2);
+      process.stdout.write(`${m.version}\t${m.commit.toLowerCase()}`);
+    } catch { process.exit(2); }
+  ' "$manifest_file")" || die "release manifest is invalid (expected schemaVersion 1, strict version, and 40 character commit)"
+  version="${parsed%%$'\t'*}"; commit="${parsed#*$'\t'}"
+  if [[ -n "${OCBOT_VERSION:-}" && "$version" != "$OCBOT_VERSION" ]]; then die "release manifest version ${version} does not match requested ${OCBOT_VERSION}"; fi
   mkdir -p "$(dirname "$INSTALL_DIR")"
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    local remote expected
+    local remote expected current
     remote="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
     expected="${REPO_URL%.git}"
     [[ "${remote%.git}" == "$expected" ]] || die "${INSTALL_DIR} points to a different repository; set OCBOT_INSTALL_DIR or inspect it"
     if [[ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]]; then
       die "${INSTALL_DIR} has local changes; commit or move them before rerunning"
     fi
-    say "updating existing checkout at ${INSTALL_DIR}"
-    git -C "$INSTALL_DIR" pull --ff-only --quiet || die "could not fast-forward ${INSTALL_DIR}; inspect it and rerun"
+    say "fetching release ${version} into existing checkout at ${INSTALL_DIR}"
+    git -C "$INSTALL_DIR" fetch --depth 1 origin "refs/tags/${version}:refs/tags/${version}" >/dev/null || die "could not fetch release ${version}"
+    current="$(git -C "$INSTALL_DIR" rev-parse "refs/tags/${version}^{commit}")"
+    [[ "$current" == "$commit" ]] || die "release tag ${version} does not match the release manifest commit"
+    git -C "$INSTALL_DIR" checkout --detach --quiet "$commit"
   elif [[ -e "$INSTALL_DIR" ]]; then
     die "${INSTALL_DIR} exists but is not an opencode-bot checkout"
   else
-    say "cloning ${REPO_URL} into ${INSTALL_DIR}"
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    say "cloning release ${version} into ${INSTALL_DIR}"
+    git clone --branch "$version" --depth 1 "$REPO_URL" "$INSTALL_DIR" >/dev/null || die "could not clone release ${version}"
+    current="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+    [[ "$current" == "$commit" ]] || die "release ${version} does not match the manifest commit"
   fi
-}
-
-ensure_container_engine() {
-  if ! command_exists docker && command_exists brew; then
-    say "Docker CLI is missing; installing Docker CLI and Colima with Homebrew"
-    brew install docker colima
-  fi
-  command_exists docker || die "Docker CLI is required for Cloudflare Sandbox deployment; install Docker or a compatible engine and rerun"
-  if ! docker info >/dev/null 2>&1 && command_exists colima; then
-    say "starting the user-local Colima container engine"
-    colima start
-  fi
-  docker info >/dev/null 2>&1 || die "a running Docker-compatible container engine is required; start Docker Desktop or Colima and rerun"
+  mkdir -p "${INSTALL_DIR}/.opencode-bot"
+  cp "$manifest_file" "${INSTALL_DIR}/.opencode-bot/release-manifest.json"
+  chmod 600 "${INSTALL_DIR}/.opencode-bot/release-manifest.json"
+  rm -f "$manifest_file"
+  OCBOT_MANIFEST_TMP=""
 }
 
 tty_available() { [[ -r /dev/tty && -w /dev/tty ]]; }
@@ -226,7 +244,6 @@ main() {
   ensure_git
   checkout_repo
   cd "$INSTALL_DIR"
-  ensure_container_engine
   say "installing locked dependencies"
   npm ci
   ensure_cloudflare_auth
