@@ -91,7 +91,14 @@ export class CloudflareUpdateApiClient implements CloudflareUpdateApi {
     this.validateBindings(settings, input.bundle);
     const configuredAssets = input.bundle.worker.metadata.assets as Record<string, unknown> | undefined;
     const assetConfig = configuredAssets?.config && typeof configuredAssets.config === "object" ? configuredAssets.config : configuredAssets;
-    const metadata = { ...input.bundle.worker.metadata, main_module: input.bundle.worker.mainModule, compatibility_date: input.bundle.worker.compatibilityDate, ...(input.bundle.worker.compatibilityFlags ? { compatibility_flags: input.bundle.worker.compatibilityFlags } : {}), bindings: sanitizeBindings(settings.bindings).map(binding => binding.type === "plain_text" && binding.name === "OPENCODE_VERSION" ? { ...binding, text: input.bundle.runtime.opencodeVersion } : binding.type === "plain_text" && binding.name === "SANDBOX_PACKAGE_VERSION" ? { ...binding, text: input.bundle.runtime.sandboxVersion } : binding), keep_bindings: ["secret_text"], assets: { jwt: input.assetsJwt, ...(assetConfig && typeof assetConfig === "object" ? { config: sanitizeAssetConfig(assetConfig as Record<string, unknown>) } : {}) } };
+    const containers = input.bundle.worker.metadata.containers;
+    const containerMetadata = Array.isArray(containers) ? containers.map((entry: {class_name?: string; name?: string}) => {
+      if (entry.class_name !== "Sandbox") throw new Error("release contains an unsupported Computer class");
+      // The portable bundle cannot contain the installation's application name.
+      // Both directions of the Durable Object/container link are required.
+      return {class_name: entry.class_name, name: `${this.scriptName}-sandbox`};
+    }) : undefined;
+    const metadata = { ...input.bundle.worker.metadata, ...(containerMetadata ? {containers: containerMetadata} : {}), main_module: input.bundle.worker.mainModule, compatibility_date: input.bundle.worker.compatibilityDate, ...(input.bundle.worker.compatibilityFlags ? { compatibility_flags: input.bundle.worker.compatibilityFlags } : {}), bindings: sanitizeBindings(settings.bindings).map(binding => binding.type === "plain_text" && binding.name === "OPENCODE_VERSION" ? { ...binding, text: input.bundle.runtime.opencodeVersion } : binding.type === "plain_text" && binding.name === "SANDBOX_PACKAGE_VERSION" ? { ...binding, text: input.bundle.runtime.sandboxVersion } : binding), keep_bindings: ["secret_text"], assets: { jwt: input.assetsJwt, ...(assetConfig && typeof assetConfig === "object" ? { config: sanitizeAssetConfig(assetConfig as Record<string, unknown>) } : {}) } };
     form.set("metadata", JSON.stringify(metadata));
     for (const module of input.bundle.worker.modules) form.set(module.name, new File([decode(module.contentBase64).buffer as ArrayBuffer], module.name, { type: module.contentType }));
     const result = await this.request<{ id?: string }>(this.scripts("/versions?bindings_inherit=strict"), { method: "POST", body: form });

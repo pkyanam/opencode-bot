@@ -213,3 +213,13 @@ are scenarios, not quotes. Measure an idle, interactive, and overnight workload
 with the models and features you intend to use, then set per-run and owner
 budgets. A local test or qualification result does not establish production
 readiness or guarantee a provider model is available on your account.
+
+## Upgrading early previews
+
+If you installed v0.1.5 or earlier, save a Computer checkpoint while idle and
+rerun the README install command once. Those early updater builds omitted the
+installation-specific container link from Worker uploads; v0.1.6 repairs the
+bundle and upload path. Keep the existing installation directory and project
+name to preserve the deployment's identity. If the Computer asks for recovery
+after replacement, restore the saved checkpoint in **Computer & checkpoints**.
+Subsequent updates can use **Settings → Updates** after deployment access is set.

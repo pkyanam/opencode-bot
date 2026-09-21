@@ -33,7 +33,8 @@ describe("release update bundle", () => {
     expect(bundle.worker.mainModule).toBe("index.js");
     expect(bundle.worker.modules.every(module => module.contentType === "application/javascript+module")).toBe(true);
     expect(bundle.worker.modules.map((module) => module.name)).toEqual(["chunk.js", "index.js"]);
-    expect(bundle.worker.metadata).toEqual({ assets: { config: { not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/internal/*"] } } });
+    expect(bundle.worker.metadata).toEqual({ containers: [{ class_name: "Sandbox" }], assets: { config: { not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/internal/*"] } } });
+    expect(bundle.worker.requiredBindings).toContainEqual({name: "SANDBOX", type: "durable_object_namespace"});
     const app = bundle.assets.find((asset) => asset.path === "static/app.js");
     expect(app).toBeDefined();
     const decoded = Buffer.from(app!.contentBase64, "base64");

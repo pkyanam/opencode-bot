@@ -129,7 +129,13 @@ export async function buildBundle({ output, workerDirectory, assetsDirectory, ve
       modules: moduleRecords,
       compatibilityDate: "2026-09-20",
       compatibilityFlags: ["nodejs_compat"],
-      metadata: { assets: { config: ASSETS_ROUTING_CONFIG } },
+      requiredBindings,
+      metadata: {
+        assets: { config: ASSETS_ROUTING_CONFIG },
+        // Worker versions must opt these classes into Containers on every upload.
+        // The application image is updated separately through a controlled rollout.
+        containers: deploymentConfig.containers.map(({ class_name }) => ({ class_name })),
+      },
     },
     assets: assetRecords,
     computerImage: { reference, digest },

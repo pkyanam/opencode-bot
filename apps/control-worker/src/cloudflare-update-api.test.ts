@@ -32,11 +32,12 @@ describe("CloudflareUpdateApiClient", () => {
       return reply({});
     }) as unknown as typeof fetch;
     const client = new CloudflareUpdateApiClient(account, "worker", token, fetchImpl, "https://cf.test");
-    const bundle = { schemaVersion: 1 as const, version: "v1.2.3", commit: "b".repeat(40), bundleSha256: "c".repeat(64), worker: { mainModule: "worker.js", modules: [{ name: "worker.js", contentBase64: btoa("export default {}"), contentType: "application/javascript+module" }], compatibilityDate: "2026-09-20", metadata: { bindings: [{ name: "APP_TOKEN", type: "secret_text" }], assets: { not_found_handling: "single-page-application", ignored: "drop-me" } } }, assets: [], computerImage: { reference: `docker.io/preethamk/opencode-bot@sha256:${"d".repeat(64)}`, digest: `sha256:${"d".repeat(64)}` }, runtime: { opencodeVersion: "2.0.11", sandboxVersion: "0.12.9" } };
+    const bundle = { schemaVersion: 1 as const, version: "v1.2.3", commit: "b".repeat(40), bundleSha256: "c".repeat(64), worker: { mainModule: "worker.js", modules: [{ name: "worker.js", contentBase64: btoa("export default {}"), contentType: "application/javascript+module" }], compatibilityDate: "2026-09-20", metadata: { containers: [{class_name: "Sandbox"}], bindings: [{ name: "APP_TOKEN", type: "secret_text" }], assets: { not_found_handling: "single-page-application", ignored: "drop-me" } } }, assets: [], computerImage: { reference: `docker.io/preethamk/opencode-bot@sha256:${"d".repeat(64)}`, digest: `sha256:${"d".repeat(64)}` }, runtime: { opencodeVersion: "2.0.11", sandboxVersion: "0.12.9" } };
     await client.uploadWorkerVersion({ bundle, assetsJwt: "assets-jwt" });
     const versionCall = calls.find((call) => call.url.includes("/versions"));
     const multipart = await new Response(versionCall?.init.body).formData();
     expect(JSON.parse(String(multipart.get("metadata"))).bindings).toEqual([{ name: "PUBLIC_MODE", type: "plain_text", text: "public" }, { name: "ARTIFACTS", type: "r2_bucket", bucket_name: "live-assets", resource_id: "r2-resource" }]);
+    expect(JSON.parse(String(multipart.get("metadata"))).containers).toEqual([{class_name: "Sandbox", name: "worker-sandbox"}]);
     expect(JSON.parse(String(multipart.get("metadata"))).keep_bindings).toEqual(["secret_text"]);
     expect(JSON.parse(String(multipart.get("metadata"))).assets).toEqual({ jwt: "assets-jwt", config: { not_found_handling: "single-page-application" } });
   });
