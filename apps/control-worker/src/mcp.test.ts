@@ -150,3 +150,15 @@ describe("control MCP handler", () => {
     expect(result.headers.get("content-type")).toContain("application/json");
   });
 });
+
+it("accepts a 1 MiB upload through the JSON envelope and enforces a bounded request", async () => {
+  const invoke = vi.fn().mockResolvedValue({status:201,body:{attachment:{id:"att_test"}}});
+  const handler = createMcpHandler({authorize:()=>true,invoke});
+  const contentBase64 = Buffer.alloc(1024 * 1024, 65).toString("base64");
+  const result = await handler(request({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"upload_file",arguments:{name:"test.bin",mimeType:"application/octet-stream",contentBase64}}}));
+  expect(result.status).toBe(200);
+  expect(invoke).toHaveBeenCalledOnce();
+  expect((invoke.mock.calls[0][0].body as FormData).get("file")).toHaveProperty("size", 1024 * 1024);
+  const tooLarge = await handler(request({jsonrpc:"2.0",id:1,method:"ping"},{"content-length":String(15 * 1024 * 1024)}));
+  expect(tooLarge.status).toBe(413);
+});

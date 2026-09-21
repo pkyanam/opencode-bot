@@ -125,7 +125,7 @@ export const MCP_TOOLS: readonly Tool[] = [
   tool("run_get", "Get a run, public lifecycle events, and pending approval.", { id: string("Run id") }, ["id"], read, (a) => ({ path: idPath("/api/runs", required(a, "id")), method: "GET" })),
   tool("run_events", "Read the public event snapshot for a run.", { id: string("Run id") }, ["id"], read, (a) => ({ path: idPath("/api/runs", required(a, "id")) + "/events", method: "GET" })),
   tool("run_cancel", "Cancel a run that is still active.", { id: string("Run id") }, ["id"], remove, (a) => ({ path: idPath("/api/runs", required(a, "id")) + "/cancel", method: "POST" })),
-  tool("run_approve", "Approve or deny a pending run action. Human confirmation is required by the caller.", { id: string("Run id"), requestId: string("Approval request id"), decision: string("Approval decision, such as once, always, or reject") }, ["id", "requestId", "decision"], { ...remove, destructiveHint: true }, (a) => bodyCall(idPath("/api/runs", required(a, "id")) + "/approval", "POST", { requestId: required(a, "requestId"), decision: required(a, "decision") })),
+  tool("run_approve", "Approve or deny a pending run action. Human confirmation is required by the caller.", { id: string("Run id"), requestId: string("Approval request id"), decision: { ...string("Approval decision"), enum: ["approve", "deny"] } }, ["id", "requestId", "decision"], { ...remove, destructiveHint: true }, (a) => bodyCall(idPath("/api/runs", required(a, "id")) + "/approval", "POST", { requestId: required(a, "requestId"), decision: required(a, "decision") })),
   tool("delegation_list", "List delegations for a thread.", { threadId: string("Source thread id") }, ["threadId"], read, (a) => ({ path: idPath("/api/threads", required(a, "threadId")) + "/delegations", method: "GET" })),
   tool("delegation_create", "Delegate work to another bot thread.", { threadId: string("Source thread id"), targetBotId: string("Target bot id"), prompt: string("Delegated prompt"), idempotencyKey: string("Unique idempotency key"), sourceRunId: string("Optional source run id") }, ["threadId", "targetBotId", "prompt", "idempotencyKey"], create, (a) => bodyCall(idPath("/api/threads", required(a, "threadId")) + "/delegations", "POST", optionalBody(a, ["targetBotId", "prompt", "idempotencyKey", "sourceRunId"]))),
   tool("skill_list", "List reusable skills.", {}, [], read, () => ({ path: "/api/skills", method: "GET" })),
@@ -275,8 +275,24 @@ function validateToolArguments(toolDefinition: Tool, arguments_: Record<string, 
 async function readJson(request: Request): Promise<JsonRpcRequest> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) throw new ProtocolError(415, "Content-Type must be application/json", -32700);
-  const raw = await request.text();
-  if (raw.length > 1_000_000) throw new ProtocolError(413, "JSON-RPC request is too large", -32600);
+  // Base64 adds a third to a 10 MiB upload, plus the JSON envelope.
+  const maxBytes = 14 * 1024 * 1024;
+  if (Number(request.headers.get("content-length") ?? 0) > maxBytes) throw new ProtocolError(413, "JSON-RPC request is too large", -32600);
+  const reader = request.body?.getReader();
+  if (!reader) throw new ProtocolError(400, "Request body is required", -32600);
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) { await reader.cancel(); throw new ProtocolError(413, "JSON-RPC request is too large", -32600); }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const raw = new TextDecoder().decode(bytes);
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new ProtocolError(400, "Invalid JSON-RPC request", -32600);
@@ -319,6 +335,7 @@ export function createMcpHandler(options: McpHandlerOptions) {
         const selected = requested === MCP_MODERN_VERSION ? MCP_LEGACY_VERSION : (MCP_SUPPORTED_PROTOCOL_VERSIONS.includes(requested as typeof MCP_SUPPORTED_PROTOCOL_VERSIONS[number]) ? requested : MCP_LEGACY_VERSION);
         return response(jsonRpcResult(id ?? null, { protocolVersion: selected, capabilities: { tools: { listChanged: false } }, serverInfo: { name: options.serverName ?? "opencode-bot", version: options.serverVersion ?? "0.1.0" } }));
       }
+      if (isNotification && version === MCP_MODERN_VERSION) throw new ProtocolError(400, "Modern client notifications are not supported", -32600);
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       if (isNotification && ["server/discover", "tools/list", "tools/call"].includes(body.method)) throw new ProtocolError(400, "Notifications are not supported for this method", -32600);
       if (body.method === "ping") return isNotification ? new Response(null, { status: 202 }) : response(jsonRpcResult(id!, {}));
