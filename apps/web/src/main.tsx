@@ -1,3 +1,5 @@
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { ExtensionDiscovery } from "./components/extension-discovery";
 import { mergeActivityMessages } from "./lib/transcript";
 import { Delegations } from "./components/delegations";
 import { SettingsModal } from "./components/settings";
@@ -20,8 +22,8 @@ import {
   Menu,
   MessageSquare,
   Monitor,
+  MoreHorizontal,
   Pause,
-  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -29,6 +31,7 @@ import {
   Send,
   Settings,
   TerminalSquare,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -131,6 +134,13 @@ function App() {
   const [selectedBot, setSelectedBot] = useState<string>();
   const [renaming, setRenaming] = useState<Thread | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { kind: "thread"; item: Thread }
+    | { kind: "bot"; item: Bot }
+    | null
+  >(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -296,6 +306,13 @@ function App() {
       : [];
   const transcript = mergeActivityMessages(baseTranscript, runs);
   const working = latest && isActive(latest.status);
+  const botWorking = Boolean(
+    bot &&
+      state.runs.some((run) => {
+        const runThread = state.threads.find((item) => item.id === run.threadId);
+        return runThread?.botId === bot.id && isActive(run.status);
+      }),
+  );
   const composerLocked = terminalOpen || working || submitting;
   const chatScroll = useRef<HTMLDivElement>(null);
   const followConversation = useRef(true);
@@ -453,6 +470,57 @@ function App() {
       await refresh(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create thread");
+    }
+  };
+  const requestDeleteThread = (target: Thread) => {
+    const targetRun = state.runs.some((run) => run.threadId === target.id && isActive(run.status));
+    if (targetRun) {
+      setError("This conversation is still working. Stop the run before deleting it.");
+      return;
+    }
+    setDeleteError("");
+    setDeleteTarget({ kind: "thread", item: target });
+  };
+  const requestDeleteBot = (target: Bot) => {
+    const targetRun = state.runs.some((run) => {
+      const targetThread = state.threads.find((item) => item.id === run.threadId);
+      return targetThread?.botId === target.id && isActive(run.status);
+    });
+    if (targetRun) {
+      setError("This bot is still working. Stop its run before deleting it.");
+      return;
+    }
+    setShowBot(false);
+    setDeleteError("");
+    setDeleteTarget({ kind: "bot", item: target });
+  };
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleteError("");
+    setDeleting(true);
+    try {
+      if (deleteTarget.kind === "thread") {
+        await api.deleteThread(deleteTarget.item.id);
+        setLiveMessages([]);
+        setThreadSessionId(undefined);
+        setSelectedThread((current) =>
+          current === deleteTarget.item.id ? undefined : current,
+        );
+      } else {
+        await api.deleteBot(deleteTarget.item.id);
+        setLiveMessages([]);
+        setThreadSessionId(undefined);
+        setSelectedBot((current) =>
+          current === deleteTarget.item.id ? undefined : current,
+        );
+        setSelectedThread(undefined);
+      }
+      setDeleteTarget(null);
+      await refresh(true);
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Could not delete item");
+    } finally {
+      setDeleting(false);
     }
   };
   const stop = async () => {
@@ -643,6 +711,11 @@ function App() {
             skills={skills}
             activeBot={bot}
             onChange={setSkills}
+            onReview={(reviewPrompt) => {
+              if (prompt.trim()) { setError('Your conversation has an unsent draft. Send or clear it before drafting a repository review.'); return; }
+              setPrompt(reviewPrompt);
+              setSurface('chat');
+            }}
           />
         ) : surface === "files" ? (
           <FilesWorkspace />
@@ -667,16 +740,14 @@ function App() {
                     {bot ? (thread?.title ?? "New conversation") : "Your bots"}
                   </h1>
                   {thread && (
-                    <button
-                      className="icon-btn rename-conversation"
-                      aria-label="Rename conversation"
-                      onClick={() => {
+                    <ConversationMenu
+                      disabled={Boolean(working)}
+                      onRename={() => {
                         setRenaming(thread);
                         setRenameValue(thread.title);
                       }}
-                    >
-                      <Pencil size={14} />
-                    </button>
+                      onDelete={() => requestDeleteThread(thread)}
+                    />
                   )}
                 </div>
               </div>
@@ -908,6 +979,40 @@ function App() {
           </DialogContent>
         </Dialog>
       )}
+      {deleteTarget && (
+        <Dialog open onOpenChange={(open) => !open && !deleting && setDeleteTarget(null)}>
+          <DialogContent className="delete-dialog">
+            <DialogTitle>
+              Delete {deleteTarget.kind === "bot" ? "bot" : "conversation"}?
+            </DialogTitle>
+            <p className="settings-muted">
+              {deleteTarget.kind === "bot"
+                ? `Delete “${deleteTarget.item.name}” and all of its conversations and settings? Shared computer files remain.`
+                : `Delete “${deleteTarget.item.title || "Untitled conversation"}” and its messages? Shared computer files remain.`}
+            </p>
+            {deleteError && <p role="alert" className="extension-error">{deleteError}</p>}
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="soft-btn"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger-btn"
+                disabled={deleting}
+                onClick={() => void confirmDelete()}
+              >
+                {deleting && <LoaderCircle size={15} className="spin" />}
+                {deleting ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
       {showSettings && (
         <SettingsModal
           bots={state.bots}
@@ -939,6 +1044,9 @@ function App() {
             setShowMemory(true);
           }}
           onClose={() => setShowBot(false)}
+          onDelete={() => editingBot && requestDeleteBot(editingBot)}
+          deleting={deleting && deleteTarget?.kind === "bot"}
+          deleteDisabled={botWorking}
           onSaved={async (saved) => {
             setShowBot(false);
             setSelectedBot(saved.id);
@@ -1446,10 +1554,12 @@ function SkillsWorkspace({
   skills,
   activeBot,
   onChange,
+  onReview,
 }: {
   skills: Skill[];
   activeBot?: Bot;
   onChange: (items: Skill[]) => void;
+  onReview: (prompt: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Skill>();
@@ -1531,9 +1641,10 @@ function SkillsWorkspace({
             Reusable instruction bundles your bots can carry into every run.
           </p>
         </div>
-        <Button onClick={() => start()}>
-          <Plus size={15} /> New skill
-        </Button>
+        <div className="skill-header-actions">
+          <ExtensionDiscovery botName={activeBot?.name} onReview={onReview}/>
+          <Button onClick={() => start()}><Plus size={15} /> New skill</Button>
+        </div>
       </div>
       <div className="surface-layout">
         <section className="skill-grid" aria-label="Skills library">
@@ -2426,12 +2537,39 @@ function ModelPicker({
     </div>
   );
 }
+function ConversationMenu({
+  disabled,
+  onRename,
+  onDelete,
+}: {
+  disabled?: boolean;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="icon-btn rename-conversation" aria-label="Conversation actions" disabled={disabled} title={disabled ? "Stop the active run before managing this conversation" : "Conversation actions"}><MoreHorizontal size={16}/></button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="conversation-action-menu" sideOffset={6} align="start">
+          <DropdownMenu.Item onSelect={onRename}>Rename</DropdownMenu.Item>
+          <DropdownMenu.Item className="menu-danger" onSelect={onDelete}><Trash2 size={14}/> Delete</DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 function BotModal({
   bot,
   models,
   agents,
   onClose,
   onMemory,
+  onDelete,
+  deleting,
+  deleteDisabled,
   onSaved,
 }: {
   bot?: Bot;
@@ -2439,6 +2577,9 @@ function BotModal({
   agents: CatalogAgent[];
   onClose: () => void;
   onMemory: () => void;
+  onDelete: () => void;
+  deleting?: boolean;
+  deleteDisabled?: boolean;
   onSaved: (bot: Bot) => void;
 }) {
   const [name, setName] = useState(bot?.name ?? "");
@@ -2573,6 +2714,17 @@ function BotModal({
           <button className="memory-link" onClick={onMemory}>
             <FileText size={14} /> Inspect bot memory <ChevronRight size={14} />
           </button>
+        )}
+        {bot && (
+          <div className="destructive-section">
+            <div>
+              <strong>Delete this bot</strong>
+              <p>Removes this bot, its conversations, and settings. Shared computer files remain.</p>
+            </div>
+            <button className="danger-btn" type="button" onClick={onDelete} disabled={deleting || deleteDisabled} title={deleteDisabled ? "Stop the active run before deleting this bot" : undefined}>
+              <Trash2 size={14} /> Delete bot
+            </button>
+          </div>
         )}
         <div className="modal-actions">
           <button className="soft-btn" onClick={onClose}>

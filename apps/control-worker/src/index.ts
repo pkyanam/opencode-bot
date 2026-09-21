@@ -650,6 +650,8 @@ export class Workspace {
       if (url.pathname === "/api/bots" && request.method === "POST")
         return response(this.createBot(await body(request)), 201);
       const botEdit = url.pathname.match(/^\/api\/bots\/([^/]+)$/);
+      if (botEdit && request.method === "DELETE")
+        return response(await this.deleteBot(botEdit[1]));
       if (botEdit && request.method === "PATCH")
         return response(this.updateBot(botEdit[1], await body(request)));
       if (url.pathname === "/api/skills" && request.method === "GET")
@@ -685,6 +687,8 @@ export class Workspace {
           202,
         );
       const renameThread = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
+      if (renameThread && request.method === "DELETE")
+        return response(await this.deleteThread(renameThread[1]));
       if (renameThread && request.method === "PATCH") {
         const input = await body<any>(request);
         if (
@@ -948,6 +952,158 @@ export class Workspace {
       createdAt: current.created_at,
       updatedAt: now,
     };
+  }
+
+  /** Delete control-plane data and, for local conversations, their native session. */
+  private deleteRows(table: string, where: string, ...args: unknown[]): number {
+    if (!this.one<{ n: number }>(
+      "SELECT 1 AS n FROM sqlite_master WHERE type='table' AND name=?",
+      table,
+    )) return 0;
+    return Number(this.state.storage.sql.exec(`DELETE FROM ${table} WHERE ${where}`, ...args).rowsWritten ?? 0);
+  }
+
+  private atomic<T>(fn: () => T): T {
+    return this.state.storage.transactionSync(fn);
+  }
+
+  private deleteRunData(runIds: string[]): Record<string, number> {
+    if (!runIds.length) return {};
+    const marks = runIds.map(() => "?").join(",");
+    const counts: Record<string, number> = {};
+    // Rows referencing runs must be removed before the run receipts. These
+    // tables predate foreign-key enforcement, so do this explicitly.
+    for (const table of ["delegation_requests", "approvals", "events"]) {
+      const column = "run_id";
+      counts[table] = this.deleteRows(table, `${column} IN (${marks})`, ...runIds);
+    }
+    counts.delegationContinuations = this.deleteRows("delegation_continuations", `(source_run_id IN (${marks}) OR continuation_run_id IN (${marks}))`, ...runIds, ...runIds);
+    counts.telegramRunDeliveries = this.deleteRows("telegram_run_deliveries", `run_id IN (${marks})`, ...runIds);
+    counts.telegramRunActivities = this.deleteRows("telegram_run_activities", `run_id IN (${marks})`, ...runIds);
+    counts.runs = this.deleteRows("runs", `id IN (${marks})`, ...runIds);
+    return counts;
+  }
+
+  private activeDeletionBlock(threadIds: string[]): { activeRuns: number; pendingHandoffs: number } {
+    if (!threadIds.length) return { activeRuns: 0, pendingHandoffs: 0 };
+    const marks = threadIds.map(() => "?").join(",");
+    const activeRuns = Number(this.one<any>(
+      `SELECT COUNT(*) AS n FROM runs WHERE thread_id IN (${marks}) AND status IN ('queued','provisioning','running','waiting_approval','waiting_dependency','cancelling')`,
+      ...threadIds,
+    )?.n ?? 0);
+    const pendingHandoffs = Number(this.one<any>(
+      `SELECT COUNT(*) AS n FROM (
+        SELECT r.id FROM runs r WHERE r.thread_id IN (${marks}) AND EXISTS (SELECT 1 FROM delegation_continuations c LEFT JOIN runs cr ON cr.id=c.continuation_run_id WHERE c.source_run_id=r.id AND (c.status='pending' OR (c.status='created' AND cr.status IN ('queued','provisioning','running','waiting_approval','waiting_dependency','cancelling'))))
+        UNION
+        SELECT r.id FROM runs r WHERE r.thread_id IN (${marks}) AND EXISTS (SELECT 1 FROM delegation_requests q WHERE q.run_id=r.id AND q.status='pending')
+        UNION
+        SELECT d.id FROM delegations d WHERE (d.source_thread_id IN (${marks}) OR d.target_thread_id IN (${marks})) AND (EXISTS (SELECT 1 FROM delegation_continuations c LEFT JOIN runs cr ON cr.id=c.continuation_run_id WHERE c.source_run_id=d.source_run_id AND (c.status='pending' OR (c.status='created' AND cr.status IN ('queued','provisioning','running','waiting_approval','waiting_dependency','cancelling')))) OR EXISTS (SELECT 1 FROM delegation_requests q WHERE q.delegation_id=d.id AND q.status='pending'))
+      )`,
+      ...threadIds, ...threadIds, ...threadIds, ...threadIds,
+    )?.n ?? 0);
+    return { activeRuns, pendingHandoffs };
+  }
+
+  private async removeNativeSessions(threadIds: string[]): Promise<string[]> {
+    if (!threadIds.length) return [];
+    const marks = threadIds.map(() => "?").join(",");
+    if (this.one<any>(`SELECT 1 AS found FROM threads WHERE id IN (${marks}) AND node_id IS NOT NULL LIMIT 1`, ...threadIds))
+      throw new HttpError(409, "owned-node conversations cannot be deleted yet");
+    const rows = this.rows<any>(`SELECT runner_session_id AS session_id FROM threads WHERE id IN (${marks}) AND node_id IS NULL AND runner_session_id IS NOT NULL UNION SELECT r.runner_session_id AS session_id FROM runs r JOIN threads t ON t.id=r.thread_id WHERE r.thread_id IN (${marks}) AND t.node_id IS NULL AND r.runner_session_id IS NOT NULL`, ...threadIds, ...threadIds);
+    const candidates = [...new Set(rows.map((r) => String(r.session_id)).filter(Boolean))];
+    if (!candidates.length) return [];
+    const sessionMarks = candidates.map(() => "?").join(",");
+    const surviving = this.one<any>(`SELECT 1 AS found FROM threads WHERE runner_session_id IN (${sessionMarks}) AND id NOT IN (${marks}) UNION SELECT 1 FROM runs WHERE runner_session_id IN (${sessionMarks}) AND thread_id NOT IN (${marks}) LIMIT 1`, ...candidates, ...threadIds, ...candidates, ...threadIds);
+    if (surviving) throw new HttpError(409, "native conversation is shared with another conversation");
+    if (this.maintenance) throw new HttpError(409, "computer maintenance is in progress");
+    this.maintenance = true;
+    try {
+      const transport = await this.transport();
+      for (const sessionId of candidates) {
+        const result = await transport.fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+        if (result.status === 404) continue;
+        if (!result.ok) throw new HttpError(result.status === 409 ? 409 : 502, "native conversation could not be deleted");
+      }
+      return candidates;
+    } finally {
+      this.maintenance = false;
+    }
+  }
+
+  private deleteThreadRecords(threadId: string): any {
+    const thread = this.one<any>("SELECT id,bot_id FROM threads WHERE id=?", threadId);
+    if (!thread) throw new HttpError(404, "conversation not found");
+    const blocked = this.activeDeletionBlock([threadId]);
+    if (blocked.activeRuns || blocked.pendingHandoffs)
+      throw new HttpError(409, "conversation has active runs or pending handoffs");
+    const runIds = this.rows<any>("SELECT id,node_job_id,node_command_job_id FROM runs WHERE thread_id=?", threadId);
+    const counts: Record<string, number> = {};
+    counts.delegations = this.deleteRows("delegations", "source_thread_id=? OR target_thread_id=?", threadId, threadId);
+    counts.routines = this.deleteRows("routines", "thread_id=?", threadId);
+    counts.telegramPairingChallenges = this.deleteRows("telegram_pairing_challenges", "thread_id=?", threadId);
+    // Preserve the paired account; its next message starts a new conversation.
+    if (this.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_chat_bindings'"))
+      counts.telegramChatBindingsReset = this.state.storage.sql.exec("UPDATE telegram_chat_bindings SET thread_id=NULL WHERE thread_id=?", threadId).rowsWritten;
+    counts.messages = this.deleteRows("messages", "thread_id=?", threadId);
+    if (runIds.length) Object.assign(counts, this.deleteRunData(runIds.map((r) => r.id)));
+    const jobIds = runIds.flatMap((r) => [r.node_job_id, r.node_command_job_id]).filter(Boolean) as string[];
+    if (jobIds.length)
+      counts.nodeJobs = this.deleteRows("node_jobs", `id IN (${jobIds.map(() => "?").join(",")})`, ...jobIds);
+    counts.threads = this.deleteRows("threads", "id=?", threadId);
+    return { deleted: true, id: threadId, counts };
+  }
+
+  private async deleteThread(threadId: string): Promise<any> {
+    const thread = this.one<any>("SELECT id FROM threads WHERE id=?", threadId);
+    if (!thread) throw new HttpError(404, "conversation not found");
+    const blocked = this.activeDeletionBlock([threadId]);
+    if (blocked.activeRuns || blocked.pendingHandoffs)
+      throw new HttpError(409, "conversation has active runs or pending handoffs");
+    const nativeSessionsDeleted = (await this.removeNativeSessions([threadId])).length;
+    return { ...this.atomic(() => this.deleteThreadRecords(threadId)), nativeSessionsDeleted };
+  }
+
+  private deleteBotRecords(botId: string): any {
+    if (!this.one("SELECT id FROM bots WHERE id=?", botId))
+      throw new HttpError(404, "bot not found");
+    const threadRows = this.rows<any>("SELECT id FROM threads WHERE bot_id=?", botId);
+    const threadIds = threadRows.map((r) => r.id as string);
+    const blocked = this.activeDeletionBlock(threadIds);
+    if (blocked.activeRuns || blocked.pendingHandoffs)
+      throw new HttpError(409, "bot has active runs or pending handoffs");
+    const counts: Record<string, number> = {};
+    const runRows = threadIds.length
+      ? this.rows<any>(`SELECT id,node_job_id,node_command_job_id FROM runs WHERE thread_id IN (${threadIds.map(() => "?").join(",")})`, ...threadIds)
+      : [];
+    const runIds = runRows.map((r) => r.id as string);
+    counts.delegations = this.deleteRows("delegations", "source_bot_id=? OR target_bot_id=?", botId, botId);
+    counts.routines = this.deleteRows("routines", "bot_id=?", botId);
+    counts.memoryItems = this.deleteRows("memory_items", "bot_id=?", botId);
+    counts.botSkills = this.deleteRows("bot_skills", "bot_id=?", botId);
+    if (threadIds.length) {
+      counts.messages = this.deleteRows("messages", `thread_id IN (${threadIds.map(() => "?").join(",")})`, ...threadIds);
+    }
+    if (runIds.length) Object.assign(counts, this.deleteRunData(runIds));
+    const jobIds = runRows.flatMap((r) => [r.node_job_id, r.node_command_job_id]).filter(Boolean) as string[];
+    if (jobIds.length) counts.nodeJobs = this.deleteRows("node_jobs", `id IN (${jobIds.map(() => "?").join(",")})`, ...jobIds);
+    if (threadIds.length) counts.threads = this.deleteRows("threads", `id IN (${threadIds.map(() => "?").join(",")})`, ...threadIds);
+    // Telegram state is bot-scoped. Processed update receipts and polling
+    // offsets are safe to remove; shared native credentials and files are not.
+    for (const [key, table] of Object.entries({ telegramBotConfigs: "telegram_bot_configs", telegramPairingChallenges: "telegram_pairing_challenges", telegramChatBindings: "telegram_chat_bindings", telegramProcessedUpdates: "telegram_processed_updates", telegramPollOffsets: "telegram_poll_offsets", telegramChannelHealth: "telegram_channel_health", telegramRunDeliveries: "telegram_run_deliveries", telegramRunActivities: "telegram_run_activities" }))
+      counts[key] = this.deleteRows(table, "bot_id=?", botId);
+    counts.bots = this.deleteRows("bots", "id=?", botId);
+    return { deleted: true, id: botId, counts };
+  }
+
+  private async deleteBot(botId: string): Promise<any> {
+    if (!this.one("SELECT id FROM bots WHERE id=?", botId))
+      throw new HttpError(404, "bot not found");
+    const threadIds = this.rows<any>("SELECT id FROM threads WHERE bot_id=?", botId).map((r) => r.id as string);
+    const blocked = this.activeDeletionBlock(threadIds);
+    if (blocked.activeRuns || blocked.pendingHandoffs)
+      throw new HttpError(409, "bot has active runs or pending handoffs");
+    const nativeSessionsDeleted = (await this.removeNativeSessions(threadIds)).length;
+    return { ...this.atomic(() => this.deleteBotRecords(botId)), nativeSessionsDeleted };
   }
   private skills(): any[] {
     return this.rows<any>("SELECT * FROM skills ORDER BY name").map((s) => ({

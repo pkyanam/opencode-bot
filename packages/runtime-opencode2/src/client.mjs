@@ -140,6 +140,12 @@ export class OpenCode2Runtime {
     return session.id;
   }
 
+  async removeSession(sessionId) {
+    await this.start();
+    if (!this.client.session.remove) throw new Error("OpenCode 2 session removal API is unavailable");
+    await this.client.session.remove({ sessionID: sessionId });
+  }
+
   async prompt(sessionId, text, options = {}) {
     await this.start();
     const input = {

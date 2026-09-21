@@ -58,6 +58,18 @@ export class RunStore {
     await new Promise((resolve) => this.runtimeIdle.push(resolve));
   }
 
+  forgetSessionRuns(sessionId) {
+    if (!sessionId) return;
+    for (const [id, run] of this.runs) {
+      if (run.sessionId !== sessionId) continue;
+      if (this.stateDir) {
+        const filename = path.join(this.stateDir, `${encodeURIComponent(id)}.json`);
+        fs.rmSync(filename, { force: true });
+      }
+      this.runs.delete(id);
+    }
+  }
+
   async start(input) {
     if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
@@ -452,6 +464,15 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (!store.runtime.messages) return json(res, 501, { error: "session messages are unavailable" });
         const messages = await store.withRuntime(() => store.runtime.messages(sessionMessages[1]));
         return json(res, 200, { sessionId: sessionMessages[1], messages: Array.isArray(messages) ? messages.slice().sort((a,b) => (b.time?.created ?? 0) - (a.time?.created ?? 0)).slice(0,200) : [] });
+      }
+      const sessionRemove = new URL(req.url, 'http://runner').pathname.match(/^\/sessions\/([A-Za-z0-9._:-]{1,160})$/);
+      if (sessionRemove && req.method === "DELETE") {
+        if (!store.runtime.removeSession) return json(res, 501, { error: "session removal is unavailable" });
+        await store.updateConfiguration(async () => {
+          await store.runtime.removeSession(sessionRemove[1]);
+          store.forgetSessionRuns(sessionRemove[1]);
+        });
+        return json(res, 200, { deleted: true, sessionId: sessionRemove[1] });
       }
       const match = new URL(req.url, "http://runner").pathname.match(/^\/runs(?:\/([^/]+)(?:\/(cancel|approval))?)?$/);
       if (!match) return json(res, 404, { error: "not found" });

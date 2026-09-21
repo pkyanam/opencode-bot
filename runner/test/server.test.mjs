@@ -11,6 +11,7 @@ class FakeRuntime {
   async prompt() { return { id: "in_1" }; }
   async command(session, name, text) { this.commandCall = { session, name, text }; return { id: "cmd_1" }; }
   async nativeAction(session, name, input) { this.actionCall = { session, name, input }; return { compacted: true }; }
+  async removeSession(session) { this.removedSessions ??= []; this.removedSessions.push(session); }
   async catalog(directory) { return { runtime: { name: "opencode2" }, location: directory, models: [{ id: "free", providerID: "test" }], providers: [], agents: [], commands: [{ name: "summarize", execution: "native-session-command" }], clientOnlyCommands: ["help"], mcp: [] }; }
   async interrupt(id) { this.interrupts.push(id); }
   async replyApproval(...args) { this.approvals.push(args); }
@@ -49,6 +50,33 @@ test("existing sessions are re-entered so model changes are applied", async () =
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(fake.createCalls.at(-1).sessionId, "ses_existing");
   assert.equal(fake.createCalls.at(-1).model, "opencode/mimo-v2.5-free");
+});
+
+test("deleting a session fences new runs and removes its persisted receipts", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-delete-"));
+  const fake = new FakeRuntime(); const store = new RunStore(fake, { stateDir });
+  await store.start({ runId: "receipt-1", sessionId: "ses_delete", prompt: "one" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(fs.existsSync(path.join(stateDir, "receipt-1.json")));
+  let release;
+  const entered = new Promise((resolve) => { release = resolve; });
+  fake.removeSession = async (session) => { fake.removedSessions ??= []; fake.removedSessions.push(session); await entered; };
+  const server = createServer({ store, authToken: "secret" });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(`${base}/sessions/ses_delete`, { method: "DELETE" })).status, 401);
+  const pending = fetch(`${base}/sessions/ses_delete`, { method: "DELETE", headers: { authorization: "Bearer secret" } });
+  for (let i = 0; i < 20 && !fake.removedSessions?.length; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(fake.removedSessions, ["ses_delete"]);
+  await assert.rejects(store.start({ runId: "during-delete", prompt: "two" }), { statusCode: 409 });
+  release();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(fake.removedSessions, ["ses_delete"]);
+  assert.equal(store.get("receipt-1"), undefined);
+  assert.equal(fs.existsSync(path.join(stateDir, "receipt-1.json")), false);
+  server.close();
+  fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 test("session actions use explicit v2 APIs and do not require an assistant message", async () => {

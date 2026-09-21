@@ -137,6 +137,8 @@ connecting the web client. See [operations](docs/05-operations.md) and the
 The current vertical slice includes:
 
 - bot, thread, task, run, and event records in SQLite Durable Objects;
+- conversation deletion in its three-dot menu and bot deletion inside Bot settings, with active-work protection and native OpenCode session cleanup (owned-node deletion is not yet supported);
+- Skills → Discover for community directories, OpenCode 2 plugin documentation, and editable repository review requests;
 - idempotent prompt submission, cancellation, event reconciliation, and native
   OpenCode permission replies;
 - bot instructions, memory/skills, interval routines with overlap suppression,
@@ -205,7 +207,7 @@ Dropped native wait connections are retried without resubmitting the prompt.
 If the connection cannot recover, the runner stops native execution before
 publishing a review state; checkpointing also waits for execution to unwind.
 
-The current local suite reports **125 passing tests** covering real SQLite
+The current local suite reports **135 passing tests** covering real SQLite
 coordination, provider contracts, artifact paths, owned-node routing/receipts,
 setup simulation, and the [OpenCode CLI qualification harness](tests/qualification/README.md).
 That harness runs isolated OpenCode CLI 2.0.11 against a local fake
@@ -298,3 +300,5 @@ Automated Telegram tests use a mocked Bot API and real SQLite persistence. Local
 installations use outbound polling by default and do not need HTTPS; Cloudflare
 can use the HTTPS webhook option after a live token and reachable deployment are
 supplied.
+
+See [Skills and plugins](docs/10-extensions.md) for Agent Skills compatibility, OpenCode 2 plugin APIs, catalog discovery, and the planned installation workflow. Discovery currently browses sources and drafts reviews; it does not install extensions.

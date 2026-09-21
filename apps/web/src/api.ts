@@ -280,6 +280,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
+  deleteThread: (id: string) =>
+    request<void>(`/api/threads/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  deleteBot: (id: string) =>
+    request<void>(`/api/bots/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   threadMessages: async (threadId: string) => {
     const result = await request<{ sessionId?: string; messages: any[] }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,

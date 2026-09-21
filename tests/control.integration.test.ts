@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], failApproval: false, messages: [] as any[] }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], failApproval: false, deleteStatus: 200, messages: [] as any[] }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async ensure() {
@@ -13,6 +13,7 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           remote.runs.set(input.runId, run); return Response.json(run, { status: 202 });
         }
         if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
+        if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: 'delete failed' }, { status: remote.deleteStatus });
         const match = path.match(/^\/runs\/([^/]+)(?:\/(cancel|approval))?$/);
         const run = match && remote.runs.get(match[1]);
         if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
@@ -59,7 +60,7 @@ function fixture() {
   };
   return { db, request, create, env, alarms, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.failApproval = false; remote.messages=[]; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.failApproval = false; remote.deleteStatus = 200; remote.messages=[]; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('fails closed without the owner token and handles malformed JSON shapes', async () => {
@@ -227,6 +228,95 @@ it('keeps multiple named conversations per bot independent across restarts',asyn
   f.restart();
   const all=await f.request('/api/threads');
   expect(all.body.map((t:any)=>t.title).sort()).toEqual(['Research notes','Second task']);
+});
+
+it('deletes one conversation while preserving its bot and sibling conversation', async () => {
+  const f = fixture(); const { bot, thread } = await f.create();
+  const sibling = (await f.request('/api/threads', 'POST', { botId: bot.id, title: 'Keep me' })).body;
+  const oldRun = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Remember this', idempotencyKey: 'delete-thread' });
+  await f.request(`/api/runs/${oldRun.body.id}/cancel`, 'POST');
+  const deleted = await f.request(`/api/threads/${thread.id}`, 'DELETE');
+  expect(deleted.status).toBe(200);
+  expect(deleted.body.nativeSessionsDeleted).toBe(0);
+  expect((await f.request(`/api/threads/${thread.id}`, 'PATCH', { title: 'gone' })).status).toBe(404);
+  expect((await f.request('/api/threads')).body.map((item: any) => item.id)).toEqual([sibling.id]);
+  expect((await f.request("/api/bots")).body.map((item: any) => item.id)).toContain(bot.id);
+  expect((await f.request("/api/runs")).body).toHaveLength(0);
+  f.restart();
+  expect((await f.request("/api/threads")).body.map((item: any) => item.id)).toEqual([sibling.id]);
+});
+
+it('rejects deletion while a bot has an active run, then deletes all of its threads', async () => {
+  const f = fixture(); const { bot, thread } = await f.create();
+  const sibling = (await f.request('/api/threads', 'POST', { botId: bot.id, title: 'Second' })).body;
+  await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Still running', idempotencyKey: 'active-delete' });
+  expect((await f.request(`/api/bots/${bot.id}`, 'DELETE')).status).toBe(409);
+  const run = (await f.request('/api/runs')).body[0];
+  await f.request(`/api/runs/${run.id}/cancel`, 'POST');
+  const deleted = await f.request(`/api/bots/${bot.id}`, 'DELETE');
+  expect(deleted.status).toBe(200);
+  expect(deleted.body.counts.threads).toBe(2);
+  expect((await f.request('/api/threads')).body).toHaveLength(0);
+  expect((await f.request('/api/bots')).body).toHaveLength(0);
+  expect(sibling.id).toBeTruthy();
+});
+
+it('allows deletion after a created handoff continuation has completed', async () => {
+  const f = fixture(); const { bot, thread } = await f.create();
+  const run = (await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Finished', idempotencyKey: 'completed-handoff' })).body;
+  await f.request(`/api/runs/${run.id}/cancel`, 'POST');
+  f.db.prepare("INSERT INTO delegation_continuations (source_run_id,status,continuation_run_id,created_at,updated_at) VALUES (?,?,?,?,?)")
+    .run(run.id, 'created', run.id, new Date().toISOString(), new Date().toISOString());
+  const deleted = await f.request(`/api/bots/${bot.id}`, 'DELETE');
+  expect(deleted.status).toBe(200);
+});
+
+it('rejects deletion of owned-node conversations instead of claiming native removal', async () => {
+  const f = fixture();
+  const pair = await f.request('/api/nodes/pairing', 'POST', {});
+  const registered = await f.request('/api/nodes/register', 'POST', {
+    pairingToken: pair.body.token, name: 'Delete node', platform: 'linux', arch: 'x64', capabilities: { runner: true },
+  }, null);
+  const bot = await f.request('/api/bots', 'POST', { name: 'Owned delete', model: 'test/model', nodeId: registered.body.node.id });
+  const thread = await f.request('/api/threads', 'POST', { botId: bot.body.id, title: 'Owned conversation' });
+  const deleted = await f.request(`/api/threads/${thread.body.id}`, 'DELETE');
+  expect(deleted.status).toBe(409);
+  expect(deleted.body.error).toMatch(/owned-node conversations cannot be deleted/);
+  expect((await f.request('/api/threads')).body.some((item: any) => item.id === thread.body.id)).toBe(true);
+});
+
+it('preserves Telegram chat bindings when deleting their conversation', async () => {
+  const f = fixture(); const { bot, thread } = await f.create();
+  const original = globalThis.fetch;
+  globalThis.fetch = vi.fn(async (url: any) => Response.json({ ok: true, result: String(url).endsWith('/getMe') ? { id: 123, is_bot: true, username: 'test_bot', first_name: 'Test' } : [] })) as any;
+  try {
+    expect((await f.request(`/api/bots/${bot.id}/telegram/configure`, 'POST', { token: '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef', transport: 'polling' })).status).toBe(200);
+    f.db.prepare('INSERT INTO telegram_chat_bindings VALUES (?,?,?,?,?,?)').run(bot.id, 'delete-chat', 'delete-chat', 'owner', thread.id, new Date().toISOString());
+    expect((await f.request(`/api/threads/${thread.id}`, 'DELETE')).status).toBe(200);
+    const binding = f.db.prepare('SELECT thread_id FROM telegram_chat_bindings WHERE bot_id=? AND chat_id=?').get(bot.id, 'delete-chat') as any;
+    expect(binding.thread_id).toBeNull();
+  } finally { globalThis.fetch = original; }
+});
+
+it('keeps control-plane data when native session deletion fails', async () => {
+  const f = fixture(); const { thread } = await f.create();
+  f.db.prepare('UPDATE threads SET runner_session_id=? WHERE id=?').run('native-failure', thread.id);
+  remote.deleteStatus = 503;
+  const deleted = await f.request(`/api/threads/${thread.id}`, 'DELETE');
+  expect(deleted.status).toBe(502);
+  expect((await f.request('/api/threads')).body.some((item: any) => item.id === thread.id)).toBe(true);
+  expect(remote.calls).toContain('DELETE /sessions/native-failure');
+});
+
+it('rejects deletion when a native session is shared by another conversation', async () => {
+  const f = fixture(); const { bot, thread } = await f.create();
+  const sibling = (await f.request('/api/threads', 'POST', { botId: bot.id, title: 'Shared session sibling' })).body;
+  f.db.prepare('UPDATE threads SET runner_session_id=? WHERE id IN (?,?)').run('shared-native', thread.id, sibling.id);
+  const deleted = await f.request(`/api/threads/${thread.id}`, 'DELETE');
+  expect(deleted.status).toBe(409);
+  expect(deleted.body.error).toMatch(/native conversation is shared/);
+  expect(remote.calls).not.toContain('DELETE /sessions/shared-native');
+  expect((await f.request('/api/threads')).body.map((item: any) => item.id)).toEqual(expect.arrayContaining([thread.id, sibling.id]));
 });
 
 it('routes an affinity thread to its owned node job and reconciles the durable receipt', async () => {
