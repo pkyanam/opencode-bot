@@ -56,13 +56,23 @@ export function RunProgress({run,tools=[],now: clockNow}: {run:Run;tools?:ToolPa
   const activity=run.status==='running' ? classifyRunActivity(run, currentNow) : {kind:'silent' as const};
   const runningTitle = current ? toolActionLabel(current.name) : activity.kind==='thinking' ? 'Thinking' : activity.kind==='responding' ? 'Writing a response' : activity.kind==='working' ? 'Working' : activity.kind==='provider' ? 'Waiting for the model provider' : activity.kind==='retry' ? 'Retrying the model connection' : run.events?.length ? 'No recent activity' : 'Preparing a response';
   const blocker=run.queue?.blockedBy;
-  const queueTitle=blocker ? `Queued behind ${blocker.botName}${blocker.status==='waiting_approval'?' — approval needed':''}` : run.queue?.reconnecting ? 'Reconnecting to the computer' : (run.queue?.position??1)>1 ? `Queued · position ${run.queue?.position}` : 'Waiting for the computer';
+  const queueTitle=run.queue?.reconnecting
+    ? `Reconnecting to the computer${blocker ? ` · queued behind ${blocker.botName}${blocker.status==='waiting_approval'?' — approval needed':''}` : ''}`
+    : blocker ? `Queued behind ${blocker.botName}${blocker.status==='waiting_approval'?' — approval needed':''}` : (run.queue?.position??1)>1 ? `Queued · position ${run.queue?.position}` : 'Waiting for the computer';
   const titles:Record<string,string>={queued:queueTitle,waiting_dependency:'Computer needs attention',provisioning:'Starting the computer',running:runningTitle,waiting_approval:'Waiting for approval',waiting_human:'Waiting for your input',recovering:'Reconnecting',checkpointing:'Saving computer state',cancelling:'Stopping',succeeded:'Completed',failed:interrupted?'Response interrupted':'Could not complete this request',cancelled:'Stopped',needs_review:'Needs your attention'};
+  const guidance = run.status === 'recovering' || run.queue?.reconnecting
+    ? 'The computer connection is recovering. The task is paused; refresh to check the current run state.'
+    : run.status === 'needs_review'
+      ? 'This run needs attention. Refresh to load the latest state before taking any action.'
+      : run.status === 'waiting_approval' && !run.approval && !run.approvalRequest && !run.pendingApproval && !run.approvals?.length
+        ? 'Approval details are still loading. Refresh to review the permission request.'
+        : undefined;
   const activityAge=activity.ageSeconds !== undefined ? ` · last activity ${activity.ageSeconds < 60 ? `${activity.ageSeconds}s` : `${Math.floor(activity.ageSeconds/60)}m`} ago` : '';
   const failed=['failed','needs_review'].includes(run.status);
   return <section className={`run-progress ${running?'progress-active':''} ${failed?'progress-failed':''}`} aria-label="Task progress">
     <div className="progress-heading"><span className="progress-mark">{running?<LoaderCircle size={15} className="spin"/>:failed?<X size={15}/>:run.status==='cancelled'?<CircleStop size={15}/>:<Check size={15}/>}</span>
     <div><strong>{titles[run.status]??run.status.replaceAll('_',' ')}</strong><span>{elapsed}{recent.length?` · ${recent.length} tool action${recent.length===1?'':'s'}`:queued?' · Not started':running?' · No tool actions yet':' · No tool actions recorded'}{running && activityAge}</span></div></div>
+    {guidance && <p className="progress-guidance">{guidance}</p>}
     {run.error&&<p className="progress-error">{interrupted?'The model connection ended before the response completed.':run.error}</p>}
   </section>;
 }

@@ -74,6 +74,23 @@ it("ensures a runner once and scopes transport with bearer and generation", asyn
   assert.equal(await provider.inspect("c1").then((status) => status.generation), 1);
 });
 
+it("passes keepAlive to the Sandbox factory by default and honors an explicit idle policy", async () => {
+  const seen: Array<{ keepAlive: boolean; sleepAfter?: string | number }> = [];
+  const provider = new CloudflareComputerProvider({
+    sandboxNamespace: {} as CloudflareSandboxBinding,
+    sandboxFactory: (_namespace, _key, options) => { seen.push(options!); return fakeSandbox() as never; },
+  });
+  await provider.ensure({ computerId: "live", runnerToken: "secret" });
+  const idleProvider = new CloudflareComputerProvider({
+    sandboxNamespace: {} as CloudflareSandboxBinding,
+    keepAlive: false,
+    sleepAfter: "30m",
+    sandboxFactory: (_namespace, _key, options) => { seen.push(options!); return fakeSandbox() as never; },
+  });
+  await idleProvider.ensure({ computerId: "idle", runnerToken: "secret" });
+  assert.deepEqual(seen, [{ keepAlive: true, sleepAfter: undefined }, { keepAlive: false, sleepAfter: "30m" }]);
+});
+
 it("reports ephemeral disk as unsupported without R2 and rejects stale leases", async () => {
   const provider = new CloudflareComputerProvider({
     sandboxNamespace: {} as CloudflareSandboxBinding,

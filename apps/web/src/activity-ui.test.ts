@@ -45,3 +45,16 @@ it('explains a blocked queue without counting another run’s tools', () => {
  expect(html).toContain('Not started');
  expect(html).not.toContain('tool action');
 });
+
+it('explains recovery and keeps the run actionable without inventing an approval', () => {
+ const html=renderToStaticMarkup(createElement(RunProgress,{run:{id:'recovering',threadId:'thread',status:'recovering',createdAt:'2026-09-21T00:00:00Z',approval:{requestId:'stale',action:'Delete files'}}}));
+ expect(html).toContain('Reconnecting');
+ expect(html).toContain('refresh to check the current run state');
+ expect(html).not.toContain('Approve');
+});
+
+it('calls out a reconnecting queue even when another run is blocking it', () => {
+ const html=renderToStaticMarkup(createElement(RunProgress,{run:{id:'queued',threadId:'thread',status:'queued',queue:{position:1,reconnecting:true,blockedBy:{id:'active',status:'waiting_approval',botName:'Dilan'}}}}));
+ expect(html).toContain('Reconnecting to the computer');
+ expect(html).toContain('approval needed');
+});

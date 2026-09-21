@@ -98,6 +98,10 @@ export type CloudflareSandboxBinding = unknown;
 
 export type CloudflareComputerProviderOptions = {
   sandboxNamespace: CloudflareSandboxBinding;
+  /** Keep the interactive runner alive between user requests. Disable only when the caller owns an explicit wake/snapshot lifecycle. */
+  keepAlive?: boolean;
+  /** Applied when keepAlive is false; otherwise the SDK ignores it. */
+  sleepAfter?: string | number;
   defaultRunnerPort?: number;
   defaultRunnerCommand?: string;
   /** The image must provide this path. The adapter does not build or mutate images. */
@@ -112,7 +116,7 @@ export type CloudflareComputerProviderOptions = {
   /** Keep the archive below the Worker memory budget while reading binary chunks. */
   maxCheckpointBytes?: number;
   /** Test seam and alternative Sandbox implementations; production defaults to getSandbox. */
-  sandboxFactory?: (namespace: CloudflareSandboxBinding, key: string) => Sandbox<unknown>;
+  sandboxFactory?: (namespace: CloudflareSandboxBinding, key: string, options?: { keepAlive: boolean; sleepAfter?: string | number }) => Sandbox<unknown>;
 };
 
 type ManagedComputer = {
@@ -120,6 +124,7 @@ type ManagedComputer = {
   sandbox: Sandbox<unknown>;
   process?: Process;
   generation: number;
+  keepAlive: boolean;
 };
 
 const DEFAULT_RUNNER_COMMAND = "node /opt/opencode-bot/runner/server.mjs";
@@ -177,11 +182,13 @@ export class CloudflareComputerProvider implements ComputerProvider {
     if (!spec.computerId || !spec.runnerToken) throw new Error("computerId and runnerToken are required");
     const existing = this.computers.get(spec.computerId);
     if (existing) {
+      if (existing.keepAlive && typeof existing.sandbox.setKeepAlive === "function") await existing.sandbox.setKeepAlive(true);
       await this.startRunner(existing);
       return this.handle(existing, await this.inspectManaged(existing));
     }
 
-    const sandbox = this.options.sandboxFactory?.(this.options.sandboxNamespace, key) ?? await defaultSandbox(this.options.sandboxNamespace, key);
+    const sandboxOptions = { keepAlive: this.options.keepAlive ?? true, sleepAfter: this.options.sleepAfter };
+    const sandbox = this.options.sandboxFactory?.(this.options.sandboxNamespace, key, sandboxOptions) ?? await defaultSandbox(this.options.sandboxNamespace, key, sandboxOptions);
     const managed: ManagedComputer = {
       spec: {
         ...spec,
@@ -191,6 +198,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
       },
       sandbox,
       generation: spec.generation ?? 1,
+      keepAlive: sandboxOptions.keepAlive,
     };
     this.computers.set(spec.computerId, managed);
     try {
@@ -332,6 +340,10 @@ export class CloudflareComputerProvider implements ComputerProvider {
       await managed.process.kill(mode === "graceful" ? "SIGTERM" : "SIGKILL").catch(() => undefined);
       managed.process = undefined;
     }
+    // keepAlive intentionally pins the container during normal operation;
+    // stopping the computer must release that pin or the SDK will continue
+    // heartbeating an otherwise idle container.
+    if (managed.keepAlive && typeof managed.sandbox.setKeepAlive === "function") await managed.sandbox.setKeepAlive(false).catch(() => undefined);
     if (mode === "force") await managed.sandbox.stop("SIGKILL").catch(() => undefined);
   }
 
@@ -422,13 +434,17 @@ export class CloudflareComputerProvider implements ComputerProvider {
   }
 }
 
-async function defaultSandbox(namespace: CloudflareSandboxBinding, key: string): Promise<Sandbox<unknown>> {
+async function defaultSandbox(namespace: CloudflareSandboxBinding, key: string, options: { keepAlive: boolean; sleepAfter?: string | number }): Promise<Sandbox<unknown>> {
   const { getSandbox } = await import("@cloudflare/sandbox");
   // The generated DurableObjectNamespace brand is intentionally hidden by
   // Cloudflare's public Sandbox type. Keep the cast at this boundary rather
   // than leaking the branded generic through the application contract.
-  const factory = getSandbox as unknown as (binding: DurableObjectNamespace<any>, id: string) => Sandbox<unknown>;
-  return factory(namespace as DurableObjectNamespace<any>, key);
+  const factory = getSandbox as unknown as (binding: DurableObjectNamespace<any>, id: string, options?: { keepAlive?: boolean; sleepAfter?: string | number }) => Sandbox<unknown>;
+  // The runner is an interactive, long-lived process. Sandbox's default
+  // sleepAfter is 10 minutes of request inactivity, which stops the container
+  // even while the process is alive and loses its ephemeral filesystem. Keep
+  // it alive until the provider's explicit destroy/stop lifecycle runs.
+  return factory(namespace as DurableObjectNamespace<any>, key, options);
 }
 
 function shellQuote(value: string): string {

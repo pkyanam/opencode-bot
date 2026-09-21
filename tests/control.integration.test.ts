@@ -208,7 +208,8 @@ describe('durable control-plane integration with real SQLite', () => {
   });
   it('marks approval forwarding failure for review', async () => {
     const f = fixture(); const { thread } = await f.create(); const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Approve', idempotencyKey: 'approval-fail' }); await f.alarm(); const remoteRun=remote.runs.get(run.body.id); remoteRun.status='waiting_approval'; remoteRun.events=[{seq:1,type:'permission.asked',data:{requestId:'req-fail'}}]; await f.alarm(); remote.failApproval=true;
-    expect((await f.request(`/api/runs/${run.body.id}/approval`, 'POST', { requestId:'req-fail', decision:'approve' })).body.status).toBe('needs_review');
+    expect((await f.request(`/api/runs/${run.body.id}/approval`, 'POST', { requestId:'req-fail', decision:'approve' })).status).toBe(502);
+    expect((await f.request(`/api/runs/${run.body.id}`)).body.status).toBe('needs_review');
   });
 });
 
@@ -813,4 +814,24 @@ it('returns a bounded reconnect response without replaying mutations', async () 
 it('does not disguise an unrelated worker defect as a reconnect', async () => {
   const f = fixture(); f.env.WORKSPACE.get = () => ({ fetch: async () => { throw new Error('unexpected defect'); } });
   await expect(f.request('/api/state')).rejects.toThrow('unexpected defect');
+});
+
+it('does not display or consume approvals after the task has ended', async () => {
+ const f=fixture(); const {thread}=await f.create();
+ const r=await f.request('/api/runs','POST',{threadId:thread.id,prompt:'test',idempotencyKey:'stale-approval'}); await f.alarm();
+ const rr=remote.runs.get(r.body.id); rr.status='waiting_approval'; rr.events=[{seq:1,type:'permission.asked',data:{requestId:'stale'}}]; await f.alarm();
+ f.db.prepare("UPDATE runs SET status='needs_review' WHERE id=?").run(r.body.id);
+ expect((await f.request(`/api/runs/${r.body.id}`)).body.pendingApproval).toBeUndefined();
+ expect((await f.request(`/api/runs/${r.body.id}/approval`,'POST',{requestId:'stale',decision:'approve'})).status).toBe(409);
+ expect((f.db.prepare('SELECT decision FROM approvals WHERE request_id=?').get('stale') as any).decision).toBeNull();
+});
+it('preserves an approval when Computer recovery prevents submission', async () => {
+ const f=fixture(); const {thread}=await f.create(); const r=await f.request('/api/runs','POST',{threadId:thread.id,prompt:'test',idempotencyKey:'recovery-approval'});await f.alarm();
+ const rr=remote.runs.get(r.body.id);rr.status='waiting_approval';rr.events=[{seq:1,type:'permission.asked',data:{requestId:'recovery'}}];await f.alarm();
+ const prepare=vi.spyOn(ComputerManager.prototype,'prepare').mockResolvedValue({state:'restore_required'} as any);
+ try {
+  expect((await f.request(`/api/runs/${r.body.id}/approval`,'POST',{requestId:'recovery',decision:'approve'})).status).toBe(503);
+  expect((f.db.prepare('SELECT decision FROM approvals WHERE request_id=?').get('recovery') as any).decision).toBeNull();
+  expect((await f.request(`/api/runs/${r.body.id}`)).body.status).toBe('waiting_approval');
+ } finally {prepare.mockRestore();}
 });

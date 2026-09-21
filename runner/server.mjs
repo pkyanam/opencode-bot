@@ -15,7 +15,20 @@ const port = Number(process.env.RUNNER_PORT ?? process.env.PORT ?? 8787);
 const token = process.env.RUNNER_TOKEN;
 const isEntrypoint = process.argv[1]?.endsWith("/runner/server.mjs") || process.argv[1]?.endsWith("\\runner\\server.mjs");
 if (!token && isEntrypoint && process.env.NODE_ENV !== "test") throw new Error("RUNNER_TOKEN is required");
-const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(error instanceof Error ? error.message : String(error));
+function errorMessage(error, seen = new Set()) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error) return error;
+  if (!error || typeof error !== 'object' || seen.has(error)) return String(error ?? 'Unknown error');
+  seen.add(error);
+  for (const key of ['message', 'error', 'reason', 'detail', 'cause']) {
+    const value = error[key];
+    if (value === undefined || value === error) continue;
+    const nested = errorMessage(value, seen);
+    if (nested && nested !== '[object Object]') return nested;
+  }
+  try { return JSON.stringify(error); } catch { return '[object Object]'; }
+}
+const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(errorMessage(error));
 
 export class RunStore {
   constructor(runtime, options = {}) {
@@ -25,6 +38,7 @@ export class RunStore {
     this.paused = false;
     this.configuring = false;
     this.runtimeOps = 0;
+    this.nativeWaitTimeoutMs = options.nativeWaitTimeoutMs ?? 5 * 60 * 1000;
     this.runtimeIdle = [];
     this.ownershipUncertain = false;
     this.runs = new Map();
@@ -161,7 +175,7 @@ export class RunStore {
       this.persist(run);
       return { id: messageId, status: "accepted", sessionId: run.sessionId };
     } catch (error) {
-      receipt.error = error instanceof Error ? error.message : String(error);
+      receipt.error = errorMessage(error);
       this.persist(run);
       receipt.status = "uncertain";
       this.persist(run);
@@ -289,7 +303,7 @@ export class RunStore {
       }
     } catch (error) {
       const transportError = isTransientTransportError(error);
-      if (transportError && !run.transportFailure) run.transportFailure = `The native runtime lost its connection while starting this task${error instanceof Error && error.message ? ` (${error.message})` : ''}.`;
+      if (transportError && !run.transportFailure) run.transportFailure = `The native runtime lost its connection while starting this task${errorMessage(error) ? ` (${errorMessage(error)})` : ''}.`;
       const nextStatus = run.cancelRequested ? "cancelled" : (run.transportFailure || transportError || error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
       if (nextStatus === 'needs_review' && run.sessionId) {
         try {
@@ -309,7 +323,7 @@ export class RunStore {
       this.persist(run);
       if (run.steeringAdmissions?.size) await Promise.all([...run.steeringAdmissions]);
       run.status = nextStatus;
-      this.emit(run, "error", { message: run.transportFailure ?? (error instanceof Error ? error.message : String(error)) });
+      this.emit(run, "error", { message: run.transportFailure ?? errorMessage(error) });
     } finally {
       controller.abort();
       run.finishedAt = new Date().toISOString();
@@ -319,21 +333,62 @@ export class RunStore {
 
   async waitForNativeCompletion(run) {
     let lastTransportError;
-    const deadline = Date.now() + 30 * 60 * 1000;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // `session.wait` is a bounded HTTP request in the native service.  An
+    // approval can legitimately leave the model idle for longer than that
+    // request, so do not turn a request timeout into a cancelled/review run
+    // while the run is waiting for a human decision.  Keep each individual
+    // request bounded, and retain the finite retry budget for ordinary turns.
+    const requestTimeoutMs = this.nativeWaitTimeoutMs;
+    let attempt = 0;
+    let approvalReconnects = 0;
+    let approvalCheckFailures = 0;
+    for (;;) {
       try {
-        const remaining = Math.max(1, deadline - Date.now());
-        await this.runtime.wait(run.sessionId, AbortSignal.timeout(remaining));
+        await this.runtime.wait(run.sessionId, AbortSignal.timeout(requestTimeoutMs));
         return undefined;
       } catch (error) {
-        if (!isTransientTransportError(error)) throw error;
+        const timeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+        if (!isTransientTransportError(error) && !timeout) throw error;
         lastTransportError = error;
-        this.emit(run, 'connection.recovering', { attempt: attempt + 1, message: error instanceof Error ? error.message : String(error) });
-        if (attempt < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+        attempt += 1;
+        this.emit(run, 'connection.recovering', { attempt, message: errorMessage(error) });
+        const approvalPending = await this.confirmPendingApproval(run);
+        if (approvalPending) {
+          // The native model is still alive and blocked on permission. Reopen
+          // the bounded wait until the approval endpoint changes run.status.
+          approvalReconnects += 1;
+          approvalCheckFailures = 0;
+          const delay = Math.min(5_000, 100 * 2 ** Math.min(approvalReconnects - 1, 5));
+          attempt = 0;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        approvalCheckFailures += 1;
+        approvalReconnects = 0;
+        if (attempt >= 3 || approvalCheckFailures >= 3) break;
+        await new Promise(resolve => setTimeout(resolve, 100 * attempt));
       }
     }
     run.transportFailure = `The native runtime lost its connection while waiting for this task to finish${lastTransportError?.message ? ` (${lastTransportError.message})` : ''}.`;
     throw lastTransportError ?? new Error(run.transportFailure);
+  }
+
+  async confirmPendingApproval(run) {
+    if (run.status !== 'waiting_approval') return false;
+    // Test doubles and older runtimes without a permission listing endpoint
+    // can only be confirmed by the event stream's state.
+    if (!this.runtime.permissions) return true;
+    try {
+      const permissions = await this.runtime.permissions(run.sessionId, AbortSignal.timeout(Math.min(this.nativeWaitTimeoutMs, 30_000)));
+      if (!Array.isArray(permissions) || permissions.length === 0) return false;
+      for (const permission of permissions) {
+        if (run.events.some(event => event.type === 'approval.requested' && event.data.requestId === permission.id)) continue;
+        this.emit(run, 'approval.requested', { ...permission, requestId: permission.id });
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async watch(run, iterable) {
@@ -364,7 +419,7 @@ export class RunStore {
         }
       }
     } catch (error) {
-      if (!isTerminal(run.status)) this.emit(run, "stream.error", { message: error instanceof Error ? error.message : String(error) });
+      if (!isTerminal(run.status)) this.emit(run, "stream.error", { message: errorMessage(error) });
       if (!this.runtime.wait && !run.cancelRequested) run.status = 'needs_review';
     }
   }
@@ -381,6 +436,7 @@ export class RunStore {
     if (!run) throw httpError(404, "run not found");
     const decision = { approve: "once", deny: "reject", once: "once", always: "always", reject: "reject" }[body?.decision];
     if (!run.sessionId || !body?.requestId || !decision) throw httpError(400, "requestId and decision (approve or deny) are required");
+    if (run.status !== 'waiting_approval') throw httpError(409, "run is not waiting for approval");
     await this.runtime.replyApproval(run.sessionId, body.requestId, decision, body.message);
     if (run.status === 'waiting_approval') run.status = 'running';
     this.emit(run, "approval.replied", { requestId: body.requestId, decision: body.decision, upstreamDecision: decision });
@@ -620,7 +676,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       if (req.method === "POST" && match[2] === "cancel") return json(res, 200, await store.withRuntime(() => store.cancel(store.get(match[1]))));
       if (req.method === "POST" && match[2] === "approval") return json(res, 200, await store.approval(store.get(match[1]), body));
       return json(res, 405, { error: "method not allowed" });
-    } catch (error) { const status = error.statusCode ?? 500; json(res, status, { error: error.message ?? String(error), ...(error.notAdmitted === true ? { notAdmitted: true } : {}) }); }
+    } catch (error) { const status = error?.statusCode ?? 500; json(res, status, { error: errorMessage(error), ...(error?.notAdmitted === true ? { notAdmitted: true } : {}) }); }
   });
 }
 

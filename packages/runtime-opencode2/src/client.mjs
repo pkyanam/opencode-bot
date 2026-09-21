@@ -589,7 +589,10 @@ export class OpenCode2Runtime {
     if (this.messageCache.size > 100) this.messageCache.delete(this.messageCache.keys().next().value);
     return entry.promise;
   }
-  async permissions(sessionID) { await this.start(); return this.client.permission.list({ sessionID }); }
+  async permissions(sessionID, signal) {
+    await this.start();
+    return this.client.permission.list({ sessionID }, signal ? { signal } : undefined);
+  }
 
   async *log(sessionId, after = 0, follow = false) {
     await this.start();

@@ -97,8 +97,12 @@ const fmtTime = (d?: string) =>
       }).format(new Date(d))
     : "";
 const key = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-const pendingApproval = (run?: Run): ApprovalRequest | undefined => {
+export const pendingApproval = (run?: Run): ApprovalRequest | undefined => {
   if (!run) return undefined;
+  // The run lifecycle is authoritative. An approval row can outlive the
+  // request while the runner is recovering, or after the request was handled
+  // on another client. Never offer a decision for one of those stale rows.
+  if ((run.status ?? "").toLowerCase() !== "waiting_approval") return undefined;
   const raw =
     run.pendingApproval ??
     run.approvalRequest ??
@@ -2163,6 +2167,14 @@ function ApprovalCard({
   const label = request.action ?? "Action requires approval";
   const detail =
     request.description ?? request.command ?? request.target ?? request.scope;
+  const permissionDetails = Object.entries({
+    ...(request.details ?? {}),
+    ...(request.payload ?? {}),
+  }).filter(([key, value]) => {
+    if (["id", "requestId", "status"].includes(key)) return false;
+    if (value === undefined || value === null || value === "") return false;
+    return !["action", "description", "command", "target", "scope", "expiresAt"].includes(key);
+  });
   return (
     <div className="approval-card">
       <div className="approval-title">
@@ -2177,6 +2189,16 @@ function ApprovalCard({
       <div className="approval-detail">
         <div className="approval-action">{label}</div>
         {detail && <pre>{detail}</pre>}
+        {permissionDetails.length > 0 && (
+          <dl className="approval-permission-details">
+            {permissionDetails.map(([key, value]) => (
+              <div key={key}>
+                <dt>{key.replaceAll(/[_-]+/g, " ")}</dt>
+                <dd>{typeof value === "string" ? value : JSON.stringify(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
         {request.expiresAt && (
           <small>Expires {fmtTime(request.expiresAt)}</small>
         )}

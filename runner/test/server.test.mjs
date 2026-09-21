@@ -175,9 +175,12 @@ test("checkpoint refuses active work and maps product approval to v2 decision", 
   await assert.rejects(() => store.checkpoint(), (error) => error.statusCode === 409);
   await new Promise((resolve) => setTimeout(resolve, 20));
   const run = store.get("active");
+  run.status = 'waiting_approval';
   await store.approval(run, { requestId: "p1", decision: "approve" });
   assert.equal(fake.approvals.at(-1)[1], "p1");
   assert.equal(fake.approvals.at(-1)[2], "once");
+  run.status = 'succeeded';
+  await assert.rejects(() => store.approval(run, { requestId: "p1", decision: "approve" }), (error) => error.statusCode === 409);
 });
 
 test("quiescing blocks catalog and desktop startup while the archive is active", async () => {
@@ -257,6 +260,32 @@ test('transient wait transport failures are retried while native execution conti
   assert.deepEqual(runtime.interrupts, []);
 });
 
+test('wait timeout reconnects remain alive while native execution awaits approval', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => {};
+  let waits = 0;
+  let nativeFinished = false;
+  runtime.messages = async () => nativeFinished ? [{ id: 'assistant-approval', type: 'assistant', content: [{ type: 'text', text: 'approved' }] }] : [];
+  const store = new RunStore(runtime, { nativeWaitTimeoutMs: 1 });
+  runtime.permissions = async () => store.get('approval-timeout').status === 'waiting_approval' ? [{ id: 'permission-1', action: 'shell', resources: [] }] : [];
+  runtime.wait = async () => {
+    waits += 1;
+    if (waits < 4) {
+      store.get('approval-timeout').status = 'waiting_approval';
+      throw Object.assign(new Error('bounded wait elapsed'), { name: 'TimeoutError' });
+    }
+    nativeFinished = true;
+    store.get('approval-timeout').status = 'running';
+  };
+  await store.start({ runId: 'approval-timeout', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 1_000));
+  const run = store.public(store.get('approval-timeout'));
+  assert.equal(run.status, 'succeeded');
+  assert.equal(run.final, 'approved');
+  assert.equal(waits, 4);
+});
+
 test('Telegram final receipt uses the last textual assistant message and ignores a tool-only tail', async () => {
   const runtime = new FakeRuntime();
   runtime.events = undefined;
@@ -306,6 +335,16 @@ test('prompt transport failure is reviewable and interrupts without replaying th
   const run = store.public(store.get('prompt-transport'));
   assert.equal(run.status, 'needs_review');
   assert.deepEqual(runtime.interrupts, ['ses_1']);
+});
+
+test('structured native errors retain their nested message', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => { throw { error: { message: 'Session not found: ses_old' } }; };
+  const store = new RunStore(runtime);
+  await store.start({ runId: 'structured-error', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(store.public(store.get('structured-error')).error, 'Session not found: ses_old');
 });
 
 test('new runs remain blocked until deferred native interruption completes', async () => {

@@ -64,6 +64,18 @@ export class ComputerManager {
     const runnerState = await this.readRunnerState(transport);
     this.latestRunnerStates.set(spec.computerId, runnerState);
     if (!committedCheckpoint) return { handle, state: "ready", runnerState };
+    // A replacement is proven by an explicit runner identity mismatch. A
+    // legacy pointer without an identity is unknown and must be repaired by an
+    // explicit restore, rather than repeatedly reported as restore_required.
+    if (!committedCheckpoint.runnerInstanceId) {
+      return {
+        handle,
+        state: "state_unknown",
+        committedCheckpoint,
+        runnerState,
+        detail: "Committed checkpoint has no runner lineage; explicit restore is required to establish it",
+      };
+    }
     if (runnerState.fresh === true || (runnerState.instanceId && runnerState.instanceId !== committedCheckpoint.runnerInstanceId)) {
       return {
         handle,

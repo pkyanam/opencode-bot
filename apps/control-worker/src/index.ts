@@ -1913,7 +1913,7 @@ export class Workspace {
     return {
       ...this.run(item),
       events: this.events(runId),
-      ...(pending
+      ...(pending && (item as any).status === "waiting_approval"
         ? {
             pendingApproval: {
               requestId: pending.request_id,
@@ -1995,10 +1995,26 @@ export class Workspace {
       );
     const run = this.one<any>("SELECT * FROM runs WHERE id = ?", runId);
     if (!run) throw new HttpError(404, "run not found");
+    if (run.status !== "waiting_approval")
+      throw new HttpError(409, "This task is no longer waiting for approval. Refresh the conversation to see its current state.");
     const affinity = this.one<any>(
       "SELECT node_id FROM threads WHERE id=?",
       run.thread_id,
     );
+    // Check availability before consuming a one-shot decision. A cold or
+    // replaced Computer must not turn an unsubmitted approval into success.
+    let approvalTransport: Awaited<ReturnType<Workspace["transport"]>> | undefined;
+    if (!affinity?.node_id) {
+      try { approvalTransport = await this.transport(); }
+      catch (error) {
+        const recovery = /recovery required|restore_required/.test(String(error));
+        throw new HttpError(503, recovery
+          ? "Approval was not sent. The Computer needs recovery; review Computer & checkpoints before continuing."
+          : "Approval was not sent. The Computer is reconnecting; retry shortly.");
+      }
+    }
+    if (this.one<any>("SELECT status FROM runs WHERE id=?", runId)?.status !== "waiting_approval")
+      throw new HttpError(409, "This task is no longer waiting for approval. Refresh the conversation to see its current state.");
     const pending = this.one<any>(
       "SELECT * FROM approvals WHERE request_id=? AND run_id=? AND decision IS NULL",
       requestId,
@@ -2030,8 +2046,7 @@ export class Workspace {
           decision,
         });
       else {
-        const transport = await this.transport();
-        const result = await transport.fetch(`/runs/${runId}/approval`, {
+        const result = await approvalTransport!.fetch(`/runs/${runId}/approval`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ requestId, decision }),
@@ -2062,6 +2077,7 @@ export class Workspace {
         { requestId, decision },
       );
     this.state.storage.setAlarm(Date.now() + 50);
+    if (!forwarded) throw new HttpError(502, "The Computer did not confirm the approval. The task needs review; your action was not reported as successful.");
     return this.runView(runId);
   }
   private async memoryRoute(
@@ -2607,7 +2623,13 @@ export class Workspace {
     const result = await transport.fetch(
       `/sessions/${encodeURIComponent(thread.runner_session_id)}/messages`,
     );
-    if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } });
+    if (!result.ok) {
+      const failure = await result.clone().json().catch(() => null) as any;
+      if (failure?.error === `Session not found: ${thread.runner_session_id}`) {
+        throw new HttpError(409, "This conversation's OpenCode session is missing from the recovered Computer. Its saved activity is retained here. Start a new conversation to continue; restoring the same checkpoint again will not recover this session.");
+      }
+      return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } });
+    }
     const payload = await result.json() as any;
     const internalPrompts = new Set(this.rows<any>("SELECT prompt FROM runs WHERE thread_id=? AND bot_messaging=0", threadId).map(run => run.prompt));
     const messages = (payload.messages ?? []).filter((message: any) => !(message.type === "user" && internalPrompts.has(message.text))).map((message: any) => ({
@@ -3348,8 +3370,7 @@ export class Workspace {
         item.data?.properties?.requestID ??
         item.data?.properties?.id;
       if (
-        String(item.type).includes("approval") ||
-        String(item.type).includes("permission")
+        ["approval.requested", "permission.asked", "session.permission.asked"].includes(String(item.type))
       ) {
         if (approvalId)
           this.state.storage.sql.exec(

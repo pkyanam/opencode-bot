@@ -38,11 +38,22 @@ describe("ComputerManager", () => {
   it("requires explicit restore when the runner instance changes", async () => {
     const calls: string[] = [];
     const pointers = store({ manifest: { id: "cp1", computerId: "shared", createdAt: "now", supported: true, durable: true }, computerId: "shared", fence: 1, committedAt: "now", runnerInstanceId: "old" });
-    const manager = new ComputerManager(fakeProvider({ instanceId: "new", fresh: true }, calls), pointers);
+    const manager = new ComputerManager(fakeProvider({ instanceId: "new" }, calls), pointers);
     const readiness = await manager.prepare({ computerId: "shared", runnerToken: "token" });
     expect(readiness.state).toBe("restore_required");
     await manager.restore("shared");
     expect(calls).toEqual(["restore"]);
     expect(pointers.value?.runnerInstanceId).toBe("new");
+    expect((await manager.prepare({ computerId: "shared", runnerToken: "token" })).state).toBe("ready");
+  });
+
+  it("does not turn a legacy pointer without lineage into a permanent restore loop", async () => {
+    const calls: string[] = [];
+    const pointers = store({ manifest: { id: "cp1", computerId: "shared", createdAt: "now", supported: true, durable: true }, computerId: "shared", fence: 1, committedAt: "now" });
+    const manager = new ComputerManager(fakeProvider({ instanceId: "current" }, calls), pointers);
+    expect((await manager.prepare({ computerId: "shared", runnerToken: "token" })).state).toBe("state_unknown");
+    await manager.restore("shared");
+    expect(pointers.value?.runnerInstanceId).toBe("current");
+    expect((await manager.prepare({ computerId: "shared", runnerToken: "token" })).state).toBe("ready");
   });
 });

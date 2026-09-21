@@ -43,6 +43,9 @@ const terminal = new Set([
   "cancelled",
   "completed",
   "error",
+  "needs_review",
+  "restore_required",
+  "restorerequired",
 ]);
 const lifecycle = new Set([
   "run.queued",
@@ -55,6 +58,14 @@ const lifecycle = new Set([
   "run.failed",
   "run.cancelled",
   "run.needs_review",
+]);
+const terminalLifecycle = new Set([
+  "run.succeeded",
+  "run.failed",
+  "run.cancelled",
+  "run.needs_review",
+  "runner.recovery.needs_review",
+  "runner.recovery.required",
 ]);
 const humanTool: Record<string, string> = {
   browser_navigate: "Open page",
@@ -92,6 +103,40 @@ const elapsed = (run: Run) => {
   return seconds > 60
     ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
     : `${seconds}s`;
+};
+const normalizedStatus = (status: string | undefined) =>
+  (status ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+const latestLifecycleEvent = (run: Run) => {
+  const events = (run.events ?? []).filter((event) => event.type);
+  return events.reduce<RunEvent | undefined>((latest, event) => {
+    if (!latest) return event;
+    const latestTime = Date.parse(latest.createdAt ?? "");
+    const eventTime = Date.parse(event.createdAt ?? "");
+    if (!Number.isFinite(eventTime) && !Number.isFinite(latestTime)) return event;
+    return Number.isFinite(eventTime) && (!Number.isFinite(latestTime) || eventTime >= latestTime)
+      ? event
+      : latest;
+  }, undefined);
+};
+const hasTerminalLifecycle = (run: Run) => {
+  const eventType = latestLifecycleEvent(run)?.type ?? "";
+  return terminalLifecycle.has(eventType) || eventType.includes("restore_required");
+};
+const actionableApproval = (run: Run, approval?: Approval) =>
+  Boolean(approval) &&
+  normalizedStatus(run.status) === "waiting_approval" &&
+  !hasTerminalLifecycle(run);
+const approvalKey = (run: Run, approval: Approval) =>
+  `${run.id}:${approval.requestId ?? approval.id ?? "approval"}`;
+const approvalDescription = (approval: Approval) => {
+  const action = approval.action ? toolLabel(approval.action) : "Continue this task";
+  const extra = approval as Approval & { resources?: unknown; source?: unknown };
+  const target = approval.target ?? approval.command ??
+    (typeof extra.source === "string" ? extra.source : undefined);
+  const resources = Array.isArray(extra.resources)
+    ? extra.resources.filter((item): item is string => typeof item === "string").join(", ")
+    : "";
+  return target ? `${action}: ${target}${resources ? ` (${resources})` : ""}` : resources ? `${action}: ${resources}` : action;
 };
 type Tool = Extract<NonNullable<Message["parts"]>[number], { type: "tool" }>;
 
@@ -222,9 +267,11 @@ export default function ThreadScreen() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const inFlight = useRef(false);
+  const approvalInFlight = useRef(new Set<string>());
   const mounted = useRef(true);
   const loadSerial = useRef(0);
   const load = useCallback(async () => {
@@ -242,7 +289,7 @@ export default function ThreadScreen() {
       );
       const refreshed = await Promise.all(
         threadRuns
-          .filter((run) => !terminal.has(run.status))
+          .filter((run) => !terminal.has(normalizedStatus(run.status)))
           .map(async (run) => {
             try {
               const [detail, events] = await Promise.all([
@@ -264,7 +311,6 @@ export default function ThreadScreen() {
           [],
       );
       setRuns(threadRuns.map((run) => byId.get(run.id) ?? run));
-      setError("");
     } catch (e) {
       if (mounted.current)
         setError(
@@ -439,11 +485,19 @@ export default function ThreadScreen() {
     approval: Approval,
     decision: "approve" | "deny",
   ) {
+    const key = approvalKey(run, approval);
+    if (!actionableApproval(run, approval) || approvalInFlight.current.has(key)) return;
+    approvalInFlight.current.add(key);
+    setApprovalBusy(key);
     try {
       await client.approve(run.id, approval, decision);
+      setError("");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not update approval.");
+    } finally {
+      approvalInFlight.current.delete(key);
+      setApprovalBusy((current) => (current === key ? null : current));
     }
   }
   async function rename() {
@@ -500,7 +554,7 @@ export default function ThreadScreen() {
       run,
       approval: run.pendingApproval ?? run.approval ?? run.approvalRequest,
     }))
-    .find((item) => item.approval);
+    .find((item) => actionableApproval(item.run, item.approval));
   const activity = runs
     .flatMap((run) =>
       (run.events ?? [])
@@ -643,21 +697,25 @@ export default function ThreadScreen() {
             <View style={[styles.card, { borderColor: colors.accent }]}>
               <Text style={mobileStyles.approvalTitle}>Approval required</Text>
               <Text style={[styles.subtitle, { marginTop: 7 }]}>
-                {approval.approval?.description ??
-                  approval.approval?.action ??
-                  "The task is waiting for your approval."}
+                {approval.approval?.description ?? approvalDescription(approval.approval!)}
               </Text>
               <View style={mobileStyles.actions}>
                 <Pressable
-                  style={[styles.button, { flex: 1 }]}
+                  disabled={approvalBusy !== null}
+                  style={[styles.button, { flex: 1 }, approvalBusy !== null && { opacity: 0.6 }]}
                   onPress={() =>
                     void decide(approval.run, approval.approval!, "approve")
                   }
                 >
-                  <Text style={styles.buttonText}>Approve</Text>
+                  {approvalBusy === approvalKey(approval.run, approval.approval!) ? (
+                    <ActivityIndicator color={colors.text} size="small" />
+                  ) : (
+                    <Text style={styles.buttonText}>Approve</Text>
+                  )}
                 </Pressable>
                 <Pressable
-                  style={[styles.ghost, { flex: 1 }]}
+                  disabled={approvalBusy !== null}
+                  style={[styles.ghost, { flex: 1 }, approvalBusy !== null && { opacity: 0.6 }]}
                   onPress={() =>
                     void decide(approval.run, approval.approval!, "deny")
                   }
@@ -668,7 +726,11 @@ export default function ThreadScreen() {
             </View>
           ) : null}
           {runs
-            .filter((run) => ACTIVE.has(run.status))
+            .filter(
+              (run) =>
+                ACTIVE.has(normalizedStatus(run.status)) &&
+                !hasTerminalLifecycle(run),
+            )
             .map((run) => (
               <View key={run.id} style={mobileStyles.progress}>
                 <View style={{ flex: 1 }}>
