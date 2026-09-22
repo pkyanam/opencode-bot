@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { DesktopController } from "../desktop.mjs";
+import { DesktopController, JpegFrameParser, parseMjpegStream, createFfmpegMjpegStream } from "../desktop.mjs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const hasFfmpeg = await promisify(execFile)("ffmpeg", ["-version"]).then(() => true).catch(() => false);
+
+test("persistent MJPEG parser handles split frames with a bounded frame size", async () => {
+  const parser = new JpegFrameParser(16);
+  assert.equal(parser.push(Uint8Array.from([0xff, 0xd8, 1])).length, 0);
+  assert.deepEqual(parser.push(Uint8Array.from([2, 0xff, 0xd9, 0xff, 0xd8, 3, 0xff, 0xd9])), [Uint8Array.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]), Uint8Array.from([0xff, 0xd8, 3, 0xff, 0xd9])]);
+  await assert.rejects(async () => { const p = new JpegFrameParser(4); p.push(Uint8Array.from([0xff, 0xd8, 1, 2, 3])); }, /size limit/);
+});
+
+test("persistent capture stream stops consumption when the last viewer leaves", async () => {
+  let pulls = 0; let stopped = false;
+  const desktop = new DesktopController({ captureStream: async function* () { while (!stopped) { pulls += 1; yield Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]); await delay(2); } }, startDisplay: async () => ({}), stopDisplay: async () => undefined, startBrowser: async () => ({}), stopBrowser: async () => undefined });
+  const response = await desktop.stream(); const reader = response.body.getReader(); await reader.read(); await reader.cancel(); await delay(20); stopped = true; const after = pulls; await delay(10); assert.equal(pulls, after); await desktop.close();
+});
+
+test("persistent ffmpeg MJPEG producer emits frames from a lavfi source", { skip: !hasFfmpeg }, async () => {
+  const frames = []; let count = 0;
+  for await (const frame of createFfmpegMjpegStream({ signal: new AbortController().signal, fps: 2, inputArgs: ["-f", "lavfi", "-i", "testsrc=size=16x16:rate=2"] })) { frames.push(frame); if (++count === 2) break; }
+  assert.equal(frames.length, 2); assert.ok(frames.every((frame) => frame[0] === 0xff && frame[1] === 0xd8));
+});
 
 test("desktop MJPEG capture is demand driven and emits real multipart frames", async () => {
   let captures = 0;
@@ -83,5 +105,28 @@ test("control lease expiry releases held keys without another request", async ()
   await delay(100);
   assert.equal(desktop.controlStatus().active, false);
   assert.ok(calls.some((call) => call[0] === "xdotool" && call[1][0] === "keyup" && call[1][1] === "shift"));
+  await desktop.close();
+});
+
+test("capture switches between passive and human-control rates and aborts on disconnect", async () => {
+  const modes = [];
+  const desktop = new DesktopController({
+    startDisplay: async () => ({}), stopDisplay: async () => {}, startBrowser: async () => ({}), stopBrowser: async () => {}, runCommand: async () => "",
+    captureStream: async function* ({ fps, signal }) {
+      modes.push(fps);
+      yield new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+      await new Promise(resolve => { if (signal.aborted) resolve(); else signal.addEventListener("abort", resolve, { once: true }); });
+    },
+  });
+  const response = await desktop.stream();
+  const reader = response.body.getReader(); await reader.read();
+  const lease = desktop.acquireControl();
+  await delay(10);
+  assert.deepEqual(modes, [3, 60]);
+  await desktop.releaseControl(lease.token);
+  await delay(10);
+  assert.deepEqual(modes, [3, 60, 3]);
+  await reader.cancel(); await delay(10);
+  assert.equal(desktop.status().captureActive, false);
   await desktop.close();
 });

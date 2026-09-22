@@ -82,6 +82,7 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
   const [text, setText] = useState("");
   const queue = useRef<Array<{ input: ComputerInput; pointerMove: boolean; lease: string }>>([]);
   const draining = useRef(false);
+  const controlSurface = useRef<HTMLDivElement>(null);
 
   const setLease = useCallback((value: string | null) => {
     leaseRef.current = value;
@@ -134,8 +135,8 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
       return;
     }
     if (pointerMove) {
-      const index = queue.current.findIndex((item) => item.pointerMove);
-      if (index >= 0) {
+      const index = queue.current.length - 1;
+      if (index >= 0 && queue.current[index].pointerMove && queue.current[index].lease === leaseRef.current) {
         queue.current[index] = { input, pointerMove: true, lease: leaseRef.current };
         void drain();
         return;
@@ -171,6 +172,7 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
       }
       setLease(acquired);
       setStatus("controlling");
+      controlSurface.current?.focus();
     } catch (e) {
       setStatus("error");
       setError(e instanceof Error ? e.message : "Could not take control of the computer.");
@@ -246,16 +248,17 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
 
   return (
     <section aria-label="Interactive computer" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0, height: "100%" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      <header style={{ paddingRight: 28, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
           <strong>Live computer</strong>
           <span style={{ marginLeft: 10, color: "var(--muted)", fontSize: 11 }}>
             {status === "controlling" ? "You have control" : status === "acquiring" ? "Taking control…" : status === "error" ? "Control unavailable" : "Bot control"}
           </span>
         </div>
-        <button className="icon-btn" type="button" onClick={() => { void release().finally(onClose); }} aria-label="Close live computer">×</button>
+
       </header>
       <div
+        ref={controlSurface}
         tabIndex={0}
         onPointerDown={(event) => event.currentTarget.focus()}
         onKeyDown={(event) => key(event, "down")}
@@ -279,8 +282,9 @@ export function InteractiveComputer({ frame, onClose, initialUrl }: InteractiveC
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         {!leaseId ? <button className="primary-btn" type="button" onClick={() => void acquire()} disabled={status === "acquiring"}>{status === "acquiring" ? "Taking control…" : "Take control"}</button> : <button className="soft-btn" type="button" onClick={() => void release()}>Return to bot</button>}
         {leaseId && initialUrl ? <button className="primary-btn" type="button" onClick={openLogin}>Open login in Computer</button> : null}
+        <details style={{ flex: 1 }}><summary style={{ cursor: "pointer", fontSize: 12 }}>Paste or send text</summary>
         <input className="text-input" aria-label="Text to send to computer" value={text} maxLength={16_000} onChange={(event) => setText(event.target.value)} onPaste={paste} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); sendText(); } }} placeholder="Type text to send…" disabled={!leaseId} />
-        <button className="soft-btn" type="button" onClick={sendText} disabled={!leaseId || !text}>Send text</button>
+        <button className="soft-btn" type="button" onClick={sendText} disabled={!leaseId || !text}>Send text</button></details>
         <button className="soft-btn" type="button" onClick={() => { void release().finally(onClose); }}>Close</button>
       </div>
     </section>

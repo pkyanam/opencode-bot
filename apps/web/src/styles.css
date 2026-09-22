@@ -3354,6 +3354,18 @@ a:focus-visible {
 .computer-rail-open {
   overflow-y: auto;
 }
+.computer-rail-open {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.computer-rail-open .computer-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
 
 .computer-preview-expand {
   position: relative;
@@ -3365,6 +3377,13 @@ a:focus-visible {
   color: inherit;
   cursor: zoom-in;
   text-align: left;
+}
+.computer-preview-expand img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  object-fit: contain;
 }
 .computer-preview-expand:focus-visible {
   outline: 2px solid #ddc8b9;
@@ -3393,13 +3412,24 @@ a:focus-visible {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  width: calc(100vw - 32px);
+  width: 100vw;
   max-width: none;
-  height: calc(100dvh - 32px);
+  height: 100dvh;
   max-height: none;
-  padding: 22px 24px 24px;
+  padding: 12px;
+  border-radius: 0;
   overflow: hidden;
   background: #100e0d;
+}
+.computer-preview-dialog section[aria-label="Interactive computer"] {
+  flex: 1;
+  min-height: 0;
+}
+.computer-preview-dialog section[aria-label="Interactive computer"] > div[tabindex] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
 }
 .computer-preview-dialog-title {
   margin: 0 32px 14px 0;

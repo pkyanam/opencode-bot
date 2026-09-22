@@ -38,7 +38,8 @@ export class DesktopController {
     this.display = options.display ?? process.env.DISPLAY ?? ":99";
     this.width = options.width ?? 1440;
     this.height = options.height ?? 900;
-    this.fps = Math.min(5, Math.max(1, options.fps ?? 2));
+    this.fps = Math.min(60, Math.max(1, options.fps ?? 3));
+    this.captureStream = options.captureStream ?? (!options.captureFrame ? ((options) => createFfmpegMjpegStream({ display: this.display, width: this.width, height: this.height, ...options })) : undefined);
     this.maxViewers = options.maxViewers ?? 4;
     this.captureFrame = options.captureFrame ?? (() => captureX11Frame(this.display));
     this.startDisplay = options.startDisplay ?? (() => startX11Display(this.display, this.width, this.height));
@@ -62,6 +63,7 @@ export class DesktopController {
     this.state = "stopped";
     this.error = undefined;
     this.controlLease = undefined;
+    this.captureAbort?.abort();
     this.heldKeys = new Set();
     this.heldButtons = new Set();
     this.controlExpiryTimer = undefined;
@@ -115,6 +117,7 @@ export class DesktopController {
     const token = randomUUID();
     this.controlLease = { token, owner: String(owner).slice(0, 120), expiresAt: Date.now() + CONTROL_LEASE_MS };
     this.armControlExpiry();
+    this.captureAbort?.abort();
     return this.controlStatus(true);
   }
 
@@ -134,6 +137,7 @@ export class DesktopController {
       await this.controlInputQueue;
       await this.releaseHeldInput();
       this.controlLease = undefined;
+    this.captureAbort?.abort();
     } finally {
       this.controlCleanupPending = false;
     }
@@ -253,6 +257,7 @@ export class DesktopController {
   async close() {
     for (const client of this.clients.values()) client.controller.close();
     this.clients.clear();
+    this.captureAbort?.abort();
     if (this.captureTask) await this.captureTask.catch(() => undefined);
     this.captureTask = undefined;
     clearTimeout(this.controlExpiryTimer);
@@ -261,6 +266,7 @@ export class DesktopController {
     await this.controlInputQueue.catch(() => undefined);
     await this.releaseHeldInput();
     this.controlLease = undefined;
+    this.captureAbort?.abort();
     this.controlCleanupPending = false;
     await this.stopBrowser(this.browserHandle);
     this.browserHandle = undefined;
@@ -271,6 +277,7 @@ export class DesktopController {
 
   removeClient(id) {
     this.clients.delete(id);
+    if (!this.clients.size) this.captureAbort?.abort();
   }
 
   requireControl(token) {
@@ -283,6 +290,7 @@ export class DesktopController {
       clearTimeout(this.controlExpiryTimer);
       this.controlExpiryTimer = undefined;
       this.controlLease = undefined;
+    this.captureAbort?.abort();
       this.controlCleanupPending = true;
       const cleanup = this.controlInputQueue.then(() => this.releaseHeldInput());
       this.controlInputQueue = cleanup.catch(() => undefined);
@@ -295,6 +303,7 @@ export class DesktopController {
     this.controlExpiryTimer = setTimeout(() => {
       if (!this.controlLease || this.controlLease.expiresAt > Date.now()) return this.armControlExpiry();
       this.controlLease = undefined;
+    this.captureAbort?.abort();
       this.controlExpiryTimer = undefined;
       this.controlCleanupPending = true;
       const cleanup = this.controlInputQueue.then(() => this.releaseHeldInput());
@@ -316,20 +325,31 @@ export class DesktopController {
   startCaptureLoop() {
     if (this.captureTask) return;
     this.captureTask = (async () => {
+      if (this.captureStream) {
+        while (this.clients.size > 0) {
+          const controller = new AbortController();
+          this.captureAbort = controller;
+          try {
+            for await (const image of this.captureStream({ fps: this.controlLease ? 60 : this.fps, signal: controller.signal })) {
+              if (!this.clients.size || controller.signal.aborted) break;
+              this.publishFrame(image);
+            }
+            if (!controller.signal.aborted && this.clients.size) throw new Error("Desktop capture stopped unexpectedly");
+          } catch (error) {
+            if (controller.signal.aborted) continue;
+            this.state = "error";
+            this.error = error instanceof Error ? error.message : String(error);
+            for (const client of this.clients.values()) client.controller.error(error);
+            this.clients.clear();
+          }
+        }
+        return;
+      }
       while (this.clients.size > 0) {
         try {
           const image = await this.captureFrame();
           if (!(image instanceof Uint8Array) || image.byteLength === 0) throw new Error("desktop capture returned no JPEG frame");
-          const header = new TextEncoder().encode(`--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${image.byteLength}\r\n\r\n`);
-          const suffix = new TextEncoder().encode("\r\n");
-          for (const [id, client] of this.clients) {
-            try {
-              if (client.controller.desiredSize !== null && client.controller.desiredSize <= 0) continue;
-              client.controller.enqueue(concat(header, image, suffix));
-            } catch {
-              this.clients.delete(id);
-            }
-          }
+          this.publishFrame(image);
           await delay(1000 / this.fps);
         } catch (error) {
           this.state = "error";
@@ -341,15 +361,61 @@ export class DesktopController {
       }
     })().finally(() => { this.captureTask = undefined; if (this.clients.size === 0 && this.state === "ready") this.state = "paused"; });
   }
+
+  publishFrame(image) {
+    if (!(image instanceof Uint8Array) || image.byteLength === 0 || image.byteLength > 8 * 1024 * 1024) throw new Error("desktop capture returned an invalid JPEG frame");
+    const header = new TextEncoder().encode(`--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${image.byteLength}\r\n\r\n`);
+    const suffix = new TextEncoder().encode("\r\n");
+    for (const [id, client] of this.clients) { try { if (client.controller.desiredSize !== null && client.controller.desiredSize <= 0) continue; client.controller.enqueue(concat(header, image, suffix)); } catch { this.clients.delete(id); } }
+  }
+}
+
+/** Bounded JPEG SOI/EOI parser for a persistent MJPEG producer. */
+export class JpegFrameParser {
+  constructor(maxFrameBytes = 8 * 1024 * 1024) { this.maxFrameBytes = maxFrameBytes; this.buffer = new Uint8Array(0); }
+  push(chunk) {
+    const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk); const merged = new Uint8Array(this.buffer.length + data.length); merged.set(this.buffer); merged.set(data, this.buffer.length); this.buffer = merged; const frames = [];
+    while (true) { let start = -1; for (let i = 0; i < this.buffer.length - 1; i += 1) if (this.buffer[i] === 0xff && this.buffer[i + 1] === 0xd8) { start = i; break; } if (start < 0) { this.buffer = this.buffer.slice(Math.max(0, this.buffer.length - 1)); break; } let end = -1; for (let i = start + 2; i < this.buffer.length - 1; i += 1) if (this.buffer[i] === 0xff && this.buffer[i + 1] === 0xd9) { end = i + 2; break; } if (end < 0) { if (this.buffer.length - start > this.maxFrameBytes) throw new Error("MJPEG frame exceeded size limit"); this.buffer = this.buffer.slice(start); break; } if (end - start > this.maxFrameBytes) throw new Error("MJPEG frame exceeded size limit"); frames.push(this.buffer.slice(start, end)); this.buffer = this.buffer.slice(end); }
+    return frames;
+  }
+}
+
+export async function* parseMjpegStream(stream, maxFrameBytes = 8 * 1024 * 1024) { const parser = new JpegFrameParser(maxFrameBytes); for await (const chunk of stream) yield* parser.push(chunk); }
+
+/** Persistent X11 capture process. The generator's return path always stops ffmpeg. */
+export async function* createFfmpegMjpegStream({ display = ":99", width = 1440, height = 900, fps = 3, ffmpeg = "ffmpeg", inputArgs, signal } = {}) {
+  const source = inputArgs ?? ["-f", "x11grab", "-framerate", String(Math.min(60, Math.max(1, fps))), "-video_size", `${width}x${height}`, "-i", display];
+  const child = spawn(ffmpeg, ["-loglevel", "error", ...source, "-f", "mjpeg", "-q:v", "5", "pipe:1"], { stdio: ["ignore", "pipe", "pipe"] });
+  const abort = () => { child.kill("SIGTERM"); child.stdout?.destroy(); };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  let failure; let stderrBytes = 0; let exitCode = null;
+  child.once("error", (error) => { failure = error; });
+  child.stderr?.on("data", (chunk) => { stderrBytes += chunk.byteLength; if (stderrBytes > 64 * 1024) { failure ??= new Error("ffmpeg stderr exceeded limit"); child.kill("SIGKILL"); } });
+  child.once("close", (code) => { exitCode = code; if (code !== 0 && code !== null) failure ??= new Error(`ffmpeg exited with code ${code}`); });
+  try {
+    for await (const frame of parseMjpegStream(child.stdout)) yield frame;
+    if (exitCode === null) await new Promise((resolve) => child.once("close", resolve));
+    if (failure) throw failure;
+    if (exitCode !== null && exitCode !== 0) throw new Error(`ffmpeg exited with code ${exitCode}`);
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    if (!child.killed && child.exitCode === null) child.kill("SIGTERM");
+    child.stdout?.destroy(); child.stderr?.destroy();
+  }
 }
 
 async function startHeadedBrowser({ display, width, height, profile, cdpEndpoint, timeoutMs }) {
   const port = new URL(cdpEndpoint).port || "9222";
   const context = await withTimeout(chromium.launchPersistentContext(profile, {
     headless: false,
-    viewport: { width, height },
+    // The X11 capture includes the browser chrome and window-manager frame.
+    // A fixed Playwright viewport makes the outer window larger than Xvfb,
+    // which crops the bottom of the headed browser. Let Chrome size the page
+    // to its maximized native window instead.
+    viewport: null,
     env: { ...process.env, DISPLAY: display },
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${port}`],
+    args: ["--no-sandbox", "--disable-dev-shm-usage", "--start-maximized", `--window-size=${width},${height}`, "--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${port}`],
   }), timeoutMs, "headed browser startup timed out");
   try {
     const page = context.pages()[0] ?? await context.newPage();

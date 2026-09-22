@@ -16,7 +16,7 @@ ENV NODE_ENV=production \
     DISPLAY=:99
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git python3 ca-certificates curl xz-utils xvfb fluxbox x11-apps imagemagick xdotool xclip \
+  && apt-get install -y --no-install-recommends git python3 ca-certificates curl xz-utils xvfb fluxbox x11-apps imagemagick ffmpeg xdotool xclip \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /workspace/state /workspace/shared /workspace/browser /opt/opencode-bot
 

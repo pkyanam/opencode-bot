@@ -1689,6 +1689,32 @@ function ComputerPreview({
   }, []);
   const [expanded, setExpanded] = useState(false);
   const previous = useRef<string | undefined>(undefined);
+  const pendingFrame = useRef<string | undefined>(undefined);
+  const frameRaf = useRef<number | undefined>(undefined);
+  const publishFrame = (url: string) => {
+    if (pendingFrame.current) URL.revokeObjectURL(pendingFrame.current);
+    pendingFrame.current = url;
+    if (frameRaf.current !== undefined) return;
+    frameRaf.current = window.requestAnimationFrame(() => {
+      frameRaf.current = undefined;
+      const next = pendingFrame.current;
+      pendingFrame.current = undefined;
+      if (!next) return;
+      const old = previous.current;
+      previous.current = next;
+      setFrame(next);
+      if (old) window.setTimeout(() => URL.revokeObjectURL(old), 0);
+    });
+  };
+  const clearFrames = () => {
+    if (frameRaf.current !== undefined) window.cancelAnimationFrame(frameRaf.current);
+    frameRaf.current = undefined;
+    if (pendingFrame.current) URL.revokeObjectURL(pendingFrame.current);
+    pendingFrame.current = undefined;
+    if (previous.current) URL.revokeObjectURL(previous.current);
+    previous.current = undefined;
+    setFrame(undefined);
+  };
   const [reconnect, setReconnect] = useState(0);
   const [power, setPower] = useState<"unknown" | "awake" | "sleeping">("unknown");
   const [powerBusy, setPowerBusy] = useState(false);
@@ -1720,18 +1746,14 @@ function ComputerPreview({
     );
     setError("");
     setWarming(false);
-    setFrame(undefined);
+    clearFrames();
     const load = async () => {
       try {
         const response = await api.preview(controller.signal);
         const contentType = response.headers.get("content-type") ?? "";
         if (contentType.startsWith("image/")) {
           const url = URL.createObjectURL(await response.blob());
-          if (!cancelled) {
-            previous.current && URL.revokeObjectURL(previous.current);
-            previous.current = url;
-            setFrame(url);
-          }
+          if (!cancelled) publishFrame(url); else URL.revokeObjectURL(url);
           return;
         }
         const boundary =
@@ -1790,9 +1812,7 @@ function ComputerPreview({
                   ),
                 30_000,
               );
-              previous.current && URL.revokeObjectURL(previous.current);
-              previous.current = url;
-              setFrame(url);
+              publishFrame(url);
             }
             buffer = buffer.slice(bodyStart + length);
             boundaryAt = find(marker);
@@ -1811,7 +1831,7 @@ function ComputerPreview({
               ? "Preparing the computer. You can keep exploring your workspace."
               : message,
           );
-          setFrame(undefined);
+          clearFrames();
           if (
             !message.includes("Connection needs attention") &&
             !message.includes("recovery required")
@@ -1829,14 +1849,13 @@ function ComputerPreview({
       window.clearTimeout(retryTimer);
       window.clearTimeout(frameTimer);
       controller.abort();
-      previous.current && URL.revokeObjectURL(previous.current);
-      previous.current = undefined;
+      clearFrames();
     };
   }, [open, reconnect, nodeId, visible, power]);
   const sleep = async () => {
     if (!window.confirm("Save current work and stop the Computer?")) return;
     setPowerBusy(true); setPowerError("");
-    try { await api.sleepComputer(); setPower("sleeping"); setFrame(undefined); setError(""); }
+    try { await api.sleepComputer(); setPower("sleeping"); clearFrames(); setError(""); }
     catch (e) { setPowerError(e instanceof Error ? e.message : "Could not save and stop the Computer."); }
     finally { setPowerBusy(false); }
   };
@@ -1918,7 +1937,7 @@ function ComputerPreview({
             {power === "awake" && canSleep && !powerBusy && <button className="computer-sleep-btn" type="button" onClick={() => void sleep()}>Sleep computer</button>}
             <Dialog open={expanded} onOpenChange={setExpanded}>
               <DialogContent className="computer-preview-dialog" onEscapeKeyDown={(event) => event.preventDefault()}>
-                <DialogTitle className="computer-preview-dialog-title">
+                <DialogTitle className="computer-preview-dialog-title" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clipPath: "inset(50%)" }}>
                   Live computer preview
                 </DialogTitle>
                 {frame && (

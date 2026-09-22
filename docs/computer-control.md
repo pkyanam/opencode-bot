@@ -38,7 +38,9 @@ explicitly when you want to continue; waking restores the last saved state and
 requires that no task is active.
 
 Expand the live Computer preview and choose **Take control**. Click the desktop
-to focus it, then use the pointer, keyboard, scroll wheel, or text input. On a Mac,
+to focus it, then use the pointer, keyboard, or scroll wheel. Taking control also
+focuses keyboard input automatically. Expand **Paste or send text** for the optional
+text entry field. On a Mac,
 common Command shortcuts map to Control on the Linux Computer. The preview panel
 remains view-only.
 
@@ -48,6 +50,16 @@ client cannot acquire the same Computer. **Return to bot** or close the expanded
 view to release control. Hidden/disconnected clients release their lease; a
 60-second server expiry also releases held keys and buttons. A stopped task is
 never automatically restarted.
+
+The full-window view fits the complete desktop without cropping. Different screen
+aspect ratios can leave dark margins. Chrome uses the actual maximized window
+size rather than a fixed page viewport that extends behind its window chrome.
+
+A persistent FFmpeg capture process targets 3 fps for passive preview and 60 fps
+while a human holds control. Slow viewers drop frames instead of accumulating a
+queue. This is a capture target, not a guaranteed delivered frame rate: MJPEG
+bandwidth, container CPU, client decoding, and network latency still apply. Input
+uses authenticated HTTP requests, so this is not a WebRTC remote desktop.
 
 Interactive desktop control currently applies to the Cloudflare Computer.
 Additional owned nodes still have their documented desktop-streaming limitations.
