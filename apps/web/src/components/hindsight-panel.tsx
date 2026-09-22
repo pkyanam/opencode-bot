@@ -151,12 +151,15 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
         request === exploreRequest.current &&
         currentBotId === activeBotId.current
       )
-        setError(`Saved memories are safe. Retrieval is unavailable: ${e instanceof Error ? e.message : `Could not ${kind} memory`}`);
+        setError(e instanceof Error ? e.message : `Could not ${kind} memory. Try again.`);
     } finally {
       if (request === exploreRequest.current) setExploring(null);
     }
   };
   const isReady = engine?.status === "ready" && engine.enabled;
+  // Indexing another bot or a new memory must not disable every query.
+  // The server validates the selected bot’s authorized projection on each request.
+  const canAsk = Boolean(engine?.enabled && engine.configured);
   const loadInsights = async (showLoading = true) => {
     if (!botId) return;
     const currentBotId = botId;
@@ -476,7 +479,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
         <div className="hindsight-actions">
           <button
             className="soft-btn"
-            disabled={!isReady || !botId || !query.trim() || Boolean(exploring)}
+            disabled={!canAsk || !botId || !query.trim() || Boolean(exploring)}
             onClick={() => void explore("recall")}
           >
             {exploring === "recall" && (
@@ -486,7 +489,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
           </button>
           <button
             className="soft-btn"
-            disabled={!isReady || !botId || !query.trim() || Boolean(exploring)}
+            disabled={!canAsk || !botId || !query.trim() || Boolean(exploring)}
             onClick={() => void explore("reflect")}
           >
             {exploring === "reflect" && (

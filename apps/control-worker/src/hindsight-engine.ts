@@ -535,13 +535,43 @@ export class HindsightEngine {
       }
     }
   }
-  private ready(botId: string) {
+  private ready(botId: string, allowAppendOnly = false) {
     this.assertBot(botId);
     if (!this.settings().enabled)
       throw new MemoryError(409, "Enable Hindsight in Memory settings first.");
     const row = this.projection(botId),
       expected = JSON.stringify(this.manifest(this.records(botId)));
-    if (!row || row.status !== "ready" || row.manifest !== expected) {
+    let remoteConsistent = false;
+    if (row) {
+      try {
+        const current = JSON.parse(expected) as Record<string, number>;
+        const matchesCurrent = (manifest: Record<string, number>) =>
+          Object.entries(manifest).every(([id, revision]) => current[id] === revision);
+        const indexed = JSON.parse(row.manifest) as Record<string, number>;
+        const target = JSON.parse(row.target || "{}") as Record<string, number>;
+        const operations = JSON.parse(row.operations || "[]") as PendingOperation[];
+        remoteConsistent = matchesCurrent(indexed) && matchesCurrent(target) &&
+          operations.every((operation) => matchesCurrent(operation.manifest));
+      } catch {
+        remoteConsistent = false;
+      }
+    }
+    const exact = Boolean(row && row.status === "ready" && row.manifest === expected && remoteConsistent);
+    // A newly appended registry item cannot affect the already-authorized bank.
+    // Permit reads from that stable prefix while its append is indexed, but never
+    // do this when an existing item was removed or its revision changed.
+    let appendOnly = false;
+    if (allowAppendOnly && row && row.status !== "failed" && row.manifest !== "{}") {
+      try {
+        const indexed = JSON.parse(row.manifest) as Record<string, number>;
+        const current = JSON.parse(expected) as Record<string, number>;
+        appendOnly = remoteConsistent && Object.keys(indexed).length > 0 &&
+          Object.entries(indexed).every(([id, revision]) => current[id] === revision);
+      } catch {
+        appendOnly = false;
+      }
+    }
+    if (!exact && !appendOnly) {
       this.options.schedule();
       throw new MemoryError(
         409,
@@ -562,14 +592,14 @@ export class HindsightEngine {
         400,
         "Enter a memory question of up to 8,000 characters.",
       );
-    const row = this.ready(botId),
+    const row = this.ready(botId, true),
       client = this.options.client(this.settings());
     const result =
       kind === "recall"
         ? await client.recall(row.bank_id, text, budgetValue(budget))
         : await client.reflect(row.bank_id, text, budgetValue(budget));
     // Re-check grants after remote work: revocation may have occurred during reflection.
-    if (this.ready(botId).bank_id !== row.bank_id)
+    if (this.ready(botId, true).bank_id !== row.bank_id)
       throw new MemoryError(409, "Memory access changed; retry the query.");
     return { provider: "hindsight", ...(result as Record<string, unknown>) };
   }

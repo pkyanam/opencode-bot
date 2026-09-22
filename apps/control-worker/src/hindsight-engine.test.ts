@@ -132,6 +132,58 @@ describe("HindsightEngine projection state", () => {
     });
   });
 
+  it("allows recall from the stable authorized prefix while an append indexes", async () => {
+    const f = fixture();
+    f.registry.create({ botId: "bot", content: "indexed fact" });
+    const client = {
+      createBank: vi.fn(async () => ({})),
+      retain: vi.fn(async (_b: string, _items: unknown[], id: string) => ({
+        operation_id: id,
+      })),
+      operation: vi.fn(async () => ({ status: "completed" })),
+      recall: vi.fn(async () => ({ results: [{ text: "indexed fact" }] })),
+    };
+    const e = new HindsightEngine({ ...f, client: () => client as any });
+    await e.tick();
+    await e.tick();
+    await e.tick();
+    await e.tick();
+    f.registry.create({ botId: "bot", content: "new pending fact" });
+    expect(await e.query("bot", "recall", "indexed fact")).toMatchObject({
+      provider: "hindsight",
+    });
+    expect(client.recall).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks the stable-prefix read when an in-flight append is revoked", async () => {
+    const f = fixture();
+    f.registry.create({ botId: "bot", content: "indexed fact" });
+    const client = {
+      createBank: vi.fn(async () => ({})),
+      retain: vi.fn(async (_b: string, _items: unknown[], id: string) => ({
+        operation_id: id,
+      })),
+      operation: vi.fn(async () => ({ status: "completed" })),
+      recall: vi.fn(async () => ({ results: [] })),
+    };
+    const e = new HindsightEngine({ ...f, client: () => client as any });
+    await e.tick();
+    await e.tick();
+    await e.tick();
+    await e.tick();
+    const appended = f.registry.create({ botId: "bot", content: "pending fact" });
+    await e.tick();
+    f.registry.update(
+      appended.id,
+      { content: "revoked pending fact", revision: appended.revision },
+      { botId: "bot" },
+    );
+    await expect(e.query("bot", "recall", "indexed fact")).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(client.recall).not.toHaveBeenCalled();
+  });
+
   it("rotates immediately when an authorized shared memory is revoked", async () => {
     const f = fixture();
     const item = f.registry.create({
