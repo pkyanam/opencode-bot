@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { install, status, uninstall, verifyBundle, validateBoatOptions, readMemoryProviderFile, safeCommandFailure, readCompletionMarker, MAX_BOAT_EXEC_TIMEOUT_SECONDS } from "./setup/boat.mjs";
 
@@ -12,6 +14,18 @@ function bundleFixture() {
   const sha256 = createHash("sha256").update(readFileSync(file)).digest("hex");
   return { dir, file, sha256 };
 }
+
+test("Boat setup entrypoint runs through symlinks, spaces, and doubled slashes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ocbot boat launcher "));
+  const link = join(dir, "boat setup.mjs");
+  symlinkSync(resolve("scripts/setup/boat.mjs"), link);
+  const stateDir = join(dir, "isolated state");
+  for (const executable of [link, `${dir}//boat setup.mjs`]) {
+    const result = spawnSync(process.execPath, [executable, "status", "--state-dir", stateDir], { encoding: "utf8", timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { installed: false, statePath: resolve(stateDir, "state.json") });
+  }
+});
 
 function detachedMock(name, args) {
   if (name !== "boat" || args[0] !== "exec") return undefined;

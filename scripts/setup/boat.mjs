@@ -7,7 +7,8 @@
  * systemd service, and records the owned sandbox id. All command output is
  * treated as sensitive unless explicitly parsed; tokens are never printed.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, rmSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -361,4 +362,6 @@ export async function main(argv = process.argv.slice(2)) {
   throw new Error(`unknown Boat command: ${command}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main().catch(error => { console.error(`Boat installer failed: ${error.message}`); process.exitCode = 1; });
+// Downloaded scripts may live under macOS /var (a symlink to /private/var),
+// and TMPDIR commonly ends in a slash. Compare canonical paths, not raw URLs.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(`Boat installer failed: ${error.message}`); process.exitCode = 1; });

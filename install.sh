@@ -276,6 +276,7 @@ open_onboarding() {
 run_boat_installer() {
   local script_url="${OCBOT_BOAT_INSTALL_URL:-https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh}"
   local tmp status arg
+  say "Starting Boat setup…"
   tmp="$(mktemp "${TMPDIR:-/tmp}/opencode-bot-boat-entrypoint.XXXXXX.sh")"
   if ! download "$script_url" "$tmp"; then rm -f "$tmp"; die "could not download the Boat installer"; fi
   local -a boat_args=()

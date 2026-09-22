@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'status=$?; printf "[opencode-bot] Boat setup failed at line %s (exit %s). Rerun the installer to resume.\n" "$LINENO" "$status" >&2' ERR
+printf '%s\n' '[opencode-bot] Checking Boat and Node.js…'
 export PATH="$HOME/.local/bin:$PATH"
 node_tmp=""
 cleanup_prereq() { rm -rf "${node_tmp:-}"; }
@@ -99,6 +101,7 @@ done
 
 bundle="${OCBOT_BOAT_BUNDLE:-}"
 if [ "$skip_bundle" -eq 0 ] && [ -z "$bundle" ]; then
+  printf '%s\n' '[opencode-bot] Downloading the verified Boat release…'
   manifest_url="${OCBOT_BOAT_MANIFEST_URL:-https://github.com/pkyanam/opencode-bot/releases/latest/download/boat-bundle-manifest.json}"
   # Keep automatic discovery pinned to this repository. This prevents a
   # generic github.com URL from silently changing the executable bundle.
