@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSy
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 export const BOAT_API_URL = "https://boat.dev/api/v1";
@@ -259,7 +259,7 @@ export function install({ run, stateDir = defaultStateDir(), bundle, bundleSha25
   authenticate(execute, env);
   if (state.provider !== "boat") throw new Error("state file belongs to another provider");
   const existingSecrets = readJson(p.secrets, {});
-  appToken = appToken || existingSecrets.appToken || env.APP_TOKEN || randomUUID();
+  appToken = appToken || existingSecrets.appToken || env.APP_TOKEN || randomBytes(32).toString("base64url");
   let id = sandboxIdFromState(state); let current;
   if (id) {
     try { current = info(execute, id); } catch { current = undefined; }
@@ -294,7 +294,15 @@ export function install({ run, stateDir = defaultStateDir(), bundle, bundleSha25
   const hosted = execute("boat", hostArgs, { sensitive: true });
   const host = latestEvent(hosted); report(progress, "checking authenticated health"); verifyApp(execute, host.url, appToken);
   state.host = { url: redactUrl(host.url), port, access: host.access || hostAccess }; state.installationState = "installed"; state.updatedAt = new Date().toISOString(); saveState(p.state, state);
-  if (open && host.url) openBrowser(execute, `${host.url}${host.url.includes("#") ? "&" : "#"}token=${encodeURIComponent(appToken)}`);
+  if (host.url) {
+    const connectionUrl = new URL(host.url);
+    connectionUrl.hash = `connect=${encodeURIComponent(appToken)}`;
+    const escapedUrl = connectionUrl.toString().replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+    const handoffPath = resolve(stateDir, "open.html");
+    secureWrite(handoffPath, `<!doctype html><meta http-equiv="refresh" content="0;url=${escapedUrl}"><a href="${escapedUrl}">Connect to opencode bot</a>\n`);
+    report(progress, `Owner connection saved to ${handoffPath}; open this file to reconnect`);
+    if (open) openBrowser(execute, connectionUrl.toString());
+  }
   return { id, url: host.url, statePath: p.state };
 }
 

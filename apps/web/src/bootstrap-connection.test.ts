@@ -17,6 +17,13 @@ describe('installer connection handoff', () => {
     consumeConnectionFragment({hash:'#connect=bad&redirect=other',pathname:'/',search:''},{replaceState},{setItem});
     expect(replaceState).toHaveBeenCalledOnce();expect(setItem).not.toHaveBeenCalled();
   });
+  it.each(['#connect=', '#token='])('accepts existing Boat UUID credentials via %s', prefix => {
+    const token='12345678-1234-4234-8234-123456789abc';
+    const replaceState=vi.fn(),setItem=vi.fn();
+    consumeConnectionFragment({hash:prefix+token,pathname:'/',search:''},{replaceState},{setItem});
+    expect(setItem).toHaveBeenCalledWith('opencode-bot-app-token',token);
+    expect(replaceState).toHaveBeenCalledOnce();
+  });
   it('leaves ordinary hash navigation alone', () => {
     const replaceState=vi.fn(),setItem=vi.fn();
     consumeConnectionFragment({hash:'#skills',pathname:'/',search:''},{replaceState},{setItem});

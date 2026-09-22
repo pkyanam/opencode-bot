@@ -131,7 +131,10 @@ test("Boat install uses no-env, public hosting by default, and writes redacted o
   assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
   const execTimeouts = calls.filter(([name, args]) => name === "boat" && args[0] === "exec").map(([, args]) => Number(args[args.indexOf("--timeout") + 1]));
   assert.ok(execTimeouts.length > 0 && execTimeouts.every(value => value <= MAX_BOAT_EXEC_TIMEOUT_SECONDS));
-  assert.deepEqual(progress, ["preparing runtime", "uploading release", "installing app", "hosting app", "checking authenticated health"]);
+  assert.deepEqual(progress.slice(0, 5), ["preparing runtime", "uploading release", "installing app", "hosting app", "checking authenticated health"]);
+  assert.match(progress[5], /Owner connection saved to .*open.html/);
+  assert.equal(statSync(join(stateDir, "open.html")).mode & 0o777, 0o600);
+  assert.match(readFileSync(join(stateDir, "open.html"), "utf8"), /#connect=app-secret-test/);
 });
 
 test("private Boat hosting is opt-in", () => {
@@ -195,7 +198,7 @@ test("browser handoff carries the app token in a fragment only", () => {
   };
   install({ run, stateDir, bundle: fixture.file, bundleSha256: fixture.sha256, appToken: "browser-app-token", open: true });
   const opened = calls.find(([name]) => ["open", "xdg-open", "cmd"].includes(name))?.[1]?.at(-1);
-  assert.equal(opened, "https://open.on.boat.dev#token=browser-app-token");
+  assert.equal(opened, "https://open.on.boat.dev/#connect=browser-app-token");
 });
 
 test("setup failure preserves a provisioning journal and never hosts or claims installation", () => {
