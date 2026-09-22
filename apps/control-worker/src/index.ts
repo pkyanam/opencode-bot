@@ -731,24 +731,27 @@ export class Workspace {
         if (pendingOAuthUntil && pendingOAuthUntil > Date.now()) throw new HttpError(409, "Finish MCP sign-in before putting the Computer to sleep");
         if (pendingOAuthUntil) await this.state.storage.delete("computer:mcpOAuthPendingUntil");
         this.maintenance = true;
-        try { const result = await this.autoSleepController().sleep(await this.computerSpec(), await this.computerGeneration()); this.startup.invalidate(); return response({ status: "sleeping", ...result }); }
+        try { const result = await this.autoSleepController().sleep(await this.computerSpec(), await this.computerGeneration()); this.startup.invalidate(); return response({ status: "sleeping", ...result, checkpoint: (await this.state.storage.get<any>("computer-checkpoint:shared"))?.manifest ?? null }); }
         finally { this.maintenance = false; }
       }
       if (url.pathname === "/api/computer/wake" && request.method === "POST") {
         if (!ownerAuthorized && !client) throw new HttpError(401, "Authentication is required to wake the Computer");
         if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
         this.maintenance = true;
-        try { const result = await this.autoSleepController().wake(await this.computerSpec()); this.startup.invalidate(); this.state.storage.setAlarm(Date.now() + 100); return response({ status: "ready", ...result }); }
+        try { const result = await this.autoSleepController().wake(await this.computerSpec()); this.startup.invalidate(); this.state.storage.setAlarm(Date.now() + 100); return response({ status: "ready", ...result, checkpoint: (await this.state.storage.get<any>("computer-checkpoint:shared"))?.manifest ?? null }); }
         finally { this.maintenance = false; }
       }
       const sleeping = await this.plannedSleep();
-      if (sleeping?.phase === "planned" && (computerDependent || /^\/api\/computer\/(readiness|status)$/.test(url.pathname))) return response({ state: "error", code: "sleep_incomplete", error: "The Computer could not confirm that it stopped. Your saved checkpoint is protected; check Computer & checkpoints before continuing." }, 503);
+      if (sleeping?.phase === "planned" && (computerDependent || /^\/api\/computer\/(readiness|status)$/.test(url.pathname))) {
+        const pointer = await this.state.storage.get<any>("computer-checkpoint:shared");
+        return response({ state: "error", readiness: "restore_required", checkpoint: pointer?.manifest ?? null, code: "sleep_incomplete", error: "The Computer could not confirm that it stopped. Your saved checkpoint is protected. Restore it in Computer & checkpoints to resume." }, computerDependent ? 503 : 200);
+      }
       const sleepingCheckpoint = sleeping?.phase === "stopped" && typeof this.state.storage.get === "function" ? await this.state.storage.get<any>("computer-checkpoint:shared") : null;
       if (url.pathname === "/api/computer/readiness" && ["GET", "POST"].includes(request.method))
         return sleeping?.phase === "stopped" ? response({ state: "sleeping", checkpointId: sleeping.checkpointId, checkpoint: sleepingCheckpoint?.manifest ?? null }) : response(this.computerReadiness(request.method === "POST"));
       if (url.pathname === "/api/computer/status" && request.method === "GET" && sleeping?.phase === "stopped")
         return response({ state: "sleeping", readiness: "sleeping", checkpoint: sleepingCheckpoint?.manifest ?? null });
-      if (sleeping && /^\/api\/(uploads(?:\/|$)|computer\/(checkpoint|restore)$)/.test(url.pathname)) return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer to continue." }, 503);
+      if (sleeping && !(sleeping.phase === "planned" && url.pathname === "/api/computer/restore") && /^\/api\/(uploads(?:\/|$)|computer\/(checkpoint|restore)$)/.test(url.pathname)) return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer to continue." }, 503);
       if (computerDependent) {
         if (sleeping?.phase === "stopped") return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer to continue." }, 503);
         const readiness = this.computerReadiness();
@@ -2636,6 +2639,7 @@ export class Workspace {
         "shared",
         readiness.committedCheckpoint,
       );
+      if ((await this.plannedSleep())?.phase === "planned") await this.plannedSleepStore().clear("shared");
       this.state.storage.sql.exec(
         "UPDATE runs SET status='queued',updated_at=? WHERE status='waiting_dependency'",
         isoNow(),

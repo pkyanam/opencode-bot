@@ -272,6 +272,7 @@ function App() {
     void loadCatalog();
     let cancelled = false;
     let retryTimer: number | undefined;
+    let previousReadiness: string | undefined;
     const pollReadiness = async () => {
       try {
         const readiness = await api.computerReadiness();
@@ -282,18 +283,22 @@ function App() {
           // observe an empty registry). Readiness is the durable transition
           // signal, so refresh once when it becomes ready rather than leaving
           // the initial failed catalog in the UI until a manual refresh.
-          void loadCatalog();
-          return;
-        }
-        if (readiness.state === "error") {
+          if (previousReadiness !== "ready") void loadCatalog();
+          previousReadiness = "ready";
+        } else if (readiness.state === "sleeping") {
           setComputerWarming(false);
-          return;
+          previousReadiness = "sleeping";
+        } else if (readiness.state === "error") {
+          setComputerWarming(false);
+          previousReadiness = "error";
+        } else {
+          setComputerWarming(true);
+          previousReadiness = readiness.state;
         }
-        setComputerWarming(true);
       } catch (e) {
         if (!cancelled && isComputerWarmingUpError(e)) setComputerWarming(true);
       }
-      if (!cancelled) retryTimer = window.setTimeout(pollReadiness, 3000);
+      if (!cancelled) retryTimer = window.setTimeout(pollReadiness, previousReadiness === "ready" || previousReadiness === "sleeping" ? 15000 : 3000);
     };
     void pollReadiness();
     const wake = () => { if (!document.hidden) void refresh(true); };
@@ -1382,6 +1387,7 @@ function App() {
       {showComputer && (
         <ComputerModal
           active={Boolean(nativeSessionLocked)}
+          owner={!getToken()?.startsWith("dt_")}
           onClose={() => setShowComputer(false)}
         />
       )}{" "}
@@ -1671,6 +1677,7 @@ function ComputerPreview({
   const [power, setPower] = useState<"unknown" | "awake" | "sleeping">("unknown");
   const [powerBusy, setPowerBusy] = useState(false);
   const [powerError, setPowerError] = useState("");
+  const canSleep = !getToken()?.startsWith("dt_");
   useEffect(() => {
     if (!open || nodeId) return;
     let cancelled = false;
@@ -1892,7 +1899,7 @@ function ComputerPreview({
               </div>
             )}
             {powerError && <p className="inline-error" role="alert">{powerError}</p>}
-            {power === "awake" && !powerBusy && <button className="computer-sleep-btn" type="button" onClick={() => void sleep()}>Sleep computer</button>}
+            {power === "awake" && canSleep && !powerBusy && <button className="computer-sleep-btn" type="button" onClick={() => void sleep()}>Sleep computer</button>}
             <Dialog open={expanded} onOpenChange={setExpanded}>
               <DialogContent className="computer-preview-dialog" onEscapeKeyDown={(event) => event.preventDefault()}>
                 <DialogTitle className="computer-preview-dialog-title">
@@ -2565,9 +2572,11 @@ function RoutinesModal({
 }
 function ComputerModal({
   active,
+  owner,
   onClose,
 }: {
   active: boolean;
+  owner: boolean;
   onClose: () => void;
 }) {
   const [status, setStatus] = useState<ComputerStatus>();
@@ -2602,7 +2611,7 @@ function ComputerModal({
     }
   };
   const restore = async () => {
-    if (active) return;
+    if (active || status?.status === "sleeping" || status?.state === "sleeping") return;
     if (
       !window.confirm(
         "Restore the last checkpoint? Local computer files changed since that checkpoint may be replaced.",
@@ -2625,7 +2634,12 @@ function ComputerModal({
   };
   const sleep = async () => {
     if (!window.confirm("Save current work and stop the Computer?")) return;
-    try { setBusy(true); setStatus(await api.sleepComputer()); setError(""); }
+    try {
+      setBusy(true);
+      const next = await api.sleepComputer();
+      setStatus((current) => ({ ...next, checkpoint: next.checkpoint ?? current?.checkpoint, lastCheckpoint: next.lastCheckpoint ?? current?.lastCheckpoint }));
+      setError("");
+    }
     catch (e) { setError(e instanceof Error ? e.message : "Could not save and stop the Computer."); }
     finally { setBusy(false); }
   };
@@ -2710,7 +2724,7 @@ function ComputerModal({
           </button>
           <button
             className="soft-btn"
-            disabled={busy || active || !cp}
+            disabled={busy || active || sleeping || !cp}
             onClick={restore}
           >
             Restore checkpoint
@@ -2723,7 +2737,7 @@ function ComputerModal({
             {busy && <LoaderCircle size={14} className="spin" />}Create
             checkpoint
           </button>
-          {sleeping ? <button className="primary-btn" disabled={busy || active} onClick={() => void wake()}>{busy && <LoaderCircle size={14} className="spin" />}Wake computer</button> : <button className="soft-btn" disabled={busy || active} onClick={() => void sleep()}>Sleep computer</button>}
+          {sleeping ? <button className="primary-btn" disabled={busy || active} onClick={() => void wake()}>{busy && <LoaderCircle size={14} className="spin" />}Wake computer</button> : owner && <button className="soft-btn" disabled={busy || active} onClick={() => void sleep()}>Sleep computer</button>}
         </div>
         {active && (
           <div className="modal-note">

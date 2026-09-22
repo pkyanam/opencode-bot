@@ -949,7 +949,12 @@ describe('deliberate Computer sleep', () => {
   it('does not wake an ambiguous planned stop from a readiness poll', async () => {
     const f = fixture(true);
     f.kv.set('computer-sleep:shared', { phase: 'planned', checkpointId: 'saved' });
+    f.kv.set('computer-checkpoint:shared', { manifest: { id: 'saved' } });
     expect((await f.request('/api/computer/readiness')).body.code).toBe('sleep_incomplete');
+    const status = await f.request('/api/computer/status');
+    expect(status.status).toBe(200);
+    expect(status.body.checkpoint.id).toBe('saved');
+    expect(status.body.readiness).toBe('restore_required');
     expect(remote.calls).toEqual([]);
   });
   it('blocks sleep while a tracked service authorization is pending', async () => {
