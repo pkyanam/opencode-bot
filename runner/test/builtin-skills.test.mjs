@@ -45,3 +45,33 @@ test("built-in installation is restart-safe and preserves an existing user skill
   assert.deepEqual(await installBuiltinSkill(installer, "opencode-bot-self-development"), { installed: false, preserved: true, name: "opencode-bot-self-development" });
   assert.equal(calls, 2);
 });
+
+test("fresh runner creates its workspace before installing built-in skills", { timeout: 15000 }, async () => {
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const dir = await mkdtemp(join(tmpdir(), "opencode-fresh-runner-"));
+  const workspace = join(dir, "new", "workspace");
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../server.mjs", import.meta.url))], {
+    env: { ...process.env, NODE_ENV: "production", RUNNER_TOKEN: "test-only", RUNNER_PORT: "0", RUNNER_HOST: "127.0.0.1", OPENCODE_BOT_DESKTOP: "0", RUNTIME_ROOT: join(dir, "state"), WORKSPACE_DIRECTORY: workspace },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  try {
+    await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", code => reject(new Error(`runner exited ${code}: ${output}`)));
+      child.stderr.on("data", data => { output += data; });
+      child.stdout.on("data", data => { output += data; if (output.includes("runner listening")) resolve(); });
+    });
+    const skill = await readFile(join(workspace, ".agents/skills/opencode-bot-self-development/SKILL.md"), "utf8");
+    assert.match(skill, /opencode-bot-self-development/);
+  } finally {
+    const exited = new Promise(resolve => child.once("exit", resolve));
+    child.kill("SIGKILL");
+    if (child.exitCode === null) await exited;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -864,7 +864,9 @@ if (isEntrypoint && process.env.NODE_ENV !== "test") {
   const root = process.env.RUNTIME_ROOT ?? "/workspace/state";
   const desktop = process.env.OPENCODE_BOT_DESKTOP === "0" ? undefined : new DesktopController();
   const botToolToken = randomUUID();
-  const builtinInstaller=createExtensionRoutes({workspace:process.env.WORKSPACE_DIRECTORY??"/workspace/shared"});
+  const workspace = process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared";
+  fs.mkdirSync(workspace, { recursive: true });
+  const builtinInstaller=createExtensionRoutes({workspace});
   await installBuiltinSkill(builtinInstaller, "opencode-bot-self-development");
   const runtime = new OpenCode2Runtime({ botTools: { command: [process.execPath, fileURLToPath(new URL("./bot-mcp.mjs", import.meta.url))], env: { BOT_TOOLS_URL: `http://127.0.0.1:${port}/bot-tools`, BOT_TOOLS_TOKEN: botToolToken } }, root, directory: process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared", desktop });
   const store = new RunStore(runtime, { stateDir: path.join(root, "runs") });
