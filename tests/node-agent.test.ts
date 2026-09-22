@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // The agent is intentionally a portable .mjs executable rather than a Worker
 // package. The runtime tests exercise its exported protocol helpers directly.
 // @ts-expect-error no declaration file is needed for the executable seam.
-import { availableLoopbackPort, controlBase, executeRunner, register, waitForOwnedRunner } from "../scripts/node-agent.mjs";
+import { availableLoopbackPort, controlBase, executeRunner, register, run, waitForOwnedRunner } from "../scripts/node-agent.mjs";
 // @ts-expect-error the runner is a portable JavaScript service under test.
 import { RunStore, createServer } from "../runner/server.mjs";
 
@@ -196,6 +196,38 @@ describe("outbound node agent", () => {
     expect(calls.map((request) => request.url)).toEqual(["http://127.0.0.1:8787/runs/run_2/cancel", "http://127.0.0.1:8787/runs/run_2/approval"]);
     expect(calls[1].headers.get("authorization")).toBe("Bearer secret");
     expect(await calls[1].json()).toMatchObject({ requestId: "permission_1", decision: "approve" });
+  });
+
+  it("runs owned jobs concurrently up to the configured limit", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "node-agent-parallel-"));
+    const configFile = path.join(root, "node.json");
+    await writeFile(configFile, JSON.stringify({ controlUrl: "https://control.example/api/nodes", nodeId: "node_a", nodeSecret: "node-secret", runnerUrl: "http://127.0.0.1:8787", runnerToken: "runner-secret", maxParallelJobs: 2 }));
+    const jobs = ["job-a", "job-b"].map((id) => ({ id, payload: { kind: "runner.run", run: { runId: id, prompt: id } } }));
+    let active = 0;
+    let peak = 0;
+    let polls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/heartbeat")) return Response.json({});
+      if (url.pathname.endsWith("/jobs/poll")) return Response.json({ job: jobs[polls++] ?? null });
+      if (url.pathname.endsWith("/jobs/") || url.pathname.endsWith("/result")) return Response.json({});
+      if (url.pathname.endsWith("/runs")) {
+        active += 1; peak = Math.max(peak, active);
+        return Response.json({ status: "running", runId: url.pathname.split("/").pop() });
+      }
+      if (/\/runs\/[^/]+$/.test(url.pathname)) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return Response.json({ status: "succeeded", runId: url.pathname.split("/").pop() });
+      }
+      return Response.json({});
+    }));
+    try {
+      await run({ config: configFile, max_jobs: "2", poll_ms: "1", heartbeat_ms: "5", command_poll_ms: "1" });
+      expect(peak).toBe(2);
+      expect(active).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("executes a node job against the real local runner HTTP server", async () => {

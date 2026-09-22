@@ -37,17 +37,25 @@ const memoryTools = [
   { name: 'memory_mental_model_refresh', description: 'Refresh a provider mental model by ID.', inputSchema: { type: 'object', properties: { id: text('Mental model ID') }, required: ['id'], additionalProperties: false } },
 ];
 const memoryNames = new Set(memoryTools.map(tool => tool.name));
-const memoryToolTimeoutMs = (name) => name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000);
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
+const runCapability = { type: 'string', minLength: 32, description: 'Opaque capability for this conversation; supplied in the system instructions.' };
+const scopeTool = (tool) => {
+  const schema = tool.inputSchema ?? empty;
+  const properties = { ...(schema.properties ?? {}), _run: runCapability };
+  const required = [...new Set([...(schema.required ?? []), '_run'])];
+  return { ...tool, inputSchema: { ...schema, properties, required, additionalProperties: false } };
+};
+const memoryToolTimeoutMs = (name) => name === 'create_bot' ? 35_000 : (name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000));
+const tools = [
   { name: 'list_bots', description: 'List the other persistent bots in this workspace. These are independent bots with their own settings, not OpenCode subagents.', inputSchema: empty },
-  { name: 'send_message', description: 'Send a task or message to another workspace bot. The recipient runs after your current turn ends; its reply automatically resumes this conversation. Do not poll or claim a response before it arrives.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string', description: 'Exact bot ID returned by list_bots' }, prompt: { type: 'string', description: 'Message or task with the context the recipient needs' } }, required: ['targetBotId','prompt'], additionalProperties: false } },
+  { name: 'send_message', description: 'Send a task or message to another workspace bot. The recipient can run concurrently while you continue working. Read progress with get_replies at useful checkpoints; if you finish first, its reply resumes this conversation. Do not claim a response before it arrives.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string', description: 'Exact bot ID returned by list_bots' }, prompt: { type: 'string', description: 'Message or task with the context the recipient needs' } }, required: ['targetBotId','prompt'], additionalProperties: false } },
   { name: 'send_file', description: 'Queue a verified workspace file transfer to another persistent bot on its assigned node.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string' }, sourcePath: { type: 'string' }, targetPath: { type: 'string' }, name: { type: 'string' }, size: { type: 'integer' }, sha256: { type: 'string' } }, required: ['targetBotId','sourcePath','targetPath','name','size','sha256'], additionalProperties: false } },
-  { name: 'get_replies', description: 'Read bot message receipts and replies already available to this conversation. Pending work only starts after this turn ends.', inputSchema: empty },
-  { name: 'create_bot', description: 'Create a new persistent workspace bot. The bot is created after this turn ends and becomes available with its own settings and conversations; this is not an OpenCode subagent.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Unique display name for the new bot (1–160 characters)' }, instructions: { type: 'string', description: 'The new bot role and operating instructions' }, model: { type: 'string', description: 'Optional provider/model identifier available to this workspace' }, agent: { type: 'string', description: 'Optional OpenCode agent name' } }, required: ['name'], additionalProperties: false } },
+  { name: 'get_replies', description: 'Read bot message receipts and replies already available to this conversation. Peers can work concurrently; read their latest status and results without repeatedly polling.', inputSchema: empty },
+  { name: 'create_bot', description: 'Create a new persistent workspace bot. Waits for creation and returns the new bot ID for immediate messaging, with its own settings and conversations; this is not an OpenCode subagent.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Unique display name for the new bot (1–160 characters)' }, instructions: { type: 'string', description: 'The new bot role and operating instructions' }, model: { type: 'string', description: 'Optional provider/model identifier available to this workspace' }, agent: { type: 'string', description: 'Optional OpenCode agent name' } }, required: ['name'], additionalProperties: false } },
   {name:'inspect_self',description:'Inspect this bot’s actual identity, node, deployment version, and source repository. Load only when asked about this app or its own environment.',inputSchema:{type:'object',properties:{topic:{type:'string',enum:['all','identity','deployment','source','capabilities']}},additionalProperties:false}},
   {name:'self_docs',description:'Read a bounded opencode-bot reference on demand before configuring or modifying this app. Topics: overview, setup, memory, nodes, security, development.',inputSchema:{type:'object',properties:{topic:{type:'string',enum:['overview','setup','memory','nodes','security','development']}},required:['topic'],additionalProperties:false}},
-  ...memoryTools
-] }));
+  ...memoryTools,
+] .map(scopeTool);
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   if (!['inspect_self','self_docs','list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name) && !memoryNames.has(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
   try {

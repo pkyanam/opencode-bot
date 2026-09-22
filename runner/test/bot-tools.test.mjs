@@ -36,7 +36,7 @@ test('bot messaging capabilities are scoped, durable, bounded and distinct from 
 });
 
 test('native MCP stdio handshake and tool call reach only bot capabilities', async () => {
-  const store=new RunStore({});
+  const store = new RunStore({});
   store.runs.set('r2',{id:'r2',status:'running',allowBotMessaging:true,botDirectory:[{id:'scout',name:'Scout'}],events:[],delegationRequests:[]});
   const server=createServer({store,authToken:'owner',botToolToken:'limited'});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -47,10 +47,10 @@ test('native MCP stdio handshake and tool call reach only bot capabilities', asy
     const tools = (await client.listTools()).tools;
     assert.deepEqual(tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot','inspect_self','self_docs','memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share','memory_retain','memory_recall','memory_reflect','memory_observations','memory_mental_models','memory_mental_model_create','memory_mental_model_delete','memory_mental_model_refresh']);
     const schemas = Object.fromEntries(tools.map(tool => [tool.name, tool.inputSchema]));
-    assert.deepEqual(schemas.memory_observations.properties, {});
-    assert.deepEqual(schemas.memory_mental_models.properties, {});
-    assert.deepEqual(schemas.memory_mental_model_delete.required, ['id']);
-    assert.deepEqual(schemas.memory_mental_model_refresh.required, ['id']);
+    assert.equal(schemas.memory_observations.properties._run.type, 'string');
+    assert.equal(schemas.memory_mental_models.properties._run.type, 'string');
+    assert.deepEqual(schemas.memory_mental_model_delete.required, ['id', '_run']);
+    assert.deepEqual(schemas.memory_mental_model_refresh.required, ['id', '_run']);
     const result=await client.callTool({name:'send_message',arguments:{targetBotId:'scout',prompt:'Say hello'}});
     assert.equal(result.isError,undefined);
     assert.equal(JSON.parse(result.content[0].text).status,'queued');
@@ -84,7 +84,7 @@ test('memory tools forward immediately through the coordinator capability and ne
 });
 
 test('create_bot is bounded, idempotent per turn, and never exposes runner auth', async () => {
-  const store=new RunStore({});
+  const store=new RunStore({}, { botReceiptTimeoutMs: 50 });
   store.runs.set('r3',{id:'r3',status:'running',allowBotMessaging:true,botDirectory:[],events:[],delegationRequests:[],botCreationRequests:[]});
   const server=createServer({store,authToken:'owner',botToolToken:'limited'});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -99,4 +99,28 @@ test('create_bot is bounded, idempotent per turn, and never exposes runner auth'
     assert.equal((await call('create_bot',{name:'No token'})).status,200);
     assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/runs/r3`,{headers:{authorization:'Bearer limited'}})).status,401);
   } finally { server.close(); }
+});
+
+test('bot receipt snapshots resolve pending creation and refresh replies while the run is active', async () => {
+  const store = new RunStore({});
+  store.runs.set('receipt-run', { id: 'receipt-run', status: 'running', allowBotMessaging: true, botDirectory: [], delegationHistory: [], delegationRequests: [], botCreationRequests: [{ id: 'create-1', name: 'Writer', instructions: '', model: '', agent: '', status: 'pending' }], events: [] });
+  const pending = store.botTool('create_bot', { name: 'Writer' });
+  await new Promise(resolve => setImmediate(resolve));
+  store.recordBotReceipts('receipt-run', { bots: [{ id: 'bot-new', name: 'Writer' }], creations: [{ requestId: 'create-1', status: 'created', bot: { id: 'bot-new', name: 'Writer' } }], replies: [{ id: 'reply-1', status: 'completed', result: 'done' }] });
+  const result = await pending;
+  assert.equal(result.status, 'created');
+  assert.equal(result.bot.id, 'bot-new');
+  assert.equal(store.get('receipt-run').delegationHistory[0].id, 'reply-1');
+});
+
+test('bot capabilities isolate concurrent runs', async () => {
+  const store = new RunStore({});
+  store.runs.set('run-a', { id: 'run-a', botToolCapability: 'a'.repeat(64), status: 'running', allowBotMessaging: true, botDirectory: [{ id: 'target-a', name: 'A' }], delegationRequests: [], events: [] });
+  store.runs.set('run-b', { id: 'run-b', botToolCapability: 'b'.repeat(64), status: 'running', allowBotMessaging: true, botDirectory: [{ id: 'target-b', name: 'B' }], delegationRequests: [], events: [] });
+  assert.deepEqual((await store.botTool('list_bots', { _run: 'a'.repeat(64) })).bots.map(bot => bot.id), ['target-a']);
+  await assert.rejects(() => store.botTool('list_bots', { _run: 'c'.repeat(64) }), /active application conversation/);
+  const queued = await store.botTool('send_message', { _run: 'b'.repeat(64), targetBotId: 'target-b', prompt: 'hello' });
+  assert.equal(queued.targetBotId, 'target-b');
+  assert.equal(store.get('run-a').delegationRequests.length, 0);
+  assert.equal(store.get('run-b').delegationRequests.length, 1);
 });

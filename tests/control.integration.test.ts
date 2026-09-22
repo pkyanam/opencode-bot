@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false, inFlight: 0, maxInFlight: 0, dispatchDelayMs: 0 }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async isRunning() { return true; }
@@ -15,7 +15,9 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
         if (path === '/mcps') return Response.json({ servers: [{ name: 'cloudflare', status: 'needs_auth', integrationID: 'integration-cf' }] });
         if (path === '/desktop/control' && init.method === 'POST') return Response.json({ active: true, token: 'lease-test', expiresAt: new Date(Date.now() + 60000).toISOString() });
         if (path === '/runs' && init.method === 'POST') {
-          const input = JSON.parse(String(init.body)); remote.submitted.push(input);
+          const input = JSON.parse(String(init.body)); remote.inFlight += 1; remote.maxInFlight = Math.max(remote.maxInFlight, remote.inFlight);
+          if (remote.dispatchDelayMs) await new Promise(resolve => setTimeout(resolve, remote.dispatchDelayMs));
+          remote.submitted.push(input); remote.inFlight -= 1;
           const run = { runId: input.runId, sessionId: input.sessionId ?? `session-${input.runId}`, status: 'running', events: [], final: '' };
           remote.runs.set(input.runId, run); return Response.json(run, { status: 202 });
         }
@@ -26,6 +28,12 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           const configured = remote.steerResponses.shift() ?? { status: 200, body: { id: `native-${input.idempotencyKey}`, status: 'accepted' } };
           if (configured instanceof Error) throw configured;
           return Response.json(configured.body, { status: configured.status });
+        }
+        if (/^\/runs\/[^/]+\/bot-receipts$/.test(path) && init.method === 'POST') {
+          const run = remote.runs.get(path.split('/')[2]);
+          if (!run) return Response.json({error:'missing'}, {status:404});
+          run.botReceipts = JSON.parse(String(init.body));
+          return Response.json({ok:true});
         }
         if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
         if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: remote.deleteError }, { status: remote.deleteStatus });
@@ -80,7 +88,7 @@ function fixture(withKv = false) {
   };
   return { db, request, create, env, alarms, queries, kv, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; remote.inFlight=0; remote.maxInFlight=0; remote.dispatchDelayMs=0; });
 
 describe('durable control-plane integration with real SQLite', () => {
   it('exposes the checkpoint and permits restore while runtime recovery is required', async () => {
@@ -128,6 +136,27 @@ describe('durable control-plane integration with real SQLite', () => {
     r.status = 'succeeded'; r.final = 'Done'; await f.alarm(); await f.alarm();
     expect(remote.submitted).toHaveLength(2);
     expect(remote.submitted[1]).toMatchObject({ runId: second.body.id, sessionId: r.sessionId });
+  });
+  it('dispatches independent bot sessions concurrently while enforcing scheduler capacity', async () => {
+    const f = fixture();
+    const runs: string[] = [];
+    for (const name of ['One', 'Two', 'Three', 'Four', 'Five']) {
+      const { thread } = await f.create();
+      const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: name, idempotencyKey: `parallel-${name}` });
+      runs.push(run.body.id);
+    }
+    f.env.SCHEDULER_CONCURRENCY = '2';
+    remote.dispatchDelayMs = 10;
+    await f.alarm();
+    expect(remote.submitted).toHaveLength(2);
+    expect(remote.maxInFlight).toBe(2);
+    await f.alarm();
+    expect(remote.submitted).toHaveLength(2);
+    for (const id of runs.slice(0, 2)) remote.runs.get(id).status = 'succeeded';
+    await f.alarm();
+    await f.alarm();
+    expect(remote.submitted).toHaveLength(4);
+    expect(new Set(remote.submitted.map((input) => input.runId)).size).toBe(4);
   });
   it('does not replay work when its runner receipt disappears', async () => {
     const f = fixture(); const { thread } = await f.create();
@@ -672,8 +701,8 @@ it('reconciles runner bot requests exactly once and resumes the source after the
   const child = [...remote.runs.values()].find((item: any) => item.runId !== run.body.id)!;
   child.status = 'succeeded'; child.final = 'The cause is a missing guard.';
   for (let i = 0; i < 5; i++) await f.alarm();
-  expect(remote.submitted.filter((item: any) => item.idempotencyKey === undefined && item.allowBotMessaging === false)).toHaveLength(1);
-  expect(remote.submitted.at(-1)).toMatchObject({ allowBotMessaging: false });
+  expect(remote.submitted.filter((item: any) => String(item.prompt).startsWith('Continue the original task'))).toHaveLength(1);
+  expect(remote.submitted.at(-1)).toMatchObject({ allowBotMessaging: true });
   const before = remote.submitted.length;
   for (let i = 0; i < 5; i++) await f.alarm();
   expect(remote.submitted).toHaveLength(before);
@@ -692,7 +721,7 @@ it('reconciles bot creation requests into persisted bots and reports the result'
   const bots = (await f.request('/api/bots')).body;
   expect(bots.map((item: any) => item.name)).toContain('Writer');
   expect((await f.request('/api/state')).body.threads).toHaveLength(1);
-  expect(remote.submitted.some((item: any) => item.allowBotMessaging === false && String(item.prompt).includes('Created Writer'))).toBe(true);
+  expect(remote.submitted.some((item: any) => item.allowBotMessaging === true && String(item.prompt).includes('Created Writer'))).toBe(true);
   for (let i = 0; i < 4; i++) await f.alarm();
   expect((await f.request('/api/bots')).body.filter((item: any) => item.name === 'Writer')).toHaveLength(1);
 });
@@ -739,14 +768,14 @@ it('waits for nested bot continuations and uses the nested final answer', async 
   const cr = all.find((item: any) => item.runId !== root.body.id && item.runId !== bDelegation.targetRunId && item.allowBotMessaging !== false)!;
   cr.status = 'succeeded'; cr.final = 'C final answer';
   for (let i = 0; i < 5; i++) await f.alarm();
-  const bInput = remote.submitted.find((item: any) => item.allowBotMessaging === false && item.threadId === bDelegation.targetThreadId)!;
+  const bInput = remote.submitted.find((item: any) => String(item.prompt).startsWith('Continue the original task') && item.threadId === bDelegation.targetThreadId)!;
   const bContinuation = bInput && remote.runs.get(bInput.runId);
   expect(bContinuation).toBeDefined();
-  expect(remote.submitted.some((item: any) => item.allowBotMessaging === false && item.threadId === thread.body.id)).toBe(false);
+  expect(remote.submitted.some((item: any) => String(item.prompt).startsWith('Continue the original task') && item.threadId === thread.body.id)).toBe(false);
   bContinuation.status = 'succeeded'; bContinuation.final = 'B completed answer';
   for (let i = 0; i < 5; i++) await f.alarm();
-  const aContinuation = remote.submitted.find((item: any) => item.allowBotMessaging === false && item.threadId === thread.body.id)!;
-  expect(aContinuation).toMatchObject({ allowBotMessaging: false });
+  const aContinuation = remote.submitted.find((item: any) => String(item.prompt).startsWith('Continue the original task') && item.threadId === thread.body.id)!;
+  expect(aContinuation).toMatchObject({ allowBotMessaging: true });
   expect(aContinuation.prompt).toContain('B completed answer');
   expect(aContinuation.prompt).not.toContain('B intermediate');
 });
@@ -763,7 +792,7 @@ it('copies Telegram routing metadata to an internal continuation as a fresh pend
   for (let i = 0; i < 5; i++) await f.alarm();
   const child = [...remote.runs.values()].find((item: any) => item.runId !== root.body.id)!; child.status = 'succeeded'; child.final = 'Done';
   await f.alarm(); await f.alarm();
-  const continuation = remote.submitted.find((item: any) => item.allowBotMessaging === false)!;
+  const continuation = remote.submitted.find((item: any) => String(item.prompt).startsWith('Continue the original task'))!;
   const receipt = f.db.prepare('SELECT * FROM telegram_run_deliveries WHERE run_id=?').get(continuation.runId) as any;
   expect(receipt).toMatchObject({ bot_id: source.body.id, chat_id: 'chat-7', telegram_user_id: 'user-9', status: 'pending' });
 });
@@ -1076,4 +1105,30 @@ describe('workspace memory tool capabilities',()=>{
   expect((await f.request('/api/bots/'+bot.id,'DELETE')).status).toBe(200);
   expect((await f.request('/api/memory?botId='+peer.id)).body[0]).toMatchObject({id:memory.id,botId:null,content:'Corrected decision'});
  });
+});
+
+ it('creates and dispatches teammates while the source is still running', async () => {
+  const f=fixture();
+  const parent=await f.request('/api/bots','POST',{name:'Coordinator',model:'test/model'});
+  const thread=await f.request('/api/threads','POST',{botId:parent.body.id,title:'Live collaboration'});
+  const submitted=await f.request('/api/runs','POST',{threadId:thread.body.id,prompt:'Build a team',idempotencyKey:'live-team'});
+  await f.alarm();
+  const parentRun=remote.runs.get(submitted.body.id);
+  parentRun.liveBotReceipts=true;
+  parentRun.botCreationRequests=[{id:'live-create',name:'Research peer',instructions:'Research',model:'test/model'}];
+  await f.alarm();
+  const peer=(await f.request('/api/bots')).body.find((b:any)=>b.name==='Research peer');
+  expect(peer).toBeDefined();
+  expect(parentRun.status).toBe('running');
+  expect(parentRun.botReceipts.creations[0]).toMatchObject({requestId:'live-create',status:'created',bot:{id:peer.id}});
+  parentRun.delegationRequests=[{id:'live-send',targetBotId:peer.id,prompt:'Research now'}];
+  await f.alarm(); await f.alarm();
+  const child=remote.submitted.find((r:any)=>r.runId!==submitted.body.id);
+  expect(child).toBeDefined();
+  expect(remote.runs.get(child.runId).status).toBe('running');
+  expect(parentRun.status).toBe('running');
+  remote.runs.get(child.runId).status='succeeded'; remote.runs.get(child.runId).final='Found sources';
+  await f.alarm(); await f.alarm();
+  expect(parentRun.botReceipts.replies.some((r:any)=>r.result==='Found sources')).toBe(true);
+  expect((await f.request('/api/bots')).body.filter((b:any)=>b.name==='Research peer')).toHaveLength(1);
 });

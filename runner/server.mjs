@@ -1,7 +1,7 @@
 import { createSelfContext } from "./self-context.mjs";
 import { installBuiltinSkill } from "./builtin-skills.mjs";
 import http from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -51,7 +51,7 @@ function boundedAdminResult(value) {
   return result;
 }
 const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(errorMessage(error));
-const memoryToolTimeoutMs = (name) => name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000);
+const memoryToolTimeoutMs = (name) => name === 'create_bot' ? 35_000 : (name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000));
 
 export class RunStore {
   constructor(runtime, options = {}) {
@@ -62,10 +62,13 @@ export class RunStore {
     this.configuring = false;
     this.runtimeOps = 0;
     this.nativeWaitTimeoutMs = options.nativeWaitTimeoutMs ?? 5 * 60 * 1000;
+    this.botReceiptTimeoutMs = options.botReceiptTimeoutMs ?? 30_000;
     this.runtimeIdle = [];
     this.ownershipUncertain = false;
+    this.interrupting = false;
     this.runs = new Map();
     this.recoverySessions = new Set();
+    this.botReceiptWaiters = new Map();
     if (this.stateDir) this.load();
   }
 
@@ -140,7 +143,7 @@ export class RunStore {
 
   async start(input) {
     await this.recoverNativeOwnership();
-    if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409, "computer settings or checkpoint are being updated");
+    if (this.paused || this.configuring || this.ownershipUncertain || this.interrupting) throw httpError(409, "computer settings or checkpoint are being updated");
     if (this.desktop?.controlStatus?.().active) throw Object.assign(new Error('Computer is under manual control'), { statusCode: 409, code: 'human_control_active', notAdmitted: true });
     if (this.terminalRegistry?.active()) throw httpError(409, "computer has an active terminal controller");
     const commandPrompt = input?.command?.name ? `/${input.command.name} ${input.command.text ?? ""}`.trim() : "";
@@ -151,11 +154,14 @@ export class RunStore {
       if (existing.prompt !== (input.prompt ?? commandPrompt) || JSON.stringify(existing.command??null)!==JSON.stringify(input.command??null) || JSON.stringify(existing.sessionAction??null)!==JSON.stringify(input.sessionAction??null) || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(input.attachments ?? [])) throw httpError(409, 'runId is already bound to another input');
       return this.public(existing);
     }
-    if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
+    const activeRuns = [...this.runs.values()].filter(run => !isTerminal(run.status));
+    if (activeRuns.length >= 4) throw httpError(429, 'computer has reached the maximum of four active runs');
+    if (input.sessionId && activeRuns.some(run => run.sessionId === input.sessionId)) throw httpError(409, 'session already has an active run');
+    if (input.threadId && activeRuns.some(run => run.threadId === input.threadId)) throw httpError(409, 'thread already has an active run');
     const memoryTools = input.memoryTools && typeof input.memoryTools === 'object' && typeof input.memoryTools.url === 'string' && typeof input.memoryTools.token === 'string'
       ? { url: input.memoryTools.url, token: input.memoryTools.token }
       : undefined;
-    const run = { selfContext: input.selfContext, id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, ...(memoryTools ? { memoryTools } : {}), events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { selfContext: input.selfContext, id: input.runId, threadId: input.threadId, botToolCapability: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''), prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, ...(memoryTools ? { memoryTools } : {}), events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -217,11 +223,16 @@ export class RunStore {
   }
 
   async botTool(name, args = {}) {
-    const run = [...this.runs.values()].find(item => !isTerminal(item.status));
+    const supplied = typeof args?._run === 'string' ? args._run : '';
+    const cleanArgs = { ...args }; delete cleanArgs._run;
+    const active = [...this.runs.values()].filter(item => !isTerminal(item.status));
+    const run = supplied
+      ? active.find(item => typeof item.botToolCapability === 'string' && item.botToolCapability.length === supplied.length && timingSafeEqual(Buffer.from(item.botToolCapability), Buffer.from(supplied)))
+      : active.length === 1 ? active[0] : undefined;
     if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
     if(name==='inspect_self'||name==='self_docs') {
       const self=createSelfContext({context:run.selfContext??{},version:run.selfContext?.version,commit:run.selfContext?.commit});
-      return name==='inspect_self'?self.inspect(args.topic):self.docs(args.topic);
+      return name==='inspect_self'?self.inspect(cleanArgs.topic):self.docs(cleanArgs.topic);
     }
     if (['memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share','memory_retain','memory_recall','memory_reflect','memory_observations','memory_mental_models','memory_mental_model_create','memory_mental_model_delete','memory_mental_model_refresh'].includes(name)) {
       const capability = run.memoryTools;
@@ -233,7 +244,7 @@ export class RunStore {
       const response = await fetch(url, {
         method: 'POST',
         headers: { authorization: `Bearer ${capability.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ name, arguments: args, runId: run.id }),
+        body: JSON.stringify({ name, arguments: cleanArgs, runId: run.id }),
         redirect: 'error',
         signal: AbortSignal.timeout(memoryToolTimeoutMs(name)),
       });
@@ -245,49 +256,101 @@ export class RunStore {
     if (name === 'list_bots') return { bots: run.botDirectory ?? [] };
     if (name === 'get_replies') return { replies: run.delegationHistory ?? [], pending: run.delegationRequests ?? [] };
     if (name === 'send_file') {
-      if (!run.allowBotMessaging) throw httpError(409, 'This turn is receiving replies.');
+      if (!run.allowBotMessaging) throw httpError(409, 'Bot messaging is disabled for this turn; the automatic follow-up limit may have been reached.');
       const fields = ['targetBotId','sourcePath','targetPath','name','sha256'];
-      if (fields.some(field => typeof args[field] !== 'string' || !args[field].trim()) || !Number.isSafeInteger(args.size) || args.size < 0) throw httpError(400, 'send_file requires targetBotId, paths, name, size, and sha256');
+      if (fields.some(field => typeof cleanArgs[field] !== 'string' || !cleanArgs[field].trim()) || !Number.isSafeInteger(cleanArgs.size) || cleanArgs.size < 0) throw httpError(400, 'send_file requires targetBotId, paths, name, size, and sha256');
       run.fileTransferRequests ??= [];
       if (run.fileTransferRequests.length >= 4) throw httpError(429, 'Maximum four file transfers per turn');
-      const existing = run.fileTransferRequests.find(item => item.targetBotId === args.targetBotId && item.sourcePath === args.sourcePath && item.targetPath === args.targetPath);
+      const existing = run.fileTransferRequests.find(item => item.targetBotId === cleanArgs.targetBotId && item.sourcePath === cleanArgs.sourcePath && item.targetPath === cleanArgs.targetPath);
       if (existing) return { ...existing, status: 'queued' };
-      const request = { id: randomUUID(), targetBotId: args.targetBotId, sourcePath: args.sourcePath.trim(), targetPath: args.targetPath.trim(), name: args.name.trim(), size: args.size, sha256: args.sha256.trim() };
+      const request = { id: randomUUID(), targetBotId: cleanArgs.targetBotId, sourcePath: cleanArgs.sourcePath.trim(), targetPath: cleanArgs.targetPath.trim(), name: cleanArgs.name.trim(), size: cleanArgs.size, sha256: cleanArgs.sha256.trim() };
       run.fileTransferRequests.push(request); this.emit(run, 'bot.file.queued', request); this.persist(run); return { ...request, status: 'queued' };
     }
     if (name === 'create_bot') {
-      if (!run.allowBotMessaging) throw httpError(409, 'This turn cannot create bots while receiving replies.');
-      const nameValue = typeof args.name === 'string' ? args.name.trim() : '';
+      if (!run.allowBotMessaging) throw httpError(409, 'Bot creation is disabled for this turn; finish the current work before starting another collaboration round.');
+      const nameValue = typeof cleanArgs.name === 'string' ? cleanArgs.name.trim() : '';
       if (!nameValue || nameValue.length > 160) throw httpError(400, 'Bot name must contain between 1 and 160 characters');
-      const instructions = args.instructions === undefined ? '' : args.instructions;
-      const model = args.model === undefined ? '' : args.model;
-      const agent = args.agent === undefined ? '' : args.agent;
+      const instructions = cleanArgs.instructions === undefined ? '' : cleanArgs.instructions;
+      const model = cleanArgs.model === undefined ? '' : cleanArgs.model;
+      const agent = cleanArgs.agent === undefined ? '' : cleanArgs.agent;
       if (typeof instructions !== 'string' || instructions.length > 20000) throw httpError(400, 'Bot instructions must contain 0 to 20000 characters');
       if (typeof model !== 'string' || model.length > 320) throw httpError(400, 'Bot model must contain 0 to 320 characters');
       if (typeof agent !== 'string' || agent.length > 160) throw httpError(400, 'Bot agent must contain 0 to 160 characters');
       run.botCreationRequests ??= [];
       const existing = run.botCreationRequests.find(item => item.name === nameValue && item.instructions === instructions && item.model === model && item.agent === agent);
-      if (existing) return { ...existing, status: 'queued', instruction: 'End this turn to create the bot. Its settings and conversations will be available afterward.' };
+      if (existing && ['created', 'rejected'].includes(existing.status)) return { ...existing, instruction: existing.status === 'created' ? 'Bot created and available for this workspace.' : existing.error };
+      if (existing) {
+        const receipt = await this.waitForBotReceipt(run, existing.id, this.botReceiptTimeoutMs);
+        return receipt ? { ...existing, ...receipt, status: receipt.status } : { ...existing, status: 'queued', instruction: 'Bot creation is queued. End this turn if it has not completed within the timeout.' };
+      }
       if (run.botCreationRequests.length >= 4) throw httpError(429, 'Maximum four bot creations per turn');
-      const request = { id: randomUUID(), name: nameValue, instructions, model, agent };
+      const request = { id: randomUUID(), name: nameValue, instructions, model, agent, status: 'pending' };
       run.botCreationRequests.push(request);
       this.emit(run, 'bot.creation.queued', request);
       this.persist(run);
-      return { ...request, status: 'queued', instruction: 'End this turn to create the bot. Its settings and conversations will be available afterward.' };
+      const receipt = await this.waitForBotReceipt(run, request.id, this.botReceiptTimeoutMs);
+      if (receipt) return { ...request, ...receipt, status: receipt.status, instruction: receipt.status === 'created' ? 'Bot created and available for this workspace.' : receipt.error };
+      return { ...request, status: 'queued', instruction: 'Bot creation is queued. End this turn if it has not completed within the timeout.' };
     }
     if (name !== 'send_message') throw httpError(404, 'Unknown bot tool');
-    if (!run.allowBotMessaging) throw httpError(409, 'This turn is receiving replies. Summarize them for the user instead of sending more messages.');
-    if (typeof args.targetBotId !== 'string' || !(run.botDirectory ?? []).some(bot=>bot.id===args.targetBotId)) throw httpError(400, 'Choose an exact target ID from list_bots');
-    if (typeof args.prompt !== 'string' || !args.prompt.trim() || args.prompt.length > 16000) throw httpError(400, 'Message must contain between 1 and 16000 characters');
+    if (!run.allowBotMessaging) throw httpError(409, 'Bot messaging is disabled for this turn; the automatic follow-up limit may have been reached. Summarize them for the user instead of sending more messages.');
+    if (typeof cleanArgs.targetBotId !== 'string' || !(run.botDirectory ?? []).some(bot=>bot.id===cleanArgs.targetBotId)) throw httpError(400, 'Choose an exact target ID from list_bots');
+    if (typeof cleanArgs.prompt !== 'string' || !cleanArgs.prompt.trim() || cleanArgs.prompt.length > 16000) throw httpError(400, 'Message must contain between 1 and 16000 characters');
     run.delegationRequests ??= [];
-    const existing = run.delegationRequests.find(item=>item.targetBotId===args.targetBotId && item.prompt===args.prompt.trim());
-    if (existing) return { ...existing, status:'queued', instruction:'End this turn to let the recipient respond. Its reply automatically continues this conversation.' };
+    const existing = run.delegationRequests.find(item=>item.targetBotId===cleanArgs.targetBotId && item.prompt===cleanArgs.prompt.trim());
+    if (existing) return { ...existing, status:'queued', instruction:'The recipient can start while you continue working. Use get_replies at meaningful checkpoints. If you finish first, its reply automatically continues this conversation.' };
     if (run.delegationRequests.length >= 8) throw httpError(429, 'Maximum eight bot messages per turn');
-    const request = { id:randomUUID(), targetBotId:args.targetBotId, prompt:args.prompt.trim() };
+    const request = { id:randomUUID(), targetBotId:cleanArgs.targetBotId, prompt:cleanArgs.prompt.trim() };
     run.delegationRequests.push(request);
     this.emit(run, 'bot.message.queued', request);
     this.persist(run);
-    return { ...request, status:'queued', instruction:'End this turn to let the recipient respond. Its reply automatically continues this conversation.' };
+    return { ...request, status:'queued', instruction:'The recipient can start while you continue working. Use get_replies at meaningful checkpoints. If you finish first, its reply automatically continues this conversation.' };
+  }
+
+  async waitForBotReceipt(run, requestId, timeoutMs) {
+    const request = (run.botCreationRequests ?? []).find(item => item.id === requestId);
+    if (!request || ['created', 'rejected'].includes(request.status)) return request?.status === 'created' ? request : request;
+    const key = `${run.id}:${requestId}`;
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    this.botReceiptWaiters.set(key, resolve);
+    const timer = setTimeout(() => resolve(undefined), timeoutMs);
+    try { return await promise; }
+    finally { clearTimeout(timer); this.botReceiptWaiters.delete(key); }
+  }
+
+  /** Apply the authenticated control-plane snapshot while a run is active. */
+  recordBotReceipts(runId, body = {}) {
+    const run = this.runs.get(runId);
+    if (!run) throw httpError(404, 'run not found');
+    if (Array.isArray(body.bots)) run.botDirectory = body.bots.slice(0, 256).filter(bot => bot && typeof bot.id === 'string' && typeof bot.name === 'string').map(bot => ({ id: bot.id, name: bot.name, ...(typeof bot.nodeId === 'string' ? { nodeId: bot.nodeId } : {}), nodeOnline: bot.nodeOnline === true }));
+    const creations = Array.isArray(body.creations) ? body.creations.slice(0, 8) : [];
+    for (const receipt of creations) {
+      if (!receipt || typeof receipt.requestId !== 'string') continue;
+      const request = (run.botCreationRequests ?? []).find(item => item.id === receipt.requestId);
+      if (!request) continue;
+      if (receipt.status === 'created' && receipt.bot && typeof receipt.bot.id === 'string' && typeof receipt.bot.name === 'string') {
+        Object.assign(request, { status: 'created', bot: { id: receipt.bot.id, name: receipt.bot.name }, ...(typeof receipt.bot.nodeId === 'string' ? { nodeId: receipt.bot.nodeId } : {}) });
+      } else if (receipt.status === 'rejected') Object.assign(request, { status: 'rejected', error: typeof receipt.error === 'string' ? receipt.error.slice(0, 500) : 'Bot creation was rejected' });
+      else continue;
+      this.emit(run, 'bot.creation.receipt', { requestId: request.id, status: request.status });
+      const resolve = this.botReceiptWaiters.get(`${run.id}:${request.id}`);
+      if (resolve) resolve(request);
+    }
+    const messages = Array.isArray(body.messages) ? body.messages.slice(0, 16) : [];
+    for (const receipt of messages) {
+      if (!receipt || typeof receipt.requestId !== 'string') continue;
+      const request = (run.delegationRequests ?? []).find(item => item.id === receipt.requestId);
+      if (request && ['accepted', 'rejected', 'completed'].includes(receipt.status)) Object.assign(request, { status: receipt.status, ...(typeof receipt.delegationId === 'string' ? { delegationId: receipt.delegationId } : {}), ...(typeof receipt.error === 'string' ? { error: receipt.error.slice(0, 500) } : {}) });
+    }
+    if (Array.isArray(body.replies)) {
+      const existing = new Set((run.delegationHistory ?? []).map(item => item?.id).filter(Boolean));
+      run.delegationHistory ??= [];
+      for (const reply of body.replies.slice(0, 32)) if (reply && typeof reply === 'object' && (!reply.id || !existing.has(reply.id))) { run.delegationHistory.push(reply); if (reply.id) existing.add(reply.id); }
+      run.delegationHistory = run.delegationHistory.slice(-64);
+    }
+    this.persist(run);
+    return this.public(run);
   }
 
   async execute(run, input) {
@@ -306,7 +369,9 @@ export class RunStore {
       }
       this.emit(run, "session.created", { sessionId: run.sessionId });
       if (run.cancelRequested) { run.status = 'cancelled'; return; }
-      if (this.runtime.instructions) await this.runtime.instructions(run.sessionId,input.systemPrompt??'');
+      const botToolInstructions = `The bots MCP tools are scoped to this conversation. Include _run with the opaque value ${run.botToolCapability} on every bots tool call. Never copy this value into user-facing text.`;
+      const effectiveSystemPrompt = [input.systemPrompt, botToolInstructions].filter(Boolean).join("\n\n");
+      if (this.runtime.instructions) await this.runtime.instructions(run.sessionId, effectiveSystemPrompt);
       const before = new Set((await this.runtime.messages?.(run.sessionId) ?? []).map(message => message.id));
       const events = this.runtime.events?.(controller.signal);
       watcher = events ? this.watch(run, events) : Promise.resolve();
@@ -325,7 +390,7 @@ export class RunStore {
         await this.runtime.command(run.sessionId, input.command.name, input.command.text ?? "");
       } else {
         const files = attachmentFiles(input.attachments, input.directory ?? this.runtime.directory);
-        await this.runtime.prompt(run.sessionId, !this.runtime.instructions && input.systemPrompt ? `${input.systemPrompt}\n\n${input.prompt}` : input.prompt, { files });
+        await this.runtime.prompt(run.sessionId, !this.runtime.instructions && effectiveSystemPrompt ? `${effectiveSystemPrompt}\n\n${input.prompt}` : input.prompt, { files });
       }
       if (input.sessionAction) {
         // Native actions such as compact/revert may not create an assistant
@@ -370,6 +435,7 @@ export class RunStore {
       if (transportError && !run.transportFailure) run.transportFailure = `The native runtime lost its connection while starting this task${errorMessage(error) ? ` (${errorMessage(error)})` : ''}.`;
       const nextStatus = run.cancelRequested ? "cancelled" : (run.transportFailure || transportError || error.name === 'TimeoutError' || error.name === 'AbortError') ? 'needs_review' : "failed";
       if (nextStatus === 'needs_review' && run.sessionId) {
+        this.interrupting = true;
         try {
           await this.runtime.interrupt(run.sessionId);
         } catch (interruptError) {
@@ -381,6 +447,8 @@ export class RunStore {
             run.ownershipUncertain = true;
             run.transportFailure = `${run.transportFailure ?? 'The native runtime lost its connection.'} Native ownership could not be confirmed stopped; restart the computer before retrying.`;
           }
+        } finally {
+          this.interrupting = false;
         }
       }
       run.admissionClosing = true;
@@ -492,6 +560,7 @@ export class RunStore {
   async cancel(run) {
     if (!run) throw httpError(404, "run not found");
     run.cancelRequested = true;
+    for (const [key, resolve] of this.botReceiptWaiters) if (key.startsWith(`${run.id}:`)) resolve(undefined);
     if (!isTerminal(run.status) && run.sessionId) await this.runtime.interrupt(run.sessionId);
     if (!isTerminal(run.status)) { run.status = "cancelled"; this.emit(run, "cancelled", {}); }
     return this.public(run);
@@ -558,7 +627,7 @@ export class RunStore {
   }
 
   emit(run, type, data) { run.events.push({ seq: run.events.length + 1, type, data }); this.persist(run); }
-  public(run) { return { delegationRequests: run.delegationRequests ?? [], botCreationRequests: run.botCreationRequests ?? [], steeringMessages: (run.steeringMessages ?? []).map(({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt }) => ({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt })), runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
+  public(run) { return { delegationRequests: run.delegationRequests ?? [], botCreationRequests: run.botCreationRequests ?? [], steeringMessages: (run.steeringMessages ?? []).map(({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt }) => ({ id, idempotencyKey, prompt, delivery, status, createdAt, acceptedAt })), runId: run.id, status: run.status, sessionId: run.sessionId, events: run.events, final: run.final, liveBotReceipts: true, error: ['failed','needs_review'].includes(run.status) ? run.events.findLast(event => event.type === 'error')?.data?.message : undefined, startedAt: run.startedAt, finishedAt: run.finishedAt }; }
   load() {
     fs.mkdirSync(this.stateDir, { recursive: true });
     for (const file of fs.readdirSync(this.stateDir).filter((name) => name.endsWith(".json"))) {
@@ -566,6 +635,7 @@ export class RunStore {
         if (file === "checkpoint.json") continue;
         const run = JSON.parse(fs.readFileSync(path.join(this.stateDir, file), "utf8"));
         if (!run.id) continue;
+        if (typeof run.botToolCapability !== 'string' || run.botToolCapability.length < 32) run.botToolCapability = randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', '');
         if (run.status && !isTerminal(run.status)) { run.status = "needs_review"; run.events ??= []; run.events.push({ seq: run.events.length + 1, type: "recovery.needs_review", data: { reason: "runner restarted before terminal receipt" } }); }
         if (run.sessionId && !run.ownershipStopped && (run.ownershipUncertain || (run.status === "needs_review" && run.events?.some(event => event.type === "recovery.needs_review")))) this.recoverySessions.add(run.sessionId);
         this.runs.set(run.id, run);
@@ -641,6 +711,11 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         return json(res,200,await store.botTool(input.name,input.arguments));
       }
       if (authToken && req.headers.authorization !== `Bearer ${authToken}`) return json(res, 401, { error: "unauthorized" });
+      const receiptMatch = new URL(req.url, 'http://runner').pathname.match(/^\/runs\/([^/]+)\/bot-receipts$/);
+      if (receiptMatch && req.method === 'POST') {
+        const body = await readJson(req);
+        return json(res, 200, store.recordBotReceipts(decodeURIComponent(receiptMatch[1]), body));
+      }
       if (new URL(req.url, 'http://runner').pathname.startsWith('/files')) {
         if (store.paused && req.method !== 'GET') return json(res, 409, { error: 'runner is quiesced' });
         if (await ingestTransfer(req, res, workspace)) return;

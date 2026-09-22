@@ -182,14 +182,14 @@ async function relayComputerFile({ direction, runner, runnerToken, controlUrl, r
   return { relayId, path: target, direction, bytes: declared || undefined };
 }
 
-function capabilities(runner = Boolean(process.env.NODE_RUNNER_TOKEN), browser = Boolean(process.env.OPENCODE_BOT_BROWSER)) {
-  return { os: platform(), arch: process.arch, runner, desktop: false, browser, maxParallelJobs: 1 };
+function capabilities(runner = Boolean(process.env.NODE_RUNNER_TOKEN), browser = Boolean(process.env.OPENCODE_BOT_BROWSER), maxParallelJobs = 4) {
+  return { os: platform(), arch: process.arch, runner, desktop: false, browser, maxParallelJobs: Math.max(1, Math.min(4, Number(maxParallelJobs) || 4)) };
 }
 
 async function liveCapabilities(config) {
   try {
     const url = new URL(config.runnerUrl || 'http://127.0.0.1:8787');
-    if (!['127.0.0.1','localhost','[::1]'].includes(url.hostname)) return capabilities(false);
+    if (!['127.0.0.1','localhost','[::1]'].includes(url.hostname)) return capabilities(false, false, config.maxParallelJobs);
     const response = await fetch(`${url.origin}/health`, { headers: { accept: "application/json", ...(config.runnerStartupNonce ? {} : config.runnerToken ? { authorization: `Bearer ${config.runnerToken}` } : {}) }, signal: AbortSignal.timeout(2000) });
     const body = await response.json().catch(() => null);
     let runnerReady = Boolean(config.runnerToken) && response.ok && body?.ok === true && body?.service === "opencode2-runner" && typeof body.instanceId === "string" && body.instanceId.length > 0;
@@ -201,8 +201,8 @@ async function liveCapabilities(config) {
       const stateBody = await state.json().catch(() => null);
       runnerReady = state.ok && stateBody?.instanceId === body.instanceId;
     }
-    return capabilities(runnerReady, runnerReady && Boolean(config.browser));
-  } catch { return capabilities(false); }
+    return capabilities(runnerReady, runnerReady && Boolean(config.browser), config.maxParallelJobs);
+  } catch { return capabilities(false, false, config.maxParallelJobs); }
 }
 
 async function register(options) {
@@ -256,6 +256,15 @@ async function executeRunner(job, config, onProgress) {
     }
     const result = await jsonFetch(`${runner}/runtime/operation`, { method: "POST", token: config.runnerToken, body: { operation: payload.operation, input: payload.input && typeof payload.input === "object" ? payload.input : {} } });
     return result.result;
+  }
+  if (payload.kind === "runner.bot-receipts") {
+    if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for bot receipt commands");
+    const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(runner).hostname)) throw new Error("Local runner URL must use loopback");
+    const runId = String(payload.runId || payload.run?.runId || "");
+    if (!runId) throw new Error("bot receipt command is missing runId");
+    if (!payload.receipts || typeof payload.receipts !== "object" || Array.isArray(payload.receipts)) throw new Error("bot receipt command is missing receipts");
+    return await jsonFetch(`${runner}/runs/${encodeURIComponent(runId)}/bot-receipts`, { method: "POST", token: config.runnerToken, body: payload.receipts });
   }
   if (payload.kind === "runner.cancel" || payload.kind === "runner.approval") {
     if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runner commands");
@@ -327,60 +336,109 @@ async function run(options) {
     try { await waitForOwnedRunner(runnerUrl, config.runnerToken, localRunner, 15_000, startupNonce); }
     catch (error) { stopRunner(); throw error; }
   }
-  let lastHeartbeat = 0;
-  let count = 0;
-  do {
-    const now = Date.now();
-    let response;
-    if (localRunnerError) throw localRunnerError;
-    try {
-      if (now - lastHeartbeat >= Number(options.heartbeat_ms || process.env.NODE_HEARTBEAT_MS || DEFAULT_HEARTBEAT_MS)) {
-        await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: await agentVersion(), capabilities: await liveCapabilities(config) } });
-        lastHeartbeat = now;
-      }
-      if (await updateLocked(file)) { await sleep(250); continue; }
-      response = await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/poll`, { token: config.nodeSecret });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/HTTP (401|403|404)\b/.test(message)) throw error;
-      process.stderr.write(`node-agent: control Worker unavailable; retrying (${message})\n`);
-      await sleep(Math.min(30_000, Number(options.poll_ms || process.env.NODE_POLL_MS || DEFAULT_POLL_MS) * 2));
-      continue;
-    }
-    if (response.job) {
-      const job = response.job;
-      let commandBusy = false;
-      const keepAlive = setInterval(async () => {
-        jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: await agentVersion(), capabilities: await liveCapabilities(config) } }).catch(() => undefined);
-      }, Number(options.heartbeat_ms || process.env.NODE_HEARTBEAT_MS || DEFAULT_HEARTBEAT_MS));
-      const commandPoll = setInterval(async () => {
-        if (commandBusy) return;
-        commandBusy = true;
-        try {
-          const commandResponse = await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/poll`, { token: config.nodeSecret });
-          if (!commandResponse.job || commandResponse.job.id === job.id) return;
-          try {
-            const result = await executeRunner(commandResponse.job, config);
-            await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(commandResponse.job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: true, result } });
-          } catch (error) {
-            await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(commandResponse.job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: false, error: error instanceof Error ? error.message : String(error) } });
-          }
-        } catch { /* main run remains authoritative if command polling is interrupted */ }
-        finally { commandBusy = false; }
-      }, Number(options.command_poll_ms || 1000));
+  // The local runner's scheduler has four execution lanes; keep the node
+  // admission limit aligned with it even when a stale config asks for more.
+  const maxParallelJobs = Math.max(1, Math.min(4, Number(options.max_parallel_jobs || config.maxParallelJobs || 4) || 4));
+  config = { ...config, maxParallelJobs };
+  const pollMs = Number(options.poll_ms || process.env.NODE_POLL_MS || DEFAULT_POLL_MS);
+  const commandPollMs = Number(options.command_poll_ms || 1000);
+  const heartbeatMs = Number(options.heartbeat_ms || process.env.NODE_HEARTBEAT_MS || DEFAULT_HEARTBEAT_MS);
+  const active = new Map();
+  const pending = [];
+  let normalActive = 0;
+  let dispatched = 0;
+  let stopPolling = false;
+  let pollBusy = false;
+  let heartbeatBusy = false;
+  const isControlJob = (job) => {
+    const kind = job?.payload?.kind;
+    return kind === "runner.cancel" || kind === "runner.approval" || kind === "runner.bot-receipts" || kind === "bot-receipts" || kind === "bot.receipts";
+  };
+  const postResult = async (job, body) => {
+    await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(job.id)}/result`, { method: "POST", token: config.nodeSecret, body });
+  };
+  const startJob = (job) => {
+    const control = isControlJob(job);
+    if (!control) normalActive += 1;
+    const task = (async () => {
       try {
         const result = await executeRunner(job, config, async (progress) => {
           await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(job.id)}/progress`, { method: "POST", token: config.nodeSecret, body: { result: progress } });
         });
-        await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: true, result } });
+        await postResult(job, { ok: true, result });
       } catch (error) {
-        await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: false, error: error instanceof Error ? error.message : String(error) } });
-      } finally { clearInterval(keepAlive); clearInterval(commandPoll); }
-    } else if (options.once) break;
-    count += 1;
-    if (options.once || Number(options.max_jobs || 0) > 0 && count >= Number(options.max_jobs)) break;
-    await sleep(Number(options.poll_ms || process.env.NODE_POLL_MS || DEFAULT_POLL_MS));
-  } while (true);
+        await postResult(job, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        active.delete(job.id);
+        if (!control) normalActive -= 1;
+      }
+    })().catch((error) => {
+      // A failed result delivery is already represented by the leased job;
+      // avoid an unhandled rejection taking down sibling workers.
+      process.stderr.write(`node-agent: result delivery failed (${error instanceof Error ? error.message : String(error)})\n`);
+    });
+    active.set(job.id, task);
+    return task;
+  };
+  const heartbeat = async () => {
+    if (heartbeatBusy) return;
+    heartbeatBusy = true;
+    try {
+      await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: await agentVersion(), capabilities: await liveCapabilities(config) } });
+    } catch { /* the next heartbeat retries while the agent remains alive */ }
+    finally { heartbeatBusy = false; }
+  };
+  const lease = async () => {
+    if (pollBusy) return null;
+    pollBusy = true;
+    try { return (await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/poll`, { token: config.nodeSecret })).job || null; }
+    finally { pollBusy = false; }
+  };
+  const keepAlive = setInterval(() => { heartbeat().catch(() => undefined); }, heartbeatMs);
+  const commandPoll = setInterval(async () => {
+    // Poll while all worker slots are occupied so high-priority commands and
+    // receipt acknowledgements remain responsive. A normal job leased here is
+    // held until a worker slot becomes free.
+    if (stopPolling || normalActive < maxParallelJobs || pollBusy || !active.size) return;
+    try {
+      const job = await lease();
+      if (!job) return;
+      dispatched += 1;
+      if (isControlJob(job)) startJob(job);
+      else pending.push(job);
+    } catch { /* the main loop remains authoritative if command polling fails */ }
+  }, commandPollMs);
+  try {
+    await heartbeat();
+    while (!stopPolling) {
+      if (localRunnerError) throw localRunnerError;
+      if (options.once && dispatched > 0) { stopPolling = true; break; }
+      const maxJobs = Number(options.max_jobs || 0);
+      if (maxJobs > 0 && dispatched >= maxJobs) { stopPolling = true; break; }
+      if (await updateLocked(file)) { await sleep(250); continue; }
+      if (normalActive >= maxParallelJobs) { await sleep(Math.min(pollMs, commandPollMs)); continue; }
+      const queued = pending.shift();
+      const job = queued || await lease();
+      if (job) {
+        if (!queued) dispatched += 1;
+        startJob(job);
+        if (options.once || maxJobs > 0 && dispatched >= maxJobs) stopPolling = true;
+        continue;
+      }
+      if (options.once) { stopPolling = true; break; }
+      await sleep(pollMs);
+    }
+    // Once/max_jobs stop accepting jobs, but already leased work must report
+    // its result before the agent exits.
+    while (active.size || pending.length) {
+      while (pending.length && normalActive < maxParallelJobs) startJob(pending.shift());
+      if (active.size) await Promise.race(active.values());
+      else await sleep(10);
+    }
+  } finally {
+    clearInterval(keepAlive);
+    clearInterval(commandPoll);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
