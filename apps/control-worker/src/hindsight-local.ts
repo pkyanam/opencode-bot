@@ -10,6 +10,11 @@ export type LocalHindsightOptions = {
   instance?: (id: string) => void;
 };
 
+export const HINDSIGHT_LOCAL_DEFAULT_TIMEOUT_MS = 120_000;
+export const HINDSIGHT_LOCAL_REFLECT_TIMEOUT_MS = 330_000;
+export const hindsightLocalTimeoutMs = (path: string) =>
+  path.includes("/reflect") ? HINDSIGHT_LOCAL_REFLECT_TIMEOUT_MS : HINDSIGHT_LOCAL_DEFAULT_TIMEOUT_MS;
+
 /** Adapter for the loopback supervisor (runner/hindsight-service.mjs).
  * Provider credentials are explicit inputs; this adapter never copies credentials from
  * another Hindsight endpoint or claims readiness from the supervisor's liveness probe. */
@@ -30,7 +35,7 @@ export class LocalHindsight {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.options.token}`);
     if (typeof init.body === "string" && !headers.has("content-type")) headers.set("content-type", "application/json");
-    return this.fetchImpl(`${this.base}${path}`, { ...init, headers, redirect: "manual", signal: init.signal ?? AbortSignal.timeout(120_000) });
+    return this.fetchImpl(`${this.base}${path}`, { ...init, headers, redirect: "manual", signal: init.signal ?? AbortSignal.timeout(hindsightLocalTimeoutMs(path)) });
   }
   private async publicHealth(): Promise<any> {
     let response: Response;

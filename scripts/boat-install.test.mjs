@@ -66,7 +66,7 @@ test("standalone shell defaults to trusted GitHub latest manifest discovery", ()
 
 test("Boat setup health checks use syntactically complete stdin handlers", () => {
   const setup = readFileSync(new URL("../boat/setup.sh", import.meta.url), "utf8");
-  assert.equal((setup.match(/process\.stdin\.on\("end", \(\) => \{/g) || []).length, 4);
+  assert.equal((setup.match(/process\.stdin\.on\("end", \(\) => \{/g) || []).length, 3);
   assert.match(setup, /process\.exit\(1\); \}\s*\}\);/);
 });
 

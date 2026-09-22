@@ -136,9 +136,10 @@ for attempt in $(seq 1 60); do
   auth="$(sudo cat "$ETC/app-token")"
   state_json="$(curl --fail --silent --show-error --max-time 2 -H "Authorization: Bearer $auth" "http://127.0.0.1:${APP_PORT}/api/state" 2>/dev/null || true)"
   if [[ -n "$state_json" ]] && printf '%s' "$state_json" | node -e 'let s=""; process.stdin.on("data", d => { s += d; }); process.stdin.on("end", () => { try { const v = JSON.parse(s); if (!Array.isArray(v.bots) || !Array.isArray(v.threads) || !Array.isArray(v.runs)) process.exit(1); } catch { process.exit(1); } });'; then
-    catalog_json="$(curl --fail --silent --show-error --max-time 3 -H "Authorization: Bearer $auth" "http://127.0.0.1:${APP_PORT}/api/catalog" 2>/dev/null || true)"
+    # Catalog requests are intentionally blocked by the updater maintenance gate.
+    # Readiness checks the underlying runner without reopening user operations.
     readiness_json="$(curl --fail --silent --show-error --max-time 5 -H "Authorization: Bearer $auth" "http://127.0.0.1:${APP_PORT}/api/computer/readiness" 2>/dev/null || true)"
-    if printf '%s' "$catalog_json" | node -e 'let s=""; process.stdin.on("data", d => { s += d; }); process.stdin.on("end", () => { try { const v = JSON.parse(s); if (!Array.isArray(v.models) || !Array.isArray(v.commands) || !Array.isArray(v.providers)) process.exit(1); } catch { process.exit(1); } });' && printf '%s' "$readiness_json" | node -e 'let s=""; process.stdin.on("data", d => { s += d; }); process.stdin.on("end", () => { try { const v = JSON.parse(s); process.exit(v.state === "ready" ? 0 : 1); } catch { process.exit(1); } });'; then
+    if printf '%s' "$readiness_json" | node -e 'let s=""; process.stdin.on("data", d => { s += d; }); process.stdin.on("end", () => { try { const v = JSON.parse(s); process.exit(v.state === "ready" ? 0 : 1); } catch { process.exit(1); } });'; then
       trap - ERR; sudo rm -rf "$unit_backup"; printf 'Boat app ready on port %s\n' "$APP_PORT"; exit 0
     fi
   fi

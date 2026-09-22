@@ -37,6 +37,7 @@ const memoryTools = [
   { name: 'memory_mental_model_refresh', description: 'Refresh a provider mental model by ID.', inputSchema: { type: 'object', properties: { id: text('Mental model ID') }, required: ['id'], additionalProperties: false } },
 ];
 const memoryNames = new Set(memoryTools.map(tool => tool.name));
+const memoryToolTimeoutMs = (name) => name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000);
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
   { name: 'list_bots', description: 'List the other persistent bots in this workspace. These are independent bots with their own settings, not OpenCode subagents.', inputSchema: empty },
   { name: 'send_message', description: 'Send a task or message to another workspace bot. The recipient runs after your current turn ends; its reply automatically resumes this conversation. Do not poll or claim a response before it arrives.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string', description: 'Exact bot ID returned by list_bots' }, prompt: { type: 'string', description: 'Message or task with the context the recipient needs' } }, required: ['targetBotId','prompt'], additionalProperties: false } },
@@ -50,7 +51,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
 server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   if (!['inspect_self','self_docs','list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name) && !memoryNames.has(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
   try {
-    const response = await fetch(endpoint, { method:'POST', headers:{ authorization:`Bearer ${token}`, 'content-type':'application/json' }, body:JSON.stringify({ name:params.name, arguments:params.arguments ?? {} }), signal:AbortSignal.timeout(["memory_reflect","memory_recall","memory_mental_model_create","memory_mental_model_refresh"].includes(params.name)?120_000:15_000) });
+    const response = await fetch(endpoint, { method:'POST', headers:{ authorization:`Bearer ${token}`, 'content-type':'application/json' }, body:JSON.stringify({ name:params.name, arguments:params.arguments ?? {} }), signal:AbortSignal.timeout(memoryToolTimeoutMs(params.name)) });
     const value = await response.json();
     return { ...(response.ok ? {} : {isError:true}), content:[{type:'text',text:JSON.stringify(value)}] };
   } catch { return { isError:true, content:[{type:'text',text:'Bot messaging is temporarily unavailable. No delivery was confirmed.'}] }; }

@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { LocalHindsight } from "./hindsight-local";
+import { HINDSIGHT_LOCAL_DEFAULT_TIMEOUT_MS, HINDSIGHT_LOCAL_REFLECT_TIMEOUT_MS, hindsightLocalTimeoutMs, LocalHindsight } from "./hindsight-local";
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
 describe("LocalHindsight", () => {
+  it("gives reflection the long engine deadline while keeping ordinary calls bounded", () => {
+    expect(hindsightLocalTimeoutMs("/v1/default/banks/b/reflect")).toBe(HINDSIGHT_LOCAL_REFLECT_TIMEOUT_MS);
+    expect(HINDSIGHT_LOCAL_REFLECT_TIMEOUT_MS).toBe(330_000);
+    expect(hindsightLocalTimeoutMs("/v1/default/banks/b/memories/recall")).toBe(HINDSIGHT_LOCAL_DEFAULT_TIMEOUT_MS);
+  });
+
   it("configures the supervisor from explicit provider settings and forwards auth", async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     let configured = false;

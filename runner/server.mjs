@@ -51,6 +51,7 @@ function boundedAdminResult(value) {
   return result;
 }
 const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(errorMessage(error));
+const memoryToolTimeoutMs = (name) => name === 'memory_reflect' ? 330_000 : (['memory_recall', 'memory_mental_model_create', 'memory_mental_model_refresh'].includes(name) ? 120_000 : 15_000);
 
 export class RunStore {
   constructor(runtime, options = {}) {
@@ -234,7 +235,7 @@ export class RunStore {
         headers: { authorization: `Bearer ${capability.token}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name, arguments: args, runId: run.id }),
         redirect: 'error',
-        signal: AbortSignal.timeout(["memory_reflect","memory_recall","memory_mental_model_create","memory_mental_model_refresh"].includes(name)?120_000:15_000),
+        signal: AbortSignal.timeout(memoryToolTimeoutMs(name)),
       });
       let value;
       try { value = await response.json(); } catch { value = { error: 'shared memory returned invalid JSON' }; }
