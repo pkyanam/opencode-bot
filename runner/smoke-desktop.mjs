@@ -7,6 +7,18 @@ try {
   await desktop.start();
   stage = 'acquire lease';
   const { token } = desktop.acquireControl('release-smoke');
+  stage = 'live capture';
+  const preview = await desktop.stream();
+  const reader = preview.body.getReader();
+  const captureTimeout = setTimeout(() => { void reader.cancel(); }, 15000);
+  try {
+    const frame = await reader.read();
+    assert.equal(frame.done, false, 'desktop capture timed out');
+    assert.match(new TextDecoder().decode(frame.value.slice(0, 120)), /image\/jpeg/);
+  } finally { clearTimeout(captureTimeout); await reader.cancel(); }
+  stage = 'browser viewport';
+  const dimensions = await desktop.browserHandle.page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  assert.ok(dimensions.width <= desktop.width && dimensions.height < desktop.height, 'browser viewport must fit display including chrome');
   stage = 'pointer move';
   await desktop.input(token, { type: 'move', x: 0.5, y: 0.5 });
   stage = 'pointer click';
