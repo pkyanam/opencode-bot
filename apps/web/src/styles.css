@@ -1238,6 +1238,11 @@ button:disabled {
   padding: 20px;
 }
 .memory-registry { width: min(920px, 94vw); }
+.memory-header-actions { display: flex; gap: 4px; }
+.memory-engine-disclosure { margin: 10px 0 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.memory-engine-disclosure > summary { padding: 11px 2px; cursor: pointer; color: var(--muted); font-size: 12px; }
+.memory-engine-disclosure > summary:hover { color: var(--cream); }
+.memory-engine-disclosure .hindsight-panel { margin: 0 0 14px; border: 0; padding: 8px 0 0; background: transparent; }
 .memory-toolbar { display: flex; align-items: center; gap: 8px; margin: 16px 0 12px; }
 .memory-search { display: flex; align-items: center; gap: 7px; flex: 1; background: #191815; border: 1px solid #38352e; border-radius: 6px; padding: 8px 10px; color: #817b70; }
 .memory-search input, .memory-select, .memory-form .text-input { background: transparent; border: 0; color: #d1cbc0; font: inherit; font-size: 11px; outline: 0; }
@@ -3877,9 +3882,23 @@ a:focus-visible {
 .ui-dialog-content.modal.memory-registry { width: min(900px, calc(100vw - 32px)); max-height: min(86dvh, 760px); overflow: auto; }
 .memory-toolbar .primary-btn, .memory-toolbar .soft-btn { white-space: nowrap; }
 .memory-registry > .ui-dialog-close, .memory-form > .ui-dialog-close, .memory-history > .ui-dialog-close { display: none; }
+.memory-engine-dialog > .ui-dialog-close { display: none; }
 .memory-registry .registry-main h3 { font-size: 16px; }
 .memory-registry .registry-main p { font-size: 14px; line-height: 1.6; }
 .memory-registry .memory-content-markdown { max-height: 190px; overflow: auto; font-size: 14px; line-height: 1.6; }
+.memory-registry .registry-main { outline: 0; }
+.memory-title-button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.memory-title-button h3 { flex: 1; }
+.memory-title-button svg { color: var(--muted); transition: transform .16s ease; }
+.memory-title-button[aria-expanded="true"] svg { transform: rotate(180deg); }
+.memory-registry .memory-content-markdown:not(.is-expanded) { max-height: 4.8em; overflow: hidden; position: relative; }
+.memory-registry .memory-content-markdown:not(.is-expanded)::after { content: ""; position: absolute; inset: auto 0 0; height: 1.6em; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
+.memory-registry .memory-content-markdown:not(.is-expanded) :is(h1, h2, h3, h4) { font-size: 14px; line-height: 1.6; margin: 0; }
+.memory-registry .memory-content-markdown.is-expanded { max-height: 50vh; }
+.memory-registry .registry-actions { justify-content: flex-end; flex-wrap: wrap; margin-top: 5px; }
+.memory-registry .registry-actions .soft-btn { font-size: 11px; padding: 5px 8px; }
+.memory-engine-dialog { width: min(760px, calc(100vw - 32px)); max-height: min(88dvh, 780px); overflow: auto; }
+.memory-engine-dialog .hindsight-panel { margin: 8px 0 0; border: 0; padding: 0; background: transparent; }
 .memory-registry .memory-content-markdown > :first-child, .memory-history-content > :first-child { margin-top: 0; }
 .memory-registry .memory-content-markdown > :last-child, .memory-history-content > :last-child { margin-bottom: 0; }
 .memory-registry .registry-meta, .memory-registry .registry-foot { font-size: 11px; }

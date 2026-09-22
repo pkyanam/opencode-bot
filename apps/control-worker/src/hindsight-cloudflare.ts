@@ -81,19 +81,28 @@ export class CloudflareHindsight {
     return this.starting;
   }
   private raw(path: string, init: RequestInit = {}) {
-    return this.sandbox.containerFetch(
+    // Cloudflare Sandbox RPC cannot serialize AbortSignal objects. Keep the
+    // timeout local to this adapter and send only RPC-serializable RequestInit.
+    const { signal: _signal, ...rpcInit } = init;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Hindsight service request timed out")), 120000);
+    });
+    const request = this.sandbox.containerFetch(
       new URL(path, "http://hindsight:8790").toString(),
       {
-        ...init,
+        ...rpcInit,
         headers: {
-          ...init.headers,
+          ...rpcInit.headers,
           "content-type": "application/json",
           authorization: `Bearer ${this.options.token}`,
         },
-        signal: init.signal ?? AbortSignal.timeout(120000),
       },
       8790,
     ) as Promise<Response>;
+    return Promise.race([request, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
   async fetch(path: string, init: RequestInit = {}) {
     await this.prepare();

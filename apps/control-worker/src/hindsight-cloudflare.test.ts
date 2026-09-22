@@ -69,5 +69,6 @@ describe("native Hindsight readiness", () => {
     expect(mock.sandbox.containerFetch.mock.calls.at(-1)![0]).toContain(
       "/banks/test",
     );
+    expect(mock.sandbox.containerFetch.mock.calls.every(([, init]) => !init.signal)).toBe(true);
   });
 });

@@ -213,7 +213,7 @@ export class MemoryRegistry {
       throw new MemoryError(400, "Title must contain 1–160 characters");
     const kind = input.kind ?? previous?.kind ?? "fact";
     if (!kinds.includes(kind))
-      throw new MemoryError(400, "Unknown memory kind");
+      throw new MemoryError(400, `Memory kind must be one of: ${kinds.join(", ")}. Use fact for project context.`);
     const scope = input.visibility ?? previous?.visibility ?? "private";
     if (!visibility.includes(scope))
       throw new MemoryError(400, "Unknown sharing scope");

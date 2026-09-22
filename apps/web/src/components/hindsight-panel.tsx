@@ -17,7 +17,7 @@ import {
 } from "../api";
 import { MarkdownContent } from "./markdown-content";
 
-type Props = { bots: Bot[] };
+type Props = { bots: Bot[]; mode?: "all" | "ask" | "settings" };
 type Budget = "low" | "mid" | "high";
 
 const statusLabel: Record<HindsightEngine["status"], string> = {
@@ -27,9 +27,12 @@ const statusLabel: Record<HindsightEngine["status"], string> = {
   disabled: "Disabled",
 };
 
-export function HindsightPanel({ bots }: Props) {
+export function HindsightPanel({ bots, mode = "all" }: Props) {
+  const askMode = mode === "ask";
+  const settingsMode = mode === "settings";
   const [engine, setEngine] = useState<HindsightEngine | null>(null);
   const [error, setError] = useState("");
+  const [engineError, setEngineError] = useState("");
   const [loading, setLoading] = useState(true);
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -74,9 +77,9 @@ export function HindsightPanel({ bots }: Props) {
         setAutoCapture(Boolean(value.settings?.autoCapture));
         setEnabled(Boolean(value.enabled));
       }
-      setError("");
+      setEngineError("");
     } catch (e) {
-      setError(
+      setEngineError(
         e instanceof Error ? e.message : "Could not load Hindsight status",
       );
     } finally {
@@ -148,7 +151,7 @@ export function HindsightPanel({ bots }: Props) {
         request === exploreRequest.current &&
         currentBotId === activeBotId.current
       )
-        setError(e instanceof Error ? e.message : `Could not ${kind} memory`);
+        setError(`Saved memories are safe. Retrieval is unavailable: ${e instanceof Error ? e.message : `Could not ${kind} memory`}`);
     } finally {
       if (request === exploreRequest.current) setExploring(null);
     }
@@ -191,9 +194,7 @@ export function HindsightPanel({ bots }: Props) {
         currentBotId === activeBotId.current
       )
         setError(
-          e instanceof Error
-            ? e.message
-            : "Could not load Hindsight observations",
+          `Saved memories are safe. Retrieval is unavailable: ${e instanceof Error ? e.message : "Could not load Hindsight observations"}`,
         );
     } finally {
       if (showLoading && request === insightsRequest.current)
@@ -312,8 +313,8 @@ export function HindsightPanel({ bots }: Props) {
     setInsightsOpen(false);
   }, [botId]);
   return (
-    <section className="hindsight-panel" aria-labelledby="hindsight-heading">
-      <div className="hindsight-heading">
+    <section className="hindsight-panel" aria-label={askMode ? "Ask memories" : "Hindsight"}>
+      {!askMode && <div className="hindsight-heading">
         <div>
           <div className="memory-section-kicker">
             <Database size={13} /> MEMORY ENGINE
@@ -327,10 +328,12 @@ export function HindsightPanel({ bots }: Props) {
         >
           {loading ? "Checking…" : statusLabel[engine?.status ?? "unavailable"]}
         </div>
-      </div>
-      {error && (
+      </div>}
+      {askMode && <p className="hindsight-muted">Ask a question using the memories available to the selected bot.</p>}
+      {askMode && engine?.status !== "ready" && <p role="status">Memory search is {statusLabel[engine?.status ?? "starting"].toLowerCase()}. Your saved memories are still available.</p>}
+      {(error || engineError) && (
         <div className="hindsight-error">
-          <AlertCircle size={14} /> <span>{error}</span>
+          <AlertCircle size={14} /> <span>{error || engineError}</span>
           <button className="retry-inline" onClick={() => void loadEngine()}>
             Retry
           </button>
@@ -341,7 +344,7 @@ export function HindsightPanel({ bots }: Props) {
           <AlertCircle size={14} /> <span>{engine.error}</span>
         </div>
       )}
-      <div className="hindsight-settings">
+      {!askMode && <div className="hindsight-settings">
         <details
           className="hindsight-advanced"
           open={externalOpen}
@@ -435,11 +438,11 @@ export function HindsightPanel({ bots }: Props) {
             <RefreshCw size={13} /> Sync memories
           </button>
         </div>
-      </div>
-      <div className="hindsight-explore">
-        <div className="memory-section-kicker">
+      </div>}
+      {!settingsMode && <div className="hindsight-explore">
+        {!askMode && <div className="memory-section-kicker">
           <Search size={13} /> EXPLORE MEMORY
-        </div>
+        </div>}
         <div className="hindsight-explore-controls">
           <select
             className="memory-select"
@@ -454,16 +457,14 @@ export function HindsightPanel({ bots }: Props) {
               </option>
             ))}
           </select>
-          <select
-            className="memory-select hindsight-budget"
-            value={budget}
-            onChange={(e) => setBudget(e.target.value as Budget)}
-            aria-label="Exploration budget"
-          >
-            <option value="low">Low budget</option>
-            <option value="mid">Balanced</option>
-            <option value="high">High budget</option>
-          </select>
+          <details className="hindsight-budget-details">
+            <summary>Advanced</summary>
+            <select className="memory-select hindsight-budget" value={budget} onChange={(e) => setBudget(e.target.value as Budget)} aria-label="Exploration budget">
+              <option value="low">Low budget</option>
+              <option value="mid">Balanced</option>
+              <option value="high">High budget</option>
+            </select>
+          </details>
         </div>
         <textarea
           className="text-area hindsight-query"
@@ -481,7 +482,7 @@ export function HindsightPanel({ bots }: Props) {
             {exploring === "recall" && (
               <LoaderCircle size={13} className="spin" />
             )}{" "}
-            Recall
+            {askMode ? "Find matching memories" : "Recall"}
           </button>
           <button
             className="soft-btn"
@@ -491,11 +492,12 @@ export function HindsightPanel({ bots }: Props) {
             {exploring === "reflect" && (
               <LoaderCircle size={13} className="spin" />
             )}{" "}
-            Reflect
+            {askMode ? "Ask" : "Reflect"}
           </button>
         </div>
         {result && (
           <div className="hindsight-result">
+            {!result.text && !result.results?.length && <p>No matching memories were found. Try a different question or save a memory first.</p>}
             {result.text && (
               <MarkdownContent className="hindsight-result-markdown">
                 {result.text}
@@ -678,7 +680,7 @@ export function HindsightPanel({ bots }: Props) {
             )}
           </details>
         )}
-      </div>
+      </div>}
     </section>
   );
 }

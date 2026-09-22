@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
+  ChevronDown,
   Download,
   Edit3,
   FileText,
@@ -10,6 +11,7 @@ import {
   Pin,
   Plus,
   Search,
+  Settings2,
   Trash2,
   X,
 } from "lucide-react";
@@ -39,6 +41,9 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [history, setHistory] = useState<MemoryItem[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [engineMode, setEngineMode] = useState<"ask" | "settings">("settings");
+  const [engineOpen, setEngineOpen] = useState(false);
   const requestId = useRef(0);
 
   const load = async (append = false) => {
@@ -161,16 +166,16 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
         <div className="modal-head">
           <div>
             <div className="modal-kicker">WORKSPACE</div>
-            <DialogTitle>Memory registry</DialogTitle>
+            <DialogTitle>Memories</DialogTitle>
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
+          <div className="memory-header-actions">
+            <button className="icon-btn" onClick={() => { setEngineMode("settings"); setEngineOpen(true); }} aria-label="Memory settings" title="Memory settings"><Settings2 size={17} /></button>
+            <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+          </div>
         </div>
         <p className="modal-copy" id="memory-description">
-          Durable context owned by bots, available wherever it is shared.
+          Useful context your bots can remember and share.
         </p>
-        <HindsightPanel bots={bots} />
         <div className="memory-toolbar">
           <label className="memory-search">
             <Search size={14} />
@@ -197,6 +202,7 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
           <button className="soft-btn" onClick={exportJson}>
             <Download size={14} /> Export
           </button>
+          <button className="soft-btn" onClick={() => { setEngineMode("ask"); setEngineOpen(true); }}>Ask memories</button>
           <button
             className="primary-btn"
             disabled={!bots.length}
@@ -222,7 +228,7 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
         )}
         {loading && !items.length ? (
           <div className="memory-empty">
-            <LoaderCircle size={17} className="spin" /> Loading registry…
+            <LoaderCircle size={17} className="spin" /> Loading memories…
           </div>
         ) : !visibleItems.length ? (
           <div className="memory-empty">
@@ -247,8 +253,10 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
                       <span className="memory-kind">{item.kind}</span>
                     )}
                   </div>
-                  <h3>{item.title || "Untitled memory"}</h3>
-                  <MarkdownContent className="memory-content-markdown">{item.content}</MarkdownContent>
+                  <button className="memory-title-button" onClick={() => setExpandedId((current) => current === item.id ? null : item.id)} aria-expanded={expandedId === item.id}>
+                    <h3>{item.title || "Untitled memory"}</h3><ChevronDown size={15} aria-hidden="true" />
+                  </button>
+                  <MarkdownContent className={`memory-content-markdown ${expandedId === item.id ? "is-expanded" : ""}`}>{item.content}</MarkdownContent>
                   <div className="registry-foot">
                     <span>{date(item.updatedAt ?? item.createdAt)}</span>
                     {item.sourceThreadId && (
@@ -267,42 +275,39 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
                     ))}
                   </div>
                 </div>
-                <div className="registry-actions">
+                {expandedId === item.id && <div className="registry-actions" aria-label="Memory actions">
                   <button
-                    className="icon-btn"
+                    className="soft-btn"
                     onClick={() => void togglePin(item)}
                     aria-label={item.pinned ? "Unpin memory" : "Pin memory"}
                   >
-                    <Pin
-                      size={14}
-                      fill={item.pinned ? "currentColor" : "none"}
-                    />
+                    <Pin size={14} fill={item.pinned ? "currentColor" : "none"} /> {item.pinned ? "Unpin" : "Pin"}
                   </button>
                   <button
-                    className="icon-btn"
+                    className="soft-btn"
                     onClick={() => {
                       setEditing(item);
                       setShowForm(true);
                     }}
                     aria-label="Edit memory"
                   >
-                    <Edit3 size={14} />
+                    <Edit3 size={14} /> Edit & share
                   </button>
                   <button
-                    className="icon-btn"
+                    className="soft-btn"
                     onClick={() => void showHistory(item)}
                     aria-label="View history"
                   >
-                    <History size={14} />
+                    <History size={14} /> History
                   </button>
                   <button
-                    className="icon-btn danger"
+                    className="soft-btn danger"
                     onClick={() => void remove(item)}
                     aria-label="Delete memory"
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={14} /> Delete
                   </button>
-                </div>
+                </div>}
               </article>
             ))}
           </div>
@@ -370,6 +375,12 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
             </DialogContent>
           </Dialog>
         )}
+        {engineOpen && <Dialog open onOpenChange={(open) => setEngineOpen(open)}>
+          <DialogContent className="memory-engine-dialog" aria-describedby={undefined}>
+            <div className="modal-head"><div><div className="modal-kicker">{engineMode === "ask" ? "ASK MEMORIES" : "MEMORY SETTINGS"}</div><DialogTitle>{engineMode === "ask" ? "Ask your bots" : "Memory settings"}</DialogTitle></div><button className="icon-btn" onClick={() => setEngineOpen(false)} aria-label="Close"><X size={16} /></button></div>
+            <HindsightPanel bots={bots} mode={engineMode} />
+          </DialogContent>
+        </Dialog>}
       </DialogContent>
     </Dialog>
   );

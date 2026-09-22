@@ -990,7 +990,7 @@ function App() {
               className="footer-action"
               onClick={() => { setMemoryFilterBot(undefined); setShowMemory(true); }}
             >
-              <FileText size={15} /> Memory registry
+              <FileText size={15} /> Memories
             </button>
             <button
               className="footer-action"
