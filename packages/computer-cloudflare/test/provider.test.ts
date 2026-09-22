@@ -87,6 +87,31 @@ it("ensures a runner once and scopes transport with bearer and generation", asyn
   assert.equal(await provider.inspect("c1").then((status) => status.generation), 1);
 });
 
+it("replaces a poisoned Sandbox proxy after a Durable Object reset without replaying the failed request", async () => {
+  const first = fakeSandbox();
+  const second = fakeSandbox();
+  let created = 0;
+  let failed = false;
+  const originalFetch = first.containerFetch;
+  first.containerFetch = async (url: string, init: RequestInit) => {
+    if (!failed && url.endsWith("/runs")) {
+      failed = true;
+      throw new Error("Durable Object reset because its code was updated.");
+    }
+    return originalFetch(url, init);
+  };
+  const provider = new CloudflareComputerProvider({
+    sandboxNamespace: {} as CloudflareSandboxBinding,
+    sandboxFactory: () => (++created === 1 ? first : second) as never,
+  });
+  await provider.ensure({ computerId: "reset", runnerToken: "secret" });
+  const transport = await provider.connect("reset", { computerId: "reset", generation: 1, token: "secret" });
+  await assert.rejects(() => transport.fetch("/runs", { method: "POST" }), /Durable Object reset/);
+  const refreshed = await provider.ensure({ computerId: "reset", runnerToken: "secret" });
+  assert.equal(refreshed.status.runner, "ready");
+  assert.equal(created, 2);
+});
+
 it("passes keepAlive to the Sandbox factory by default and honors an explicit idle policy", async () => {
   const seen: Array<{ keepAlive: boolean; sleepAfter?: string | number }> = [];
   const provider = new CloudflareComputerProvider({

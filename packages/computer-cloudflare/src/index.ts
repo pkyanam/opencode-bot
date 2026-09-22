@@ -136,6 +136,9 @@ type ManagedComputer = {
   process?: Process;
   generation: number;
   keepAlive: boolean;
+  sandboxKey: string;
+  sandboxOptions: { keepAlive: boolean; sleepAfter?: string | number };
+  sandboxInvalid: boolean;
 };
 
 const DEFAULT_RUNNER_COMMAND = "node /opt/opencode-bot/runner/server.mjs";
@@ -195,9 +198,18 @@ export class CloudflareComputerProvider implements ComputerProvider {
     if (!spec.computerId || !spec.runnerToken) throw new Error("computerId and runnerToken are required");
     const existing = this.computers.get(spec.computerId);
     if (existing) {
-      if (existing.keepAlive && typeof existing.sandbox.setKeepAlive === "function") await existing.sandbox.setKeepAlive(true);
-      await this.startRunner(existing);
-      return this.handle(existing, await this.inspectManaged(existing));
+      try {
+        if (existing.sandboxInvalid) {
+          existing.sandbox = this.options.sandboxFactory?.(this.options.sandboxNamespace, existing.sandboxKey, existing.sandboxOptions) ?? await defaultSandbox(this.options.sandboxNamespace, existing.sandboxKey, existing.sandboxOptions);
+          existing.sandboxInvalid = false;
+        }
+        if (existing.keepAlive && typeof existing.sandbox.setKeepAlive === "function") await existing.sandbox.setKeepAlive(true);
+        await this.startRunner(existing);
+        return this.handle(existing, await this.inspectManaged(existing));
+      } catch (error) {
+        this.markSandboxError(existing, error);
+        throw error;
+      }
     }
 
     const sandboxOptions = { keepAlive: this.options.keepAlive ?? true, sleepAfter: this.options.sleepAfter };
@@ -212,6 +224,9 @@ export class CloudflareComputerProvider implements ComputerProvider {
       sandbox,
       generation: spec.generation ?? 1,
       keepAlive: sandboxOptions.keepAlive,
+      sandboxKey: key,
+      sandboxOptions,
+      sandboxInvalid: false,
     };
     this.computers.set(spec.computerId, managed);
     try {
@@ -281,6 +296,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
         }
         return { id: checkpointId, computerId: id, createdAt: new Date().toISOString(), supported: true, durable: true, checkpointKey: key, sha256, bytes: size, paths };
       } catch (error) {
+        this.markSandboxError(managed, error);
         checkpointFailure = error;
         throw error;
       } finally {
@@ -352,6 +368,9 @@ export class CloudflareComputerProvider implements ComputerProvider {
       if (!reset.success) throw new Error(`Could not prepare checkpoint roots: ${reset.stderr || reset.stdout}`);
       const result = await managed.sandbox.exec(`tar -xzf ${shellQuote(archiveName)} -C /`);
       if (!result.success) throw new Error(`Checkpoint restore failed: ${result.stderr || result.stdout}`);
+    } catch (error) {
+      this.markSandboxError(managed, error);
+      throw error;
     } finally {
       await managed.sandbox.exec(`rm -f ${shellQuote(archiveName)}`).catch(() => undefined);
       const resumed = await transport.fetch("/checkpoint/resume", { method: "POST" }).catch((error) => ({ ok: false, status: 0, error } as const));
@@ -475,7 +494,18 @@ export class CloudflareComputerProvider implements ComputerProvider {
   private async runnerRequest(managed: ManagedComputer, path: string, init: RequestInit): Promise<Response> {
     const normalized = path.startsWith("/") ? path : `/${path}`;
     const url = `http://127.0.0.1${normalized}`;
-    return managed.sandbox.containerFetch(url, init, managed.spec.runnerPort);
+    try {
+      return await managed.sandbox.containerFetch(url, init, managed.spec.runnerPort);
+    } catch (error) {
+      this.markSandboxError(managed, error);
+      throw error;
+    }
+  }
+
+  private markSandboxError(managed: ManagedComputer, error: unknown): void {
+    if (/durable object reset because its code was updated|code was updated/i.test(error instanceof Error ? error.message : String(error))) {
+      managed.sandboxInvalid = true;
+    }
   }
 }
 
