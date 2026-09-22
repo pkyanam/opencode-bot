@@ -72,7 +72,7 @@ RUN cd runner && npm_config_ignore_scripts=false npm ci --omit=dev --include=opt
   && rm -rf /var/lib/apt/lists/* \
   && npm cache clean --force \
   && rm -rf /tmp/*
-RUN npm install --global wrangler@4.135.0 && npm cache clean --force
+RUN npm install --global --prefix /usr/local wrangler@4.135.0 && npm cache clean --force
 COPY skills ./skills
 COPY docs ./docs
 COPY README.md SECURITY.md ./
