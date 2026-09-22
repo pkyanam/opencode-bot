@@ -236,6 +236,10 @@ export class HindsightEngine {
     }
     return all.sort((a, b) => a.id.localeCompare(b.id));
   }
+  queryAuthorization(botId: string) {
+    this.assertBot(botId);
+    return JSON.stringify(this.manifest(this.records(botId)));
+  }
   private manifest(items: MemoryItem[]) {
     return Object.fromEntries(items.map((m) => [m.id, m.revision]));
   }
@@ -571,7 +575,7 @@ export class HindsightEngine {
         appendOnly = false;
       }
     }
-    if (!exact && !appendOnly) {
+    if (!row || (!exact && !appendOnly)) {
       this.options.schedule();
       throw new MemoryError(
         409,

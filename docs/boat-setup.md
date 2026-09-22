@@ -4,7 +4,7 @@ Cloudflare remains the preferred hosting target. Boat is an optional, all-Boat,
 no-Cloudflare path that runs OpenCode Bot in a persistent Linux VM with a
 durable disk and an enabled systemd service.
 
-The checkout-free installer is intended for macOS and Linux. It uses the
+The unified installer is intended for macOS and Linux. It uses the
 logged-in Boat CLI, or `BOAT_API_KEY` for automation. It reuses Node.js 24+ when
 available; otherwise it downloads the official Node archive, verifies its
 `SHASUMS256.txt` digest, and installs a user-local runtime without sudo or
@@ -15,9 +15,17 @@ before provisioning a VM. Use a release that includes Boat assets (v0.1.31 or
 later).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh \
-  | bash -s -- --type default --ttl 3600 --open
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \
+  | bash -s -- --boat --type default --ttl 3600 --open
 ```
+
+In an interactive run, the Boat installer asks for a VM size and recommends
+`default`. The supported values are `small` (2 vCPU, 4 GB), `default` (4 vCPU,
+8 GB), `large` (8 vCPU, 16 GB), and `xlarge` (16 vCPU, 32 GB). These names and
+capacities come from the Boat CLI's `boat new --help`; use `--type` for a
+noninteractive install. The selected type is saved with the Boat ownership
+journal and reused on later noninteractive reruns. Boat may impose account or
+allocation requirements on larger types.
 
 Provisioning installs the application, npm dependencies, browser runtime, and
 desktop integration inside the VM. Expect several minutes on the first run;
@@ -38,11 +46,24 @@ do not survive a stop. Uninstall deletes the recorded sandbox and requires an
 explicit confirmation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh \
-  | bash -s -- status
-curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh \
-  | bash -s -- --uninstall --yes
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \
+  | bash -s -- --boat status
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \
+  | bash -s -- --boat --uninstall --yes
 ```
+
+### Updating the app
+
+Starting with v0.1.33, open **Settings → Updates** to check for a release and
+update the app and its Computer together. No Cloudflare deployment token or
+Boat API key is needed inside the app. Finish active work first. The updater
+verifies the GitHub release, keeps your data and connection token, and restarts
+the services. Keep the page open to follow progress and reconnect afterward.
+
+An older Boat installation needs one rerun of the installer to install this
+updater. Reuse the same installer state directory so it updates your existing
+VM. The installer does not resize an existing VM; a different size requires an
+explicit Boat resize operation.
 
 The installer records only its owned sandbox under
 `~/.local/share/opencode-bot/boat` (override with `OCBOT_BOAT_STATE_DIR`). The
@@ -62,8 +83,8 @@ keys in command arguments or shell history.
 
 ```sh
 chmod 600 hindsight-provider.json
-curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh \
-  | bash -s -- --memory-provider-file "$PWD/hindsight-provider.json"
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \
+  | bash -s -- --boat --memory-provider-file "$PWD/hindsight-provider.json"
 ```
 
 The URL must use HTTPS; loopback HTTP is allowed for a local proxy. The file is

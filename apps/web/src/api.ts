@@ -121,6 +121,19 @@ export type HindsightEngine = {
   settings: { url?: string; model?: string; autoCapture: boolean };
   capabilities: Array<"retain" | "recall" | "reflect" | "observations" | "mental_models">;
 };
+export type MemoryQueryJob = {
+  id: string;
+  botId: string;
+  kind: "recall" | "reflect";
+  query: string;
+  budget: "low" | "mid" | "high";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  result?: HindsightResponse;
+  error?: string;
+};
 export type HindsightResponse = {
   provider: "hindsight";
   text?: string;
@@ -681,6 +694,11 @@ export const api = {
     await request<{ queued?: boolean }>("/api/memory/engine/sync", { method: "POST" });
     return request<HindsightEngine>("/api/memory/engine");
   },
+  startMemoryQuery: (payload: { botId: string; kind: "recall" | "reflect"; query: string; budget: "low" | "mid" | "high" }) =>
+    request<MemoryQueryJob>("/api/memory/queries", { method: "POST", body: JSON.stringify(payload) }),
+  memoryQuery: (id: string) => request<MemoryQueryJob>(`/api/memory/queries/${encodeURIComponent(id)}`),
+  latestMemoryQuery: (botId: string) => request<{ job: MemoryQueryJob | null }>(`/api/memory/queries?botId=${encodeURIComponent(botId)}`),
+  cancelMemoryQuery: (id: string) => request<MemoryQueryJob>(`/api/memory/queries/${encodeURIComponent(id)}`, { method: "DELETE" }),
   recallHindsight: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>
     request<HindsightResponse>("/api/memory/recall", { method: "POST", body: JSON.stringify(payload) }),
   reflectHindsight: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>

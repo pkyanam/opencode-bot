@@ -7,6 +7,8 @@ const terminalPhases = new Set(["completed", "failed", "rollback_required"]);
 
 export const updatePhaseLabel = (phase?: string) => {
   switch ((phase ?? "").toLowerCase()) {
+    case "running":
+      return "Installing the update";
     case "queued":
       return "Waiting to start";
     case "verified":
@@ -305,10 +307,11 @@ export function AppUpdates() {
       ) : (
         <>
           <p className="app-update-copy">
-            Active work must finish first. The updater saves a Computer
-            checkpoint before changing the app.
+            {status?.host === "boat"
+              ? "Finish active work before updating. Your bots, files, and connection stay on this Box; the app reconnects after installation."
+              : "Active work must finish first. The updater saves a Computer checkpoint before changing the app."}
           </p>
-          {!status?.configured || replaceAccess ? (
+          {status?.host !== "boat" && (!status?.configured || replaceAccess) ? (
             <div className="update-config">
               <h4>
                 {replaceAccess ? "Replace deployment token" : "Enable updates"}
@@ -381,7 +384,7 @@ export function AppUpdates() {
                   ? `Update to ${latest}`
                   : "App is up to date"}
               </button>
-              <button
+              {status?.host !== "boat" && <><button
                 className="soft-btn"
                 onClick={() => setReplaceAccess(true)}
                 disabled={busy || active}
@@ -394,7 +397,8 @@ export function AppUpdates() {
                 disabled={busy || active || recoveryRequired}
               >
                 Remove update access
-              </button>
+              </button></>}
+              {status?.host === "boat" && status?.job?.phase === "failed" && <button className="soft-btn" onClick={() => void recover()} disabled={busy}>Retry update</button>}
               {status?.releaseUrl && (
                 <a
                   className="soft-btn"

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -74,7 +74,7 @@ test("Boat bootstrap marker EXIT trap coexists with release rollback ERR trap", 
   const setup = readFileSync(new URL("../boat/setup.sh", import.meta.url), "utf8");
   assert.match(setup, /trap finish_bootstrap_marker EXIT/);
   assert.match(setup, /trap rollback ERR/);
-  assert.match(setup, /trap - ERR; printf 'Boat app ready/);
+  assert.match(setup, /trap - ERR;[^\n]*printf 'Boat app ready/);
   assert.match(setup, /write_bootstrap_marker (terminal 0|failed \"\$code\")/);
 });
 
@@ -134,6 +134,39 @@ test("private Boat hosting is opt-in", () => {
   const hostCall = calls.find(([name, args]) => name === "boat" && args[0] === "host");
   assert.ok(hostCall?.[1].includes("--private")); assert.ok(!hostCall?.[1].includes("--public"));
   assert.doesNotMatch(readFileSync(join(stateDir, "state.json"), "utf8"), /\?_token=t/);
+});
+
+test("new Boat sandbox receives the selected shape and persists it", () => {
+  const fixture = bundleFixture(); const stateDir = join(fixture.dir, "state"); const calls = [];
+  const run = (name, args) => {
+    calls.push([name, args]);
+    const detached = detachedMock(name, args); if (detached) return detached;
+    if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_large","type":"large"}', stderr: "" };
+    if (args[0] === "host") return { status: 0, stdout: '{"url":"https://large.on.boat.dev","access":"public"}', stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  install({ run, stateDir, bundle: fixture.file, bundleSha256: fixture.sha256, type: "large" });
+  const created = calls.find(([name, args]) => name === "boat" && args[0] === "new");
+  assert.ok(created?.[1].includes("--type") && created?.[1].includes("large"));
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "state.json"), "utf8")).type, "large");
+});
+
+test("rerunning an existing sandbox reuses its recorded shape", () => {
+  const fixture = bundleFixture(); const stateDir = join(fixture.dir, "state"); const calls = [];
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "state.json"), JSON.stringify({ schemaVersion: 1, provider: "boat", sandboxId: "bx_existing", type: "large", journal: [] }));
+  const run = (name, args) => {
+    calls.push([name, args]);
+    const detached = detachedMock(name, args); if (detached) return detached;
+    if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_existing","state":"ready","type":"large"}', stderr: "" };
+    if (args[0] === "host") return { status: 0, stdout: '{"url":"https://existing.on.boat.dev","access":"public"}', stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  install({ run, stateDir, bundle: fixture.file, bundleSha256: fixture.sha256 });
+  assert.equal(calls.some(([name, args]) => name === "boat" && args[0] === "new"), false);
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "state.json"), "utf8")).type, "large");
 });
 
 test("browser handoff carries the app token in a fragment only", () => {

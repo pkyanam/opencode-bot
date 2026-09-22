@@ -246,21 +246,24 @@ function verifyApp(run, url, token) {
   return endpoint;
 }
 
-export function install({ run, stateDir = defaultStateDir(), bundle, bundleSha256, type = DEFAULT_TYPE, ttl = DEFAULT_TTL, port = DEFAULT_PORT, appToken, hostAccess = DEFAULT_HOST_ACCESS, open = false, memoryProviderFile, env = process.env, progress } = {}) {
+export function install({ run, stateDir = defaultStateDir(), bundle, bundleSha256, type = DEFAULT_TYPE, ttl = DEFAULT_TTL, port = DEFAULT_PORT, appToken, hostAccess = DEFAULT_HOST_ACCESS, open = false, memoryProviderFile, env = process.env, progress, reuseStoredType = true } = {}) {
   const execute = run || commandRunner({ env });
   report(progress, "preparing runtime");
+  const p = paths(stateDir); ensureDir(stateDir);
+  let state = readJson(p.state, { schemaVersion: 1, provider: "boat", stateDir, journal: [] });
+  if (reuseStoredType && VALID_TYPES.includes(state.type)) type = state.type;
   ({ type, ttl, port, hostAccess } = validateBoatOptions({ type, ttl, port, hostAccess }));
   const memoryProvider = readMemoryProviderFile(memoryProviderFile);
-  const p = paths(stateDir); ensureDir(stateDir);
   const verified = verifyBundle(bundle || env.OCBOT_BOAT_BUNDLE, bundleSha256 || env.OCBOT_BOAT_BUNDLE_SHA256);
   authenticate(execute, env);
-  let state = readJson(p.state, { schemaVersion: 1, provider: "boat", stateDir, journal: [] });
   if (state.provider !== "boat") throw new Error("state file belongs to another provider");
   const existingSecrets = readJson(p.secrets, {});
   appToken = appToken || existingSecrets.appToken || env.APP_TOKEN || randomUUID();
   let id = sandboxIdFromState(state); let current;
   if (id) {
     try { current = info(execute, id); } catch { current = undefined; }
+    const actualType = current?.type || current?.sandbox?.type || current?.machine?.type || state.type;
+    if (!reuseStoredType && actualType && type !== actualType) throw new Error(`owned Boat sandbox ${id} is ${actualType}; changing to ${type} requires an explicit boat resume --type operation`);
     if (current && ["stopped", "archived"].includes(current.state)) resumeSandbox(execute, id, { ttl });
     else if (current?.state === "error") throw new Error(`owned Boat sandbox ${id} is in error; inspect boat info ${id}`);
   } else {
@@ -333,11 +336,22 @@ export async function main(argv = process.argv.slice(2)) {
     let uiRuntime;
     try { uiRuntime = await import("./installer-ui.mjs"); } catch { uiRuntime = undefined; }
     const ttyHandle = uiRuntime?.openInstallerTTY?.({ output: process.stderr });
-    const ui = uiRuntime?.createInstallerUI?.({ input: ttyHandle?.tty || process.stdin, output: process.stderr, tty: ttyHandle?.tty || process.stdin, interactive: Boolean(ttyHandle) });
+    const nonInteractive = env.OCBOT_NONINTERACTIVE === "1" || argv.includes("--yes");
+    const ui = uiRuntime?.createInstallerUI?.({ input: ttyHandle?.tty || process.stdin, output: process.stderr, tty: ttyHandle?.tty || process.stdin, interactive: Boolean(ttyHandle) && !nonInteractive });
     const removeCleanup = ui && uiRuntime?.installCleanup ? uiRuntime.installCleanup(ui) : undefined;
     try {
       ui?.step("Preparing Boat runtime");
-      const result = install({ ...options, bundle: argValue(argv, "--bundle"), bundleSha256: argValue(argv, "--bundle-sha256"), type: argValue(argv, "--type") || DEFAULT_TYPE, ttl: argv.includes("--no-auto-stop") ? null : (argValue(argv, "--ttl") || DEFAULT_TTL), port: argValue(argv, "--port") || DEFAULT_PORT, hostAccess: argv.includes("--private") ? "private" : DEFAULT_HOST_ACCESS, open: argv.includes("--open"), memoryProviderFile: argValue(argv, "--memory-provider-file"), progress: message => { if (ui) ui.progress(message); else console.error(`[boat] ${message}`); } });
+      const savedType = readJson(paths(options.stateDir).state, {}).type;
+      let selectedType = argValue(argv, "--type") || (VALID_TYPES.includes(savedType) ? savedType : DEFAULT_TYPE);
+      let choseTypeInteractively = false;
+      if (!argValue(argv, "--type") && ui?.interactive) selectedType = await ui.select("Choose Boat VM size", [
+        { label: "small — 2 vCPU, 4 GB", value: "small" },
+        { label: "default — 4 vCPU, 8 GB (recommended)", value: "default" },
+        { label: "large — 8 vCPU, 16 GB", value: "large" },
+        { label: "xlarge — 16 vCPU, 32 GB (plan/allocation requirements)", value: "xlarge" },
+      ], { defaultIndex: VALID_TYPES.indexOf(selectedType) });
+      if (!argValue(argv, "--type") && ui?.interactive) choseTypeInteractively = true;
+      const result = install({ ...options, bundle: argValue(argv, "--bundle"), bundleSha256: argValue(argv, "--bundle-sha256"), type: selectedType, reuseStoredType: !argValue(argv, "--type") && !choseTypeInteractively, ttl: argv.includes("--no-auto-stop") ? null : (argValue(argv, "--ttl") || DEFAULT_TTL), port: argValue(argv, "--port") || DEFAULT_PORT, hostAccess: argv.includes("--private") ? "private" : DEFAULT_HOST_ACCESS, open: argv.includes("--open"), memoryProviderFile: argValue(argv, "--memory-provider-file"), progress: message => { if (ui) ui.progress(message); else console.error(`[boat] ${message}`); } });
       ui?.success("Boat app is ready"); result.url = redactUrl(result.url); return void console.log(JSON.stringify(result));
     } finally { removeCleanup?.(); ttyHandle?.close?.(); }
   }

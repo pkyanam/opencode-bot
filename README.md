@@ -23,6 +23,17 @@ watch them work, and let them ask each other for help. Powered by
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash
 ```
 
+Cloudflare is the default. To use the optional Boat no-Cloudflare VM target
+from the same installer, add `--boat`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash -s -- --boat
+```
+
+When run from an interactive terminal without a provider flag, the installer
+opens a small provider picker on `/dev/tty` with Cloudflare preselected. Use
+`--yes`, `OCBOT_PROVIDER=cloudflare`, or `OCBOT_PROVIDER=boat` to skip it.
+
 The installer deploys a pinned release to your Cloudflare account and opens the
 workspace in your browser. Cloudflare pulls the prebuilt computer image directly;
 **you do not need Docker or a Docker Hub account.**
@@ -54,6 +65,11 @@ manifest and checksum-verified bundle are published with releases. This hosting
 target is in preview.
 
 [Boat setup, authentication, memory provider, and browser transport →](docs/boat-setup.md)
+
+The unified installer keeps Cloudflare as the default and routes `--boat` to
+the checkout-free Boat flow. Both paths preserve interactive prompts through
+`/dev/tty`; automation can pass the provider's documented environment
+credentials and explicit noninteractive flags.
 
 ### Uninstall
 

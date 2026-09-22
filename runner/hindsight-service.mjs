@@ -7,6 +7,16 @@ import path from "node:path";
 const DEFAULT_TARGET = "http://127.0.0.1:8888";
 const DEFAULT_PORT = 8790;
 const MAX_BODY = 32 * 1024;
+export const HINDSIGHT_DEFAULT_TIMEOUT_MS = 120_000;
+// Reflect can spend up to five minutes in consolidation. Keep a small margin
+// so the supervisor does not terminate the request at the engine's deadline.
+export const HINDSIGHT_REFLECT_TIMEOUT_MS = 305_000;
+
+export function upstreamTimeoutMs(url) {
+  return url === "/v1/default/banks/" || url.endsWith("/reflect")
+    ? HINDSIGHT_REFLECT_TIMEOUT_MS
+    : HINDSIGHT_DEFAULT_TIMEOUT_MS;
+}
 
 function json(res, status, value) {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
@@ -128,7 +138,7 @@ export function createHindsightSupervisor(options = {}) {
     if (!req.url?.startsWith("/v1/")) return json(res, 404, { error: "not found" });
     if (!config || !child) return json(res, 503, { error: "memory service is not configured" });
     const streaming = !["GET", "HEAD"].includes(req.method);
-    const upstream = await fetch(new URL(req.url, target), { method: req.method, headers: req.headers, body: streaming ? req : undefined, ...(streaming ? { duplex: "half" } : {}), signal: AbortSignal.timeout(120_000) });
+    const upstream = await fetch(new URL(req.url, target), { method: req.method, headers: req.headers, body: streaming ? req : undefined, ...(streaming ? { duplex: "half" } : {}), signal: AbortSignal.timeout(upstreamTimeoutMs(req.url)) });
     res.writeHead(upstream.status, proxyResponseHeaders(upstream.headers));
     res.end(Buffer.from(await upstream.arrayBuffer()));
   }

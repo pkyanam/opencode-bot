@@ -147,6 +147,18 @@ checkout_repo() {
 
 tty_available() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
+choose_provider() {
+  local choice
+  printf '%s\n' '' 'OpenCode Bot installer' '  1) Cloudflare (recommended)' '  2) Boat (no Cloudflare, preview)' >&2
+  printf '%s' 'Choose a hosting provider [1]: ' >/dev/tty
+  IFS= read -r choice </dev/tty || choice=1
+  case "$choice" in
+    2) printf 'boat' ;;
+    ''|1) printf 'cloudflare' ;;
+    *) die 'choose 1 for Cloudflare or 2 for Boat' ;;
+  esac
+}
+
 ensure_cloudflare_auth() {
   local whoami_output status
   whoami_output="$(npx --no-install wrangler whoami 2>&1)" || status=$?
@@ -261,10 +273,38 @@ open_onboarding() {
   fi
 }
 
+run_boat_installer() {
+  local script_url="${OCBOT_BOAT_INSTALL_URL:-https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/boat-install.sh}"
+  local tmp status arg
+  tmp="$(mktemp "${TMPDIR:-/tmp}/opencode-bot-boat-entrypoint.XXXXXX.sh")"
+  if ! download "$script_url" "$tmp"; then rm -f "$tmp"; die "could not download the Boat installer"; fi
+  local -a boat_args=()
+  for arg in "$@"; do [[ "$arg" == "--boat" ]] || boat_args+=("$arg"); done
+  set +e
+  bash "$tmp" ${boat_args[@]+"${boat_args[@]}"}
+  status=$?
+  set -e
+  rm -f "$tmp"
+  return "$status"
+}
+
 main() {
   # Supplying --yes is accepted for scripts that make authorization explicit;
   # running this installer already authorizes the declared deployment.
-  case "${1:-}" in --yes) shift ;; esac
+  local wants_boat=0 skip_picker=0 arg provider="${OCBOT_PROVIDER:-}"
+  for arg in "$@"; do [[ "$arg" == "--boat" ]] && wants_boat=1; done
+  local -a filtered_args=()
+  for arg in "$@"; do
+    if [[ "$arg" == "--yes" ]]; then skip_picker=1; [[ "$wants_boat" -eq 1 ]] && filtered_args+=("$arg"); else filtered_args+=("$arg"); fi
+  done
+  set -- ${filtered_args[@]+"${filtered_args[@]}"}
+  if [[ "$wants_boat" -eq 1 ]]; then provider=boat; fi
+  case "$provider" in ""|cloudflare|boat) ;; *) die 'OCBOT_PROVIDER must be cloudflare or boat' ;; esac
+  if [[ "$skip_picker" -eq 0 && -z "$provider" && "${OCBOT_NONINTERACTIVE:-0}" != 1 && "$wants_boat" -eq 0 ]] && tty_available; then provider="$(choose_provider)"; fi
+  if [[ "$provider" == "boat" ]]; then
+    [[ "$skip_picker" -eq 1 || "${OCBOT_NONINTERACTIVE:-0}" == 1 ]] && export OCBOT_NONINTERACTIVE=1
+    run_boat_installer "$@"; return;
+  fi
   ensure_node
   ensure_git
   checkout_repo

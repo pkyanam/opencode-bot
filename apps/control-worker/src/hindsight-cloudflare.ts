@@ -86,7 +86,7 @@ export class CloudflareHindsight {
     const { signal: _signal, ...rpcInit } = init;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Hindsight service request timed out")), 120000);
+      timer = setTimeout(() => reject(new Error("Hindsight service request timed out")), path.includes("/reflect") ? 330000 : 120000);
     });
     const request = this.sandbox.containerFetch(
       new URL(path, "http://hindsight:8790").toString(),

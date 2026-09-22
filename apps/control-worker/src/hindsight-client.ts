@@ -12,6 +12,7 @@ export type RetainItem = {
   update_mode?: "replace" | "append";
 };
 export type HindsightErrorShape = {
+  error?: string;
   detail?: string | { message?: string } | Array<{ msg?: string }>;
 };
 
@@ -42,7 +43,7 @@ export class HindsightClient {
     } catch (error) {
       throw new HindsightError(
         error instanceof Error ? error.message : "Hindsight request failed",
-        0,
+        typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 0,
       );
     }
     let body: unknown;
@@ -53,13 +54,20 @@ export class HindsightClient {
       body = undefined;
     }
     if (!response.ok) {
+      const error = (body as HindsightErrorShape | undefined)?.error;
       const detail = (body as HindsightErrorShape | undefined)?.detail;
-      const message =
+      const rawMessage =
+        typeof error === "string"
+          ? error
+          :
         typeof detail === "string"
           ? detail
           : detail && typeof detail === "object" && "message" in detail
             ? detail.message
             : `HTTP ${response.status}`;
+      // The supervisor's {error} field is intentionally safe, but bound it so
+      // a malformed upstream cannot flood logs/UI. Never include request data.
+      const message = typeof rawMessage === "string" ? rawMessage.trim().slice(0, 500) : `HTTP ${response.status}`;
       throw new HindsightError(
         `Hindsight request failed: ${message || `HTTP ${response.status}`}`,
         response.status,

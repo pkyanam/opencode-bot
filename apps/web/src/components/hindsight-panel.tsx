@@ -14,6 +14,7 @@ import {
   type HindsightMentalModel,
   type HindsightObservation,
   type HindsightResponse,
+  type MemoryQueryJob,
 } from "../api";
 import { MarkdownContent } from "./markdown-content";
 
@@ -43,8 +44,10 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
   const [syncing, setSyncing] = useState(false);
   const [botId, setBotId] = useState(bots[0]?.id ?? "");
   const [query, setQuery] = useState("");
-  const [budget, setBudget] = useState<Budget>("mid");
+  const [budget, setBudget] = useState<Budget>("low");
   const [exploring, setExploring] = useState<"recall" | "reflect" | null>(null);
+  const [queryJob, setQueryJob] = useState<MemoryQueryJob | null>(null);
+  const [queryNow, setQueryNow] = useState(Date.now());
   const [result, setResult] = useState<HindsightResponse | null>(null);
   const [observations, setObservations] = useState<HindsightObservation[]>([]);
   const [models, setModels] = useState<HindsightMentalModel[]>([]);
@@ -128,34 +131,65 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
       setSyncing(false);
     }
   };
+  const applyQueryJob = (job: MemoryQueryJob) => {
+    setQueryJob(job);
+    const running = job.status === "queued" || job.status === "running";
+    setExploring(running ? job.kind : null);
+    if (job.status === "succeeded") { setResult(job.result ?? null); setError(""); }
+    if (job.status === "failed") setError(job.error || "The memory question could not finish. Try again.");
+    if (job.status === "cancelled") setError("");
+  };
   const explore = async (kind: "recall" | "reflect") => {
     if (!botId || !query.trim()) return;
     const currentBotId = botId;
     const request = ++exploreRequest.current;
     setExploring(kind);
+    setQueryJob(null);
     setResult(null);
+    setError("");
     try {
-      const response =
-        kind === "recall"
-          ? await api.recallHindsight({ botId, query: query.trim(), budget })
-          : await api.reflectHindsight({ botId, query: query.trim(), budget });
-      if (
-        request !== exploreRequest.current ||
-        currentBotId !== activeBotId.current
-      )
-        return;
-      setResult(response);
-      setError("");
+      const job = await api.startMemoryQuery({ botId, kind, query: query.trim(), budget });
+      if (request !== exploreRequest.current || currentBotId !== activeBotId.current) return;
+      applyQueryJob(job);
     } catch (e) {
-      if (
-        request === exploreRequest.current &&
-        currentBotId === activeBotId.current
-      )
-        setError(e instanceof Error ? e.message : `Could not ${kind} memory. Try again.`);
-    } finally {
-      if (request === exploreRequest.current) setExploring(null);
+      if (request === exploreRequest.current && currentBotId === activeBotId.current) {
+        setExploring(null);
+        setError(e instanceof Error ? e.message : "Could not start the memory question.");
+      }
     }
   };
+  const cancelQuery = async () => {
+    if (!queryJob) return;
+    const id = queryJob.id;
+    const currentBotId = botId;
+    try {
+      const job = await api.cancelMemoryQuery(id);
+      if (activeBotId.current === currentBotId) applyQueryJob(job);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not cancel the question."); }
+  };
+  useEffect(() => {
+    if (!queryJob || !["queued", "running"].includes(queryJob.status)) return;
+    let stopped = false, inFlight = false;
+    const poll = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const job = await api.memoryQuery(queryJob.id);
+        if (!stopped) { setError(""); applyQueryJob(job); }
+      } catch (e) {
+        if (!stopped) {
+          if ((e as { status?: number })?.status === 404 || Date.now() >= queryJob.expiresAt) {
+            applyQueryJob({ ...queryJob, status: "failed", error: "This saved question has expired. Ask it again for a fresh answer." });
+          } else setError("Reconnecting to your memory question… Your question continues in the background.");
+        }
+      } finally { inFlight = false; }
+    };
+    const timer = window.setInterval(() => void poll(), 3000);
+    const clock = window.setInterval(() => setQueryNow(Date.now()), 1000);
+    const resume = () => { if (!document.hidden) void poll(); };
+    document.addEventListener("visibilitychange", resume);
+    return () => { stopped = true; window.clearInterval(timer); window.clearInterval(clock); document.removeEventListener("visibilitychange", resume); };
+  }, [queryJob?.id, queryJob?.status]);
   const isReady = engine?.status === "ready" && engine.enabled;
   // Indexing another bot or a new memory must not disable every query.
   // The server validates the selected bot’s authorized projection on each request.
@@ -313,8 +347,19 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
     setObservations([]);
     setModels([]);
     setResult(null);
+    setQueryJob(null);
     setInsightsOpen(false);
-  }, [botId]);
+    if (!botId || settingsMode) return;
+    const request = exploreRequest.current;
+    let stopped = false;
+    void api.latestMemoryQuery(botId).then(({ job }) => {
+      if (stopped || request !== exploreRequest.current || !job) return;
+      setQuery(job.query);
+      setBudget(job.budget);
+      applyQueryJob(job);
+    }).catch(() => { /* Older servers may not yet offer resumable questions. */ });
+    return () => { stopped = true; };
+  }, [botId, settingsMode]);
   return (
     <section className="hindsight-panel" aria-label={askMode ? "Ask memories" : "Hindsight"}>
       {!askMode && <div className="hindsight-heading">
@@ -333,7 +378,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
         </div>
       </div>}
       {askMode && <p className="hindsight-muted">Ask a question using the memories available to the selected bot.</p>}
-      {askMode && engine?.status !== "ready" && <p role="status">{engine?.status === "starting" && (engine.pending ?? 0) > 0 ? "New memories are being indexed for search." : `Memory search is ${statusLabel[engine?.status ?? "starting"].toLowerCase()}.`} Your saved memories are still available.</p>}
+      {askMode && !exploring && engine?.status !== "ready" && <p role="status">{engine?.status === "starting" && (engine.pending ?? 0) > 0 ? "New memories are being indexed for search." : `Memory search is ${statusLabel[engine?.status ?? "starting"].toLowerCase()}.`} Your saved memories are still available.</p>}
       {(error || engineError) && (
         <div className="hindsight-error">
           <AlertCircle size={14} /> <span>{error || engineError}</span>
@@ -342,7 +387,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
           </button>
         </div>
       )}
-      {engine?.error && (
+      {engine?.error && !(askMode && exploring) && (
         <div className="hindsight-error">
           <AlertCircle size={14} /> <span>{engine.error}</span>
         </div>
@@ -485,7 +530,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
             {exploring === "recall" && (
               <LoaderCircle size={13} className="spin" />
             )}{" "}
-            {askMode ? "Find matching memories" : "Recall"}
+            {exploring === "recall" ? "Searching…" : askMode ? "Find matching memories" : "Recall"}
           </button>
           <button
             className="soft-btn"
@@ -495,9 +540,14 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
             {exploring === "reflect" && (
               <LoaderCircle size={13} className="spin" />
             )}{" "}
-            {askMode ? "Ask" : "Reflect"}
+            {exploring === "reflect" ? "Thinking…" : askMode ? "Ask" : "Reflect"}
           </button>
         </div>
+        {exploring && queryJob && <div className="hindsight-query-progress" role="status">
+          <div><strong>{queryJob.status === "queued" ? "Your question is queued" : exploring === "reflect" ? "Connecting what your bot remembers" : "Searching your bot’s memories"}</strong>
+          <p>{Math.max(0, Math.floor((queryNow - queryJob.createdAt) / 1000))}s · You can close this window and return to the answer.</p></div>
+          <button className="soft-btn" onClick={() => void cancelQuery()}>Cancel</button>
+        </div>}
         {result && (
           <div className="hindsight-result">
             {!result.text && !result.results?.length && <p>No matching memories were found. Try a different question or save a memory first.</p>}

@@ -3941,3 +3941,15 @@ a:focus-visible {
 .hindsight-model-pending { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: #d7ba7a; font-size: 11px; }.hindsight-model-error { margin-top: 5px; color: #df9388; font-size: 11px; line-height: 1.4; }
 .hindsight-insights { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }.hindsight-insights summary { cursor: pointer; color: var(--cream); font-size: 12px; font-weight: 500; }.hindsight-insights-body { display: grid; gap: 8px; margin-top: 11px; }.hindsight-insights-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; margin-top: 3px; }.hindsight-observation { padding: 8px 9px; border-left: 2px solid var(--line); color: var(--cream); font-size: 12px; line-height: 1.45; }.hindsight-muted { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }.hindsight-model-card { display: flex; justify-content: space-between; gap: 12px; padding: 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--cream); font-size: 12px; }.hindsight-model-card p { margin: 5px 0; line-height: 1.45; white-space: pre-wrap; }.hindsight-model-card small { color: var(--muted); font-size: 10px; }.hindsight-model-actions { display: flex; gap: 7px; flex-shrink: 0; align-items: flex-start; }.hindsight-delete { color: #df9388; }.hindsight-model-create { display: grid; grid-template-columns: .8fr 1.4fr auto; gap: 7px; margin-top: 4px; }.hindsight-model-create .text-input { min-width: 0; font-size: 12px; }
 @media (max-width: 640px) { .memory-registry .registry-item { flex-direction: column; }.memory-registry .registry-actions { align-self: flex-end; }.memory-registry .memory-toolbar { gap: 10px; } }
+
+.hindsight-query-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0;
+  border-top: 1px solid var(--line);
+}
+.hindsight-query-progress strong { font-size: .875rem; font-weight: 500; }
+.hindsight-query-progress p { margin: .4rem 0 0; color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.hindsight-query-progress button { flex-shrink: 0; }

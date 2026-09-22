@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenCode Bot privileged release updater
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PATH=/opt/opencode-bot/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TimeoutStartSec=30min
+ExecStart=/opt/opencode-bot/node/bin/node /opt/opencode-bot/releases/current/boat/update-runner.mjs

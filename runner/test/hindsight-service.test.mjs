@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHindsightSupervisor } from "../hindsight-service.mjs";
+import { createHindsightSupervisor, HINDSIGHT_DEFAULT_TIMEOUT_MS, HINDSIGHT_REFLECT_TIMEOUT_MS, upstreamTimeoutMs } from "../hindsight-service.mjs";
 
 function request(method, url, body, token = "secret") {
   return { method, url, headers: { authorization: `Bearer ${token}` }, async *[Symbol.asyncIterator]() { if (body) yield Buffer.from(JSON.stringify(body)); } };
@@ -37,4 +37,10 @@ test("configure validates and returns only public state", async () => {
   assert.equal(value.running, true);
   assert.equal(value.changed, true);
   assert.match(value.instanceId, /^[0-9a-f-]{36}$/);
+});
+
+test("reflect proxy gets the engine deadline plus a margin", () => {
+  assert.equal(upstreamTimeoutMs("/v1/default/banks/bot/reflect"), HINDSIGHT_REFLECT_TIMEOUT_MS);
+  assert.ok(HINDSIGHT_REFLECT_TIMEOUT_MS > 300_000);
+  assert.equal(upstreamTimeoutMs("/v1/default/banks/bot/memories/recall"), HINDSIGHT_DEFAULT_TIMEOUT_MS);
 });

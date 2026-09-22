@@ -1,5 +1,6 @@
 import { hindsightCompletion } from "./hindsight-ai";
 import { HindsightEngine } from "./hindsight-engine";
+import { MemoryQueryJobs } from "./memory-query-jobs";
 import { HindsightClient, HindsightError } from "./hindsight-client";
 import { CloudflareHindsight } from "./hindsight-cloudflare";
 import { MemoryRegistry, MemoryError } from "./memory-registry";
@@ -68,6 +69,7 @@ type Env = {
   RUNNER_TOKEN?: string;
   HOSTING_PROVIDER?: string;
   RELEASE_COMMIT?: string;
+  APP_UPDATER?: { status(): Promise<unknown>; start(version: unknown): Promise<unknown>; recover(): Promise<unknown> };
   AI?: Ai;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -158,6 +160,19 @@ export class Workspace {
     this.state.storage.setAlarm(Date.now() + 1000);
   }
 
+  /** Called by the standalone Boat control process before it hands control to
+   * the root updater. Keep this check in the Workspace so all run entrypoints
+   * observe the same maintenance gate. */
+  async assertIdleForUpdate(): Promise<void> {
+    const active = new Set(["queued", "provisioning", "running", "waiting_approval", "waiting_human", "recovering", "cancelling"]);
+    const row = this.one<any>("SELECT COUNT(*) AS n FROM runs WHERE status IN (?,?,?,?,?,?,?)", ...[...active]);
+    const pending = this.one<any>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching','needs_review')");
+    const queryTable = this.one<any>("SELECT name FROM sqlite_master WHERE type='table' AND name='hindsight_query_jobs'");
+    const questions = queryTable ? this.one<any>("SELECT COUNT(*) AS n FROM hindsight_query_jobs WHERE status IN ('queued','running') AND expires_at>?", Date.now()) : undefined;
+    if (Number(row?.n ?? 0) + Number(pending?.n ?? 0) + Number(questions?.n ?? 0) > 0) throw new HttpError(409, "Finish active work before updating Boat");
+  }
+  setUpdateMaintenance(value: boolean): void { this.maintenance = value; }
+
   private memoryRegistry?: MemoryRegistry;
   private memoryControlOrigin?: string;
   private memories() {
@@ -170,18 +185,45 @@ export class Workspace {
   }
   private hindsightWakeAt?: number;
   private hindsightEngine?: HindsightEngine;
+  private memoryQueryJobs?: MemoryQueryJobs;
   private nativeHindsight?: { fetch(path: string, init?: RequestInit): Promise<Response> };
   private hindsight() {
     return this.hindsightEngine ??= new HindsightEngine({sql:this.state.storage.sql,registry:this.memories(),schedule:()=>{this.hindsightWakeAt=Date.now()+3000;this.state.storage.setAlarm(this.hindsightWakeAt);},nativeReady:()=>Boolean(this.env.HINDSIGHT_FACTORY||(this.env.SANDBOX&&this.env.AI)),client:settings=>new HindsightClient(async(path,init)=>{
-      if(settings.url){const headers=new Headers(init?.headers);if(settings.apiKey)headers.set("Authorization",`Bearer ${settings.apiKey}`);return fetch(settings.url+path,{...init,headers,redirect:"manual",signal:AbortSignal.timeout(90000)});}
+      if(settings.url){const headers=new Headers(init?.headers);if(settings.apiKey)headers.set("Authorization",`Bearer ${settings.apiKey}`);return fetch(settings.url+path,{...init,headers,redirect:"manual",signal:AbortSignal.timeout(path.includes("/reflect")?330000:90000)});}
       if(this.env.HINDSIGHT_FACTORY){this.nativeHindsight ??= this.env.HINDSIGHT_FACTORY(id=>this.hindsight().engineInstanceChanged(id));return this.nativeHindsight.fetch(path,init);}
       if(!this.env.SANDBOX||!this.env.AI||!this.env.RUNNER_TOKEN)throw new MemoryError(503,"This deployment does not have the built-in Hindsight service. Update it or configure an external Hindsight URL.");
       this.nativeHindsight ??= new CloudflareHindsight({namespace:this.env.SANDBOX,token:await this.memoryCapability("hindsight-service-v1"),origin:async()=>this.memoryControlOrigin??await this.state.storage.get<string>("memory:control-origin")??"",modelToken:()=>this.memoryCapability("hindsight-ai-v1"),instance:id=>this.hindsight().engineInstanceChanged(id)});
       return this.nativeHindsight.fetch(path,init);
     })});
   }
+  private memoryQueries() {
+    return this.memoryQueryJobs ??= new MemoryQueryJobs(
+      this.state.storage.sql,
+      this.hindsight(),
+      (botId) => {
+        if (!this.one<any>("SELECT id FROM bots WHERE id=?", botId)) throw new MemoryError(404, "Bot not found");
+        return this.hindsight().queryAuthorization(botId);
+      },
+    );
+  }
   private async hindsightRoute(request:Request,url:URL):Promise<Response>{
     const engine=this.hindsight(),path=url.pathname;
+    if (path === "/api/memory/queries" && request.method === "GET") {
+      const botId = String(url.searchParams.get("botId") ?? "");
+      if (!botId) throw new MemoryError(400, "Choose a bot to scope memory access.");
+      return response({ job: this.memoryQueries().latest(botId) });
+    }
+    const queryJob = path.match(/^\/api\/memory\/queries\/([^/]+)$/);
+    if (queryJob && request.method === "GET") return response(this.memoryQueries().get(decodeURIComponent(queryJob[1])));
+    if (queryJob && request.method === "DELETE") return response(this.memoryQueries().cancel(decodeURIComponent(queryJob[1])));
+    if (path === "/api/memory/queries" && request.method === "POST") {
+      const input = await body(request);
+      const botId = String(input.botId ?? "");
+      if (!botId) throw new MemoryError(400, "Choose a bot to scope memory access.");
+      const job = this.memoryQueries().create(botId, input.kind, input.query, input.budget ?? "low");
+      if (job.status === "queued") this.state.waitUntil(this.memoryQueries().run(job.id));
+      return response(job, 202);
+    }
     if(path==="/api/memory/engine"){
       if(request.method==="GET")return response(engine.status());
       if(request.method==="PATCH")return response(engine.configure(await body(request)));
@@ -994,7 +1036,7 @@ export class Workspace {
         return response(this.botSkills(botSkills[1]));
       if (botSkills && request.method === "PUT")
         return response(this.assignSkills(botSkills[1], await body(request)));
-      if (/^\/api\/memory\/(engine|recall|reflect|observations|mental-models)(?:\/|$)/.test(url.pathname)) return await this.hindsightRoute(request,url);
+      if (/^\/api\/memory\/(engine|recall|reflect|observations|mental-models|queries)(?:\/|$)/.test(url.pathname)) return await this.hindsightRoute(request,url);
       if (url.pathname === "/api/memory" || /^\/api\/memory\/[^/]+(?:\/history)?$/.test(url.pathname)) return await this.registryRoute(request, url);
       const botMemory = url.pathname.match(
         /^\/api\/bots\/([^/]+)\/memory(?:\/([^/]+))?$/,
@@ -2355,6 +2397,7 @@ export class Workspace {
       return;
     }
     if(this.hindsight().settings().enabled){
+      this.memoryQueries().purge();
       for(const completed of this.rows<any>("SELECT r.id,r.thread_id,r.prompt,r.result,r.updated_at,t.bot_id FROM runs r JOIN threads t ON t.id=r.thread_id WHERE r.status='succeeded' ORDER BY r.updated_at DESC LIMIT 10")) {try{this.hindsight().capture(completed);}catch{/* Registry quota is visible through memory management. */}}
       this.state.waitUntil(this.hindsight().tick().catch(() => { /* Engine status retains synchronization errors. */ }));
     }
@@ -2659,6 +2702,15 @@ export class Workspace {
   }
 
   private async updateRoute(request: Request, url: URL): Promise<Response> {
+    if (this.env.APP_UPDATER) {
+      try {
+        if (url.pathname === "/api/updates" && request.method === "GET") return response(await this.env.APP_UPDATER.status());
+        if (url.pathname === "/api/updates" && request.method === "POST") return response(await this.env.APP_UPDATER.start((await body(request)).version), 202);
+        if (url.pathname === "/api/updates/recover" && request.method === "POST") return response(await this.env.APP_UPDATER.recover(), 202);
+        if (url.pathname === "/api/updates/configure" && request.method === "GET") return response(await this.env.APP_UPDATER.status());
+        throw new HttpError(400, "Boat updates are managed by the installed updater service.");
+      } catch (error) { return response({ error: error instanceof Error ? error.message : "The update could not proceed." }, error instanceof HttpError ? error.status : 400); }
+    }
     if (this.env.COMPUTER_PROVIDER && !this.env.SANDBOX) {
       if (request.method === "GET" && url.pathname === "/api/updates") return response({ currentVersion: `v${packageInfo.version}`, configured: false, available: false, host: "boat", managedExternally: true, instructions: "Update this Boat installation by running the Boat installer again." });
       return response({ error: "This host uses the Boat installer for updates. Cloudflare deployment credentials are not needed." }, 400);
