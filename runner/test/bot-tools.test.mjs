@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -43,12 +44,37 @@ test('native MCP stdio handshake and tool call reach only bot capabilities', asy
   const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../bot-mcp.mjs',import.meta.url))],env:{BOT_TOOLS_URL:`http://127.0.0.1:${server.address().port}/bot-tools`,BOT_TOOLS_TOKEN:'limited'}});
   try {
     await client.connect(transport);
-    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot']);
+    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot','memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share']);
     const result=await client.callTool({name:'send_message',arguments:{targetBotId:'scout',prompt:'Say hello'}});
     assert.equal(result.isError,undefined);
     assert.equal(JSON.parse(result.content[0].text).status,'queued');
     assert.equal(store.public(store.get('r2')).delegationRequests.length,1);
   } finally { await client.close(); server.close(); }
+});
+
+test('memory tools forward immediately through the coordinator capability and never send a source bot ID', async () => {
+  const calls = [];
+  const upstream = http.createServer(async (request, response) => {
+    calls.push({ headers: request.headers, body: JSON.parse(await new Promise((resolve, reject) => { let data = ''; request.on('data', chunk => data += chunk); request.on('end', () => resolve(data)); request.on('error', reject); })) });
+    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ id: 'mem_1', revision: 1 }));
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const store = new RunStore({}, {});
+  store.runs.set('memory-run', { id: 'memory-run', status: 'running', executionBotId: 'bot-secret-context', memoryTools: { url: `http://127.0.0.1:${upstream.address().port}/api/memory/tools`, token: 'memory-capability' } });
+  const server = createServer({ store, authToken: 'owner', botToolToken: 'limited' });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const call = (name, args) => fetch(`http://127.0.0.1:${server.address().port}/bot-tools`, { method: 'POST', headers: { authorization: 'Bearer limited', 'content-type': 'application/json' }, body: JSON.stringify({ name, arguments: args }) });
+  try {
+    const result = await call('memory_remember', { content: 'Use the shared registry', title: 'Registry', tags: ['workspace'] });
+    assert.equal(result.status, 200);
+    assert.deepEqual(JSON.parse(await result.text()), { id: 'mem_1', revision: 1 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].headers.authorization, 'Bearer memory-capability');
+    assert.deepEqual(calls[0].body, { name: 'memory_remember', arguments: { content: 'Use the shared registry', title: 'Registry', tags: ['workspace'] }, runId: 'memory-run' });
+    assert.equal('sourceBotId' in calls[0].body, false);
+    assert.equal('executionBotId' in calls[0].body, false);
+    assert.equal(JSON.stringify(store.public(store.get('memory-run'))).includes('memory-capability'), false);
+  } finally { server.close(); upstream.close(); }
 });
 
 test('create_bot is bounded, idempotent per turn, and never exposes runner auth', async () => {

@@ -79,3 +79,19 @@ export type CatalogAgent = { id?: string; name?: string; description?: string; [
 export type Catalog = { runtime?: { name?: string; version?: string }; models?: CatalogModel[]; agents?: CatalogAgent[]; commands?: Array<{ name: string; description?: string }>; actions?: Array<{ name: string; action?: string }>; };
 export type Skill = { id: string; name: string; description: string; instructions: string; createdAt?: string; updatedAt?: string };
 export type FileArtifact = { path: string; kind?: string; size?: number; modifiedAt?: string; [key: string]: unknown };
+export type MemoryVisibility = "private" | "shared" | "workspace";
+export type MemoryItem = {
+  id: string;
+  botId: string | null;
+  title?: string;
+  content: string;
+  kind?: string;
+  tags: string[];
+  visibility: MemoryVisibility;
+  sharedBotIds: string[];
+  pinned: boolean;
+  revision: number;
+  sourceThreadId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};

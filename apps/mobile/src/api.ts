@@ -12,6 +12,7 @@ import type {
   Catalog,
   FileArtifact,
   Skill,
+  MemoryItem,
 } from "./types";
 
 export class ApiError extends Error {
@@ -195,6 +196,20 @@ export const api = (baseUrl: string) => ({
     request<void>(baseUrl, `/api/skills/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  memories: (params: { botId?: string; q?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.botId) query.set("botId", params.botId);
+    if (params.q) query.set("q", params.q);
+    query.set("limit", String(params.limit ?? 100));
+    query.set("offset", String(params.offset ?? 0));
+    return request<MemoryItem[]>(baseUrl, `/api/memory?${query.toString()}`);
+  },
+  createMemory: (payload: { botId: string | null; content: string; title?: string; kind?: string; tags?: string[]; visibility?: string; sharedBotIds?: string[] }) =>
+    request<MemoryItem>(baseUrl, "/api/memory", { method: "POST", body: JSON.stringify(payload) }),
+  updateMemory: (id: string, payload: { revision: number; content?: string; title?: string; kind?: string; tags?: string[]; visibility?: string; sharedBotIds?: string[]; pinned?: boolean }) =>
+    request<MemoryItem>(baseUrl, `/api/memory/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteMemory: (id: string, revision: number) =>
+    request<void>(baseUrl, `/api/memory/${encodeURIComponent(id)}?revision=${encodeURIComponent(String(revision))}`, { method: "DELETE" }),
   files: (path = ".") =>
     request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
       baseUrl,

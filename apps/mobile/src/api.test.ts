@@ -56,6 +56,27 @@ describe("mobile API contract", () => {
     expect(fetchMock.mock.calls[0][1].headers.get("Authorization")).toBe("Bearer dt_test");
   });
 
+  it("builds memory list and revision-aware mutation requests", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ id: "memory/1" }))
+      .mockResolvedValueOnce(jsonResponse({ id: "memory/1" }))
+      .mockResolvedValueOnce(jsonResponse(undefined, 204));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = api("https://workspace.example");
+    await client.memories({ botId: "bot/1", q: "favorite", limit: 100, offset: 100 });
+    await client.createMemory({ botId: "bot/1", content: "Use dark mode", visibility: "shared", sharedBotIds: ["bot/2"] });
+    await client.updateMemory("memory/1", { revision: 2, content: "Use warm dark mode" });
+    await client.deleteMemory("memory/1", 3);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://workspace.example/api/memory?botId=bot%2F1&q=favorite&limit=100&offset=100",
+      "https://workspace.example/api/memory",
+      "https://workspace.example/api/memory/memory%2F1",
+      "https://workspace.example/api/memory/memory%2F1?revision=3",
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({ revision: 2, content: "Use warm dark mode" });
+  });
+
   it("returns empty catalogs and reads text file content without JSON parsing", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse([]))

@@ -67,6 +67,9 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 
 ## A workspace that stays with you
 
+- **Memory across computers.** Bots remember decisions and lessons, share selected
+  knowledge with any other bot, and recall it in new conversations. Browse, correct,
+  export, or forget it in the [workspace memory registry](docs/memory.md).
 - **Bots with their own identity.** Instructions, models, memory, and assigned
   skills carry into every new conversation. Rename or delete threads and bots.
 - **See the work.** Markdown replies, live tool activity, approvals, and an

@@ -9,15 +9,34 @@ const token = process.env.BOT_TOOLS_TOKEN;
 if (!endpoint || !token || !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(endpoint).hostname)) throw new Error('Bot tools require a loopback endpoint and capability token');
 const server = new Server({ name: 'opencode-bot', version: '0.1.0' }, { capabilities: { tools: {} } });
 const empty = { type: 'object', properties: {}, additionalProperties: false };
+const text = (description) => ({ type: 'string', description });
+const stringArray = (description) => ({ type: 'array', items: { type: 'string' }, description });
+const memoryId = text('Memory item ID returned by a memory tool');
+const revision = { type: 'integer', minimum: 0, description: 'Revision returned by the last read or write' };
+const memoryVisibility = text('Who can read this memory (server-defined visibility)');
+
+// Memory actions are deliberately sent through the authenticated runner
+// capability endpoint. The coordinator uses the run ID carried by that
+// endpoint to derive the requesting bot; no source bot ID is accepted here.
+const memoryTools = [
+  { name: 'memory_search', description: 'Search shared workspace memory relevant to the current task.', inputSchema: { type: 'object', properties: { query: text('Search query'), limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Maximum number of results (default is server-defined)' } }, required: ['query'], additionalProperties: false } },
+  { name: 'memory_read', description: 'Read one shared workspace memory item by ID.', inputSchema: { type: 'object', properties: { id: memoryId }, required: ['id'], additionalProperties: false } },
+  { name: 'memory_remember', description: 'Remember durable information in shared workspace memory.', inputSchema: { type: 'object', properties: { content: text('Memory content'), title: text('Optional short title'), kind: text('Optional memory kind'), tags: stringArray('Optional search tags'), visibility: memoryVisibility, sharedBotIds: stringArray('Optional bot IDs to share with') }, required: ['content'], additionalProperties: false } },
+  { name: 'memory_update', description: 'Update a shared workspace memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, content: text('Replacement memory content'), title: text('Replacement title'), kind: text('Replacement memory kind'), tags: stringArray('Replacement search tags'), revision }, required: ['id', 'revision'], additionalProperties: false } },
+  { name: 'memory_forget', description: 'Forget a shared workspace memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, revision }, required: ['id', 'revision'], additionalProperties: false } },
+  { name: 'memory_share', description: 'Change which workspace bots can read a memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, botIds: stringArray('Bot IDs allowed to read this memory'), visibility: memoryVisibility, revision }, required: ['id', 'revision'], additionalProperties: false } },
+];
+const memoryNames = new Set(memoryTools.map(tool => tool.name));
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
   { name: 'list_bots', description: 'List the other persistent bots in this workspace. These are independent bots with their own settings, not OpenCode subagents.', inputSchema: empty },
   { name: 'send_message', description: 'Send a task or message to another workspace bot. The recipient runs after your current turn ends; its reply automatically resumes this conversation. Do not poll or claim a response before it arrives.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string', description: 'Exact bot ID returned by list_bots' }, prompt: { type: 'string', description: 'Message or task with the context the recipient needs' } }, required: ['targetBotId','prompt'], additionalProperties: false } },
   { name: 'send_file', description: 'Queue a verified workspace file transfer to another persistent bot on its assigned node.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string' }, sourcePath: { type: 'string' }, targetPath: { type: 'string' }, name: { type: 'string' }, size: { type: 'integer' }, sha256: { type: 'string' } }, required: ['targetBotId','sourcePath','targetPath','name','size','sha256'], additionalProperties: false } },
   { name: 'get_replies', description: 'Read bot message receipts and replies already available to this conversation. Pending work only starts after this turn ends.', inputSchema: empty },
   { name: 'create_bot', description: 'Create a new persistent workspace bot. The bot is created after this turn ends and becomes available with its own settings and conversations; this is not an OpenCode subagent.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Unique display name for the new bot (1–160 characters)' }, instructions: { type: 'string', description: 'The new bot role and operating instructions' }, model: { type: 'string', description: 'Optional provider/model identifier available to this workspace' }, agent: { type: 'string', description: 'Optional OpenCode agent name' } }, required: ['name'], additionalProperties: false } },
+  ...memoryTools
 ] }));
 server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
-  if (!['list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
+  if (!['list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name) && !memoryNames.has(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
   try {
     const response = await fetch(endpoint, { method:'POST', headers:{ authorization:`Bearer ${token}`, 'content-type':'application/json' }, body:JSON.stringify({ name:params.name, arguments:params.arguments ?? {} }), signal:AbortSignal.timeout(10_000) });
     const value = await response.json();

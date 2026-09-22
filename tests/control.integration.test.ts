@@ -1029,3 +1029,51 @@ describe('deliberate Computer sleep', () => {
     expect(remote.calls).toEqual([]);
   });
 });
+
+describe('workspace memory tool capabilities',()=>{
+ it('keeps shared memory above nodes, enforces author identity and revokes finished-run capabilities',async()=>{
+  const f=fixture(true);const {bot,thread}=await f.create();
+  const peer=(await f.request('/api/bots','POST',{name:'Mac peer',model:'test/model'})).body;
+  const first=(await f.request('/api/runs','POST',{threadId:thread.id,prompt:'Remember and share our deployment decision',idempotencyKey:'mem-test'})).body;
+  await f.alarm();
+  const input=remote.submitted.find(r=>r.runId===first.id);
+  expect(input.memoryTools.url).toBe('https://bot.test/api/memory/tools');
+  expect(JSON.stringify((await f.request('/api/state')).body)).not.toContain(input.memoryTools.token);
+  const call=(name:string,args:any,token=input.memoryTools.token)=>f.request('/api/memory/tools','POST',{name,arguments:args,runId:'spoofed'},token);
+  expect((await call('memory_search',{},'bad')).status).toBe(401);
+  const created=await call('memory_remember',{botId:peer.id,title:'Deployment decision',content:'Use Wrangler for the release',visibility:'shared',sharedBotIds:[peer.id]});
+  expect(created.status).toBe(200);expect(created.body.botId).toBe(bot.id);expect(created.body.sourceThreadId).toBe(thread.id);
+  expect((await f.request(`/api/memory?botId=${peer.id}&q=Wrangler`)).body[0].id).toBe(created.body.id);
+  expect((await call('memory_update',{id:created.body.id,revision:0,content:'wrong'})).status).toBe(409);
+  expect((await call('memory_share',{id:created.body.id,revision:1,visibility:'private'})).status).toBe(200);
+  expect((await f.request(`/api/memory?botId=${peer.id}&q=Wrangler`)).body).toEqual([]);
+  remote.runs.get(first.id).status='succeeded';await f.alarm();
+  expect((await call('memory_read',{id:created.body.id})).status).toBe(403);
+  expect((await f.request('/api/memory/tools','GET',undefined,input.memoryTools.token)).status).toBe(405);
+ });
+ it('provides the same central memory callback in owned-node dispatch',async()=>{
+  const f=fixture(true);
+  const pairing=(await f.request('/api/nodes/pairing','POST',{label:'Mac'})).body;
+  const paired=await f.request('/api/nodes/register','POST',{pairingToken:pairing.token,name:'Mac',platform:'macos',arch:'arm64',capabilities:{runner:true}},null);
+  expect(paired.status).toBe(201);
+  const bot=(await f.request('/api/bots','POST',{name:'Mac memory',model:'test/model',nodeId:paired.body.node.id})).body;
+  const thread=(await f.request('/api/threads','POST',{botId:bot.id,title:'Memory on my Mac'})).body;
+  const run=(await f.request('/api/runs','POST',{threadId:thread.id,prompt:'Remember the project',idempotencyKey:'node-memory'})).body;
+  await f.alarm();
+  const leased=(await f.request(`/api/nodes/${paired.body.node.id}/jobs/poll`,'GET',undefined,paired.body.nodeSecret)).body;
+  const capability=leased.job.payload.run.memoryTools;
+  expect(capability.url).toBe('https://bot.test/api/memory/tools');
+  const saved=await f.request('/api/memory/tools','POST',{name:'memory_remember',arguments:{content:'The Mac uses pnpm',visibility:'workspace'}},capability.token);
+  expect(saved.status).toBe(200);expect(saved.body.botId).toBe(bot.id);expect(saved.body.sourceRunId).toBe(run.id);
+  expect((await f.request('/api/memory?q=pnpm')).body[0].content).toBe('The Mac uses pnpm');
+ });
+ it('migrates old memories, supports owner edits and preserves shared memory when deleting its author',async()=>{
+  const f=fixture();const {bot}=await f.create();
+  const peer=(await f.request('/api/bots','POST',{name:'Peer',model:'test/model'})).body;
+  const memory=(await f.request('/api/memory','POST',{botId:bot.id,content:'Keep this team decision',visibility:'shared',sharedBotIds:[peer.id]})).body;
+  expect((await f.request('/api/memory/'+memory.id,'PATCH',{revision:1,content:'Corrected decision'})).status).toBe(200);
+  expect((await f.request('/api/memory/'+memory.id+'/history')).body).toHaveLength(2);
+  expect((await f.request('/api/bots/'+bot.id,'DELETE')).status).toBe(200);
+  expect((await f.request('/api/memory?botId='+peer.id)).body[0]).toMatchObject({id:memory.id,botId:null,content:'Corrected decision'});
+ });
+});

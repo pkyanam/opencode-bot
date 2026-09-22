@@ -225,3 +225,17 @@ and the [2026-07-28 release notes](https://blog.modelcontextprotocol.io/posts/20
 - MCP authentication is application policy. This adapter does not mint OAuth
   credentials, accept a node secret as a user token, or bypass paired-client
   workspace restrictions.
+
+## Workspace memory
+
+The memory registry belongs to the workspace, above execution nodes. Use
+`memory_search` to find relevant knowledge, `memory_read` for a full record,
+`memory_remember` to create one for a bot, and `memory_update` to correct it or
+change its sharing. Supply the latest `revision` for updates and `memory_forget`.
+`memory_history` shows retained versions. Owner and paired-client MCP credentials
+can administer all bot memories; bot execution capabilities are separately scoped.
+
+Example prompt: “Find memories about our deployment, correct outdated details,
+and share the verified decision with Scout and Llama.”
+
+[Memory scopes, tools, and retention](memory.md).

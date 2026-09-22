@@ -95,7 +95,16 @@ export type Run = {
 };
 export type MemoryItem = {
   id: string;
+  botId?: string | null;
   content: string;
+  title?: string;
+  kind?: string;
+  tags?: string[];
+  visibility?: "private" | "shared" | "workspace";
+  sharedBotIds?: string[];
+  pinned?: boolean;
+  revision?: number;
+  sourceThreadId?: string;
   source?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -608,6 +617,34 @@ export const api = {
       `/api/bots/${encodeURIComponent(botId)}/memory/${encodeURIComponent(memoryId)}`,
       { method: "DELETE" },
     ),
+  memoryRegistry: (params?: { botId?: string; q?: string; offset?: number; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.botId) query.set("botId", params.botId);
+    if (params?.q) query.set("q", params.q);
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request<MemoryItem[]>(`/api/memory${suffix}`);
+  },
+  createMemory: (payload: {
+    botId: string;
+    content: string;
+    title?: string;
+    kind?: string;
+    tags?: string[];
+    visibility: "private" | "shared" | "workspace";
+    sharedBotIds?: string[];
+    pinned?: boolean;
+  }) => request<MemoryItem>("/api/memory", { method: "POST", body: JSON.stringify(payload) }),
+  updateMemory: (id: string, payload: Partial<MemoryItem> & { revision?: number }) =>
+    request<MemoryItem>(`/api/memory/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  removeMemory: (id: string, revision?: number) =>
+    request<void>(`/api/memory/${encodeURIComponent(id)}${revision != null ? `?revision=${revision}` : ""}`, { method: "DELETE" }),
+  memoryHistory: (id: string) =>
+    request<MemoryItem[]>(`/api/memory/${encodeURIComponent(id)}/history`),
   routines: () => request<Routine[]>("/api/routines"),
   createRoutine: (payload: {
     botId: string;

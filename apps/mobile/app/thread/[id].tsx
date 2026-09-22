@@ -78,6 +78,18 @@ const humanTool: Record<string, string> = {
   edit: "Edit file",
   glob: "Find files",
   grep: "Search files",
+  memory_search: "Recall memories",
+  memory_read: "Read memory",
+  memory_remember: "Remember",
+  memory_update: "Correct memory",
+  memory_share: "Share memory",
+  memory_forget: "Forget memory",
+  bots_memory_search: "Recall memories",
+  bots_memory_read: "Read memory",
+  bots_memory_remember: "Remember",
+  bots_memory_update: "Correct memory",
+  bots_memory_share: "Share memory",
+  bots_memory_forget: "Forget memory",
   delegate: "Delegate task",
 };
 const toolLabel = (name: string) =>

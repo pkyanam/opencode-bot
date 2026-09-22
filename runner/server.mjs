@@ -149,7 +149,10 @@ export class RunStore {
       return this.public(existing);
     }
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const memoryTools = input.memoryTools && typeof input.memoryTools === 'object' && typeof input.memoryTools.url === 'string' && typeof input.memoryTools.token === 'string'
+      ? { url: input.memoryTools.url, token: input.memoryTools.token }
+      : undefined;
+    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, ...(memoryTools ? { memoryTools } : {}), events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -210,9 +213,28 @@ export class RunStore {
     }
   }
 
-  botTool(name, args = {}) {
+  async botTool(name, args = {}) {
     const run = [...this.runs.values()].find(item => !isTerminal(item.status));
     if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
+    if (['memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share'].includes(name)) {
+      const capability = run.memoryTools;
+      if (!capability) throw httpError(503, 'Shared memory is unavailable');
+      let url;
+      try { url = new URL(capability.url); } catch { throw httpError(503, 'Shared memory is unavailable'); }
+      const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+      if (url.pathname !== '/api/memory/tools' || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) throw httpError(503, 'Shared memory is unavailable');
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${capability.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name, arguments: args, runId: run.id }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(10_000),
+      });
+      let value;
+      try { value = await response.json(); } catch { value = { error: 'shared memory returned invalid JSON' }; }
+      if (!response.ok) throw httpError(response.status >= 400 && response.status < 500 ? response.status : 502, value?.error ?? 'Shared memory request failed');
+      return value;
+    }
     if (name === 'list_bots') return { bots: run.botDirectory ?? [] };
     if (name === 'get_replies') return { replies: run.delegationHistory ?? [], pending: run.delegationRequests ?? [] };
     if (name === 'send_file') {
@@ -362,6 +384,7 @@ export class RunStore {
     } finally {
       controller.abort();
       run.finishedAt = new Date().toISOString();
+      delete run.memoryTools;
       this.persist(run);
     }
   }
@@ -536,7 +559,9 @@ export class RunStore {
     fs.mkdirSync(this.stateDir, { recursive: true });
     const target = path.join(this.stateDir, `${encodeURIComponent(run.id)}.json`);
     const temporary = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(run));
+    const snapshot = { ...run };
+    delete snapshot.memoryTools;
+    fs.writeFileSync(temporary, JSON.stringify(snapshot));
     fs.renameSync(temporary, target);
   }
 }
@@ -594,7 +619,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       if (req.url === '/bot-tools' && req.method === 'POST') {
         if (!botToolToken || req.headers.authorization !== `Bearer ${botToolToken}`) return json(res,401,{error:'unauthorized'});
         const input = await readJson(req);
-        return json(res,200,store.botTool(input.name,input.arguments));
+        return json(res,200,await store.botTool(input.name,input.arguments));
       }
       if (authToken && req.headers.authorization !== `Bearer ${authToken}`) return json(res, 401, { error: "unauthorized" });
       if (new URL(req.url, 'http://runner').pathname.startsWith('/files')) {

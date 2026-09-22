@@ -52,7 +52,6 @@ import {
   ComputerStatus,
   getToken,
   isComputerWarmingUpError,
-  MemoryItem,
   Message,
   Attachment,
   Routine,
@@ -71,6 +70,7 @@ import { ToolActivity } from "./components/tool-activity";
 import { FilesExplorer } from "./components/files-explorer";
 import { RunProgress } from "./components/run-progress";
 import { InteractiveComputer } from "./components/interactive-computer";
+import { MemoryRegistry } from "./components/memory-registry";
 const NativeTerminal = React.lazy(() =>
   import("./components/native-terminal").then((module) => ({
     default: module.NativeTerminal,
@@ -200,6 +200,7 @@ function App() {
   const sendInFlight = useRef(false);
   const [editingBot, setEditingBot] = useState<Bot>();
   const [showMemory, setShowMemory] = useState(false);
+  const [memoryFilterBot, setMemoryFilterBot] = useState<Bot | undefined>();
   const [showRoutines, setShowRoutines] = useState(false);
   const [showComputer, setShowComputer] = useState(false);
   const [connected, setConnected] = useState(Boolean(getToken()));
@@ -987,6 +988,12 @@ function App() {
           <div className="sidebar-tools">
             <button
               className="footer-action"
+              onClick={() => { setMemoryFilterBot(undefined); setShowMemory(true); }}
+            >
+              <FileText size={15} /> Memory registry
+            </button>
+            <button
+              className="footer-action"
               onClick={() => setShowRoutines(true)}
             >
               <CalendarClock size={15} /> Routines{" "}
@@ -1375,6 +1382,7 @@ function App() {
           agents={catalog.agents ?? []}
           onMemory={() => {
             setShowBot(false);
+            setMemoryFilterBot(bot);
             setShowMemory(true);
           }}
           onClose={() => setShowBot(false)}
@@ -1389,8 +1397,8 @@ function App() {
           }}
         />
       )}
-      {showMemory && bot && (
-        <MemoryModal bot={bot} onClose={() => setShowMemory(false)} />
+      {showMemory && (
+        <MemoryRegistry bots={state.bots} bot={memoryFilterBot} onClose={() => setShowMemory(false)} />
       )}{" "}
       {showRoutines && (
         <RoutinesModal
@@ -2313,113 +2321,6 @@ function ApprovalCard({
         >
           {busy && <LoaderCircle size={14} className="spin" />}Approve once
         </button>
-      </div>
-    </div>
-  );
-}
-function MemoryModal({ bot, onClose }: { bot: Bot; onClose: () => void }) {
-  const [items, setItems] = useState<MemoryItem[]>([]);
-  const [text, setText] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const load = async () => {
-    try {
-      setLoading(true);
-      setItems(await api.memories(bot.id));
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load memory");
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    load();
-  }, [bot.id]);
-  const add = async () => {
-    if (!text.trim()) return;
-    try {
-      setSaving(true);
-      const created = await api.addMemory(bot.id, text.trim());
-      setItems((current) => [...current, created]);
-      setText("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add memory");
-    } finally {
-      setSaving(false);
-    }
-  };
-  const remove = async (id: string) => {
-    try {
-      await api.deleteMemory(bot.id, id);
-      setItems((current) => current.filter((item) => item.id !== id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not delete memory");
-    }
-  };
-  return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal memory-modal">
-        <div className="modal-head">
-          <div>
-            <div className="modal-kicker">{bot.name.toUpperCase()}</div>
-            <h2>Bot memory</h2>
-          </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
-        </div>
-        <p className="modal-copy">
-          Explicit memories are included in future runs for this bot.
-        </p>
-        {error && (
-          <div className="inline-error">
-            <AlertCircle size={15} />
-            {error}
-            <button className="retry-inline" onClick={load}>
-              Retry
-            </button>
-          </div>
-        )}
-        <div className="memory-add">
-          <textarea
-            className="text-area"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Add a durable fact or preference…"
-            rows={3}
-          />
-          <button
-            className="primary-btn"
-            disabled={!text.trim() || saving}
-            onClick={add}
-          >
-            {saving && <LoaderCircle size={14} className="spin" />}Add memory
-          </button>
-        </div>
-        <div className="memory-list">
-          {loading ? (
-            <div className="memory-empty">
-              <LoaderCircle size={17} className="spin" /> Loading memory…
-            </div>
-          ) : !items.length ? (
-            <div className="memory-empty">No explicit memories yet.</div>
-          ) : (
-            items.map((item) => (
-              <div className="memory-item" key={item.id}>
-                <p>{item.content}</p>
-                <button
-                  className="icon-btn"
-                  onClick={() => remove(item.id)}
-                  aria-label="Delete memory"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
       </div>
     </div>
   );

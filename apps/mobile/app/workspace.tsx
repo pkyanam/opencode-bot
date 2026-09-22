@@ -16,8 +16,9 @@ import { useStore } from "../src/store";
 import { colors, styles } from "../src/ui";
 import type { Skill } from "../src/types";
 import { FilesystemExplorer } from "../src/components/filesystem-explorer";
+import { MemoryRegistry } from "../src/components/memory-registry";
 
-type Section = "skills" | "files" | "computer" | "routines";
+type Section = "skills" | "files" | "memory" | "computer" | "routines";
 type Routine = {
   id: string;
   title: string;
@@ -33,10 +34,10 @@ type Computer = {
   checkpoint?: { createdAt?: string };
   lastCheckpoint?: { createdAt?: string };
 };
-const sections: Section[] = ["skills", "files", "computer", "routines"];
+const sections: Section[] = ["skills", "files", "memory", "computer", "routines"];
 export default function Workspace() {
   const params = useLocalSearchParams<{ section?: string }>();
-  const { baseUrl } = useStore();
+  const { baseUrl, state } = useStore();
   const [section, setSection] = useState<Section>(
     sections.includes(params.section as Section)
       ? (params.section as Section)
@@ -221,6 +222,7 @@ export default function Workspace() {
                   />
                 ))}
               {section === "files" && <FilesystemExplorer baseUrl={baseUrl} />}
+              {section === "memory" && <MemoryRegistry baseUrl={baseUrl} bots={state?.bots ?? []} />}
               {section === "computer" && (
                 <View style={styles.card}>
                   <Text style={local.name}>Shared computer</Text>
