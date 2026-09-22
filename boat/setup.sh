@@ -74,7 +74,7 @@ fi
 release="$RELEASES/$(date -u +%Y%m%d%H%M%S)-$$"
 previous=''; [[ -e "$CURRENT" ]] && previous="$(readlink "$CURRENT")"
 unit_backup="$(mktemp -d /tmp/opencode-bot-units.XXXXXX)"
-for unit in opencode-bot.service opencode-bot-updater.service opencode-bot-hindsight.service; do
+for unit in opencode-bot.service opencode-bot-updater.service opencode-bot-updater.path opencode-bot-hindsight.service; do
   if [[ -f "/etc/systemd/system/$unit" ]]; then sudo cp -a "/etc/systemd/system/$unit" "$unit_backup/$unit"; fi
 done
 rollback() {
@@ -82,7 +82,7 @@ rollback() {
   sudo rm -rf "$release"
   if [[ -n "$previous" ]]; then
     sudo ln -sfn "$previous" "$CURRENT" || true
-    for unit in opencode-bot.service opencode-bot-updater.service opencode-bot-hindsight.service; do
+    for unit in opencode-bot.service opencode-bot-updater.service opencode-bot-updater.path opencode-bot-hindsight.service; do
       if [[ -f "$unit_backup/$unit" ]]; then sudo cp -a "$unit_backup/$unit" "/etc/systemd/system/$unit"; fi
     done
     sudo systemctl daemon-reload >/dev/null 2>&1 || true
@@ -122,12 +122,14 @@ sudo chown -R opencode-bot:opencode-bot "$DATA" "$ETC"
 sudo chown -R opencode-bot:opencode-bot "$ROOT/browsers"
 sed "s/Environment=OPENCODE_PORT=8789/Environment=OPENCODE_PORT=${APP_PORT}/" "$release/boat/opencode-bot.service" | sudo install -m 0644 /dev/stdin /etc/systemd/system/opencode-bot.service
 sudo install -m 0644 "$release/boat/opencode-bot-updater.service" /etc/systemd/system/opencode-bot-updater.service
+sudo install -m 0644 "$release/boat/opencode-bot-updater.path" /etc/systemd/system/opencode-bot-updater.path
 sudo install -d -o opencode-bot -g opencode-bot -m 0700 "$DATA/update"
 sudo chown -R opencode-bot:opencode-bot "$DATA/update"
-printf 'opencode-bot ALL=(root) NOPASSWD: /bin/systemctl start --no-block opencode-bot-updater.service\n' | sudo install -m 0440 /dev/stdin /etc/sudoers.d/opencode-bot-updater
+sudo rm -f /etc/sudoers.d/opencode-bot-updater
 sudo ln -sfn "$release" "$CURRENT"
 sudo bash "$release/boat/hindsight-setup.sh"
 sudo systemctl daemon-reload
+sudo systemctl enable --now opencode-bot-updater.path
 sudo systemctl enable opencode-bot.service
 sudo systemctl restart opencode-bot.service
 for attempt in $(seq 1 60); do

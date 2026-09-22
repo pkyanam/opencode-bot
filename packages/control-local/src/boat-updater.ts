@@ -67,7 +67,7 @@ export class BoatUpdater {
     await (this.hooks?.assertIdle ?? this.options.assertIdle)?.(); this.hooks?.setUpdating(true);
     const now = new Date().toISOString(); const job: UpdateJob = { id: randomUUID(), requestedVersion: version, phase: "queued", startedAt: now, updatedAt: now };
     const requestPath = this.options.requestPath ?? `${RELEASE_ROOT}/state.json.request`;
-    try { await this.writeJob(job); await mkdir(dirname(requestPath), { recursive: true }); await writeFile(requestPath, JSON.stringify({ id: job.id, version }) + "\n", { mode: 0o600 }); await this.options.privilegedStart(); }
+    try { await this.writeJob(job); await mkdir(dirname(requestPath), { recursive: true }); const temporaryRequest = `${requestPath}.${job.id}.tmp`; await writeFile(temporaryRequest, JSON.stringify({ id: job.id, version }) + "\n", { mode: 0o600 }); await rename(temporaryRequest, requestPath); await this.options.privilegedStart(); }
     catch (e) { this.hooks?.setUpdating(false); await this.writeJob({ ...job, phase: "failed", updatedAt: new Date().toISOString(), error: e instanceof Error ? e.message : String(e) }); throw e; }
     return { ...priorStatus, job, accepted: true };
     } finally { this.starting = false; }

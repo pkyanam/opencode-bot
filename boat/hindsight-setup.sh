@@ -17,6 +17,9 @@ command -v systemctl >/dev/null 2>&1 || fail 'systemd is required'
 
 id opencode-bot >/dev/null 2>&1 || useradd --system --home-dir /var/lib/opencode-bot --shell /usr/sbin/nologin opencode-bot
 install -d -o opencode-bot -g opencode-bot -m 0700 "$DATA" "$DATA/pg0" "$ETC"
+# The runtime is code, not workspace data. Never execute an interpreter that
+# the bot service can replace when this installer runs as root.
+if [[ -e "$VENV" && "$(stat -c %u "$VENV")" != 0 ]]; then rm -rf "$VENV"; fi
 [[ -x "$VENV/bin/python" ]] || "$UV_BIN" venv --python 3.12 "$VENV"
 "$UV_BIN" pip install --python "$VENV/bin/python" 'hindsight-api-slim[embedded-db,local-onnx]==0.10.1' 'flashrank==0.2.10'
 
@@ -29,11 +32,14 @@ fi
 if [[ ! -d /opt/flashrank/ms-marco-MiniLM-L-12-v2 ]]; then
   HF_HOME=/opt/huggingface "$VENV/bin/python" -c "from flashrank import Ranker; Ranker(model_name='ms-marco-MiniLM-L-12-v2', cache_dir='/opt/flashrank')"
 fi
-chown -R opencode-bot:opencode-bot "$DATA" "$VENV"
+chown -R opencode-bot:opencode-bot "$DATA"
+chown -R root:root "$VENV"
+chmod -R a+rX "$VENV"
 chmod -R a+rX /opt/huggingface /opt/flashrank
 if [[ ! -s "$ETC/hindsight-token" ]]; then umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$ETC/hindsight-token"; printf '\n' >> "$ETC/hindsight-token"; fi
 chown opencode-bot:opencode-bot "$ETC/hindsight-token"; chmod 0600 "$ETC/hindsight-token"
 install -m 0644 "$ROOT/releases/current/boat/opencode-bot-hindsight.service" /etc/systemd/system/opencode-bot-hindsight.service
 systemctl daemon-reload
-systemctl enable --now opencode-bot-hindsight.service
+systemctl enable opencode-bot-hindsight.service
+systemctl restart opencode-bot-hindsight.service
 printf 'Hindsight service installed; provider configuration remains optional and explicit.\n'

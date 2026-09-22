@@ -48,20 +48,10 @@ const boatUpdater = new BoatUpdater({
   currentRelease: "/opt/opencode-bot/releases/current",
   requestPath: "/var/lib/opencode-bot/update/state.json.request",
   privilegedStart: async () => {
-    const { spawn } = await import("node:child_process");
-    await new Promise((resolve, reject) => {
-      const child = spawn(
-        "sudo",
-        ["-n", "/bin/systemctl", "start", "--no-block", "opencode-bot-updater.service"],
-        { stdio: "ignore" },
-      );
-      child.once("error", reject);
-      child.once("exit", (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`updater service exited ${code}`)),
-      );
-    });
+    // The root-owned path unit consumes the atomic request. This works with
+    // NoNewPrivileges=true and grants the application no sudo capability.
+    const { execFile } = await import("node:child_process");
+    await new Promise((resolve, reject) => execFile('/bin/systemctl', ['is-active', '--quiet', 'opencode-bot-updater.path'], error => error ? reject(new Error('The update watcher is not running. Rerun the installer to repair it.')) : resolve()));
   },
 });
 const control = await startLocalControl({

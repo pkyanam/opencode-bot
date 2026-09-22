@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.s
 
 ### Updating the app
 
-Starting with v0.1.33, open **Settings → Updates** to check for a release and
+Starting with v0.1.34, open **Settings → Updates** to check for a release and
 update the app and its Computer together. No Cloudflare deployment token or
 Boat API key is needed inside the app. Finish active work first. The updater
 verifies the GitHub release, keeps your data and connection token, and restarts
