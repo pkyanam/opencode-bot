@@ -31,6 +31,9 @@ export class OpenCode2Runtime {
     this.catalogCache = new Map();
     this.messageCache = new Map();
     this.browser = options.browser ?? process.env.OPENCODE_BOT_BROWSER === "1";
+    this.mcpReady = Promise.resolve();
+    this.mcpError = undefined;
+    this.mcpEpoch = 0;
   }
 
   async start() {
@@ -104,16 +107,31 @@ export class OpenCode2Runtime {
       throwOnError: true
     });
     await this.client.server.info();
-    await Promise.all([...(this.browser && this.client.mcp?.list ? [this.waitForBrowserMcp()] : []), ...(this.botTools && this.client.mcp?.list ? [this.waitForBrowserMcp(30_000, "bots")] : [])]);
+    // MCP subprocesses are independent of the daemon health barrier. Start
+    // their readiness poll without holding runtime startup; operations that
+    // need a tool await ensureMcpReady() at their own admission point.
+    const mcpWaits = [
+      ...(this.browser && this.client.mcp?.list ? [this.waitForBrowserMcp(undefined, "computer_browser", this.client)] : []),
+      ...(this.botTools && this.client.mcp?.list ? [this.waitForBrowserMcp(30_000, "bots", this.client)] : []),
+    ];
+    const epoch = ++this.mcpEpoch;
+    this.mcpError = undefined;
+    this.mcpReady = Promise.all(mcpWaits).then(() => undefined).catch((error) => { if (this.mcpEpoch === epoch) this.mcpError = error; throw error; });
+    this.mcpReady.catch(() => undefined);
     return this.client;
   }
 
-  async waitForBrowserMcp(timeoutMs = 30_000, serverName = "computer_browser") {
+  async ensureMcpReady() {
+    await this.mcpReady;
+    if (this.mcpError) throw this.mcpError;
+  }
+
+  async waitForBrowserMcp(timeoutMs = 30_000, serverName = "computer_browser", client = this.client) {
     const deadline = Date.now() + timeoutMs;
     let delayMs = 100;
     let last;
     do {
-      last = await this.client.mcp.list({ location: { directory: this.directory } });
+      last = await client.mcp.list({ location: { directory: this.directory } });
       const browser = last?.data?.find((server) => server.name === serverName);
       if (browser?.status?.status === "connected") return last;
       if (browser?.status?.status === "error" || browser?.status?.status === "failed") {
@@ -130,6 +148,7 @@ export class OpenCode2Runtime {
 
   async createSession({ sessionId, title, model, agent, directory } = {}) {
     await this.start();
+    await this.ensureMcpReady();
     if (sessionId) {
       await this.client.session.get({ sessionID: sessionId });
       if (model && this.client.session.switchModel) await this.client.session.switchModel({ sessionID: sessionId, model: normalizeModel(model) });
@@ -680,6 +699,9 @@ export class OpenCode2Runtime {
     this.messageCache.clear();
     if (this.endpoint) await this.service.stop({ file: this.serviceFile });
     if (this.desktop?.close) await this.desktop.close();
+    ++this.mcpEpoch;
+    this.mcpReady = Promise.resolve();
+    this.mcpError = undefined;
     this.client = undefined;
     this.endpoint = undefined;
   }

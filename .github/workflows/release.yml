@@ -55,7 +55,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
-      image: ${{ steps.push.outputs.image }}
+      image: ${{ steps.reuse.outputs.image || steps.push.outputs.image }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -80,8 +80,40 @@ jobs:
           scripts/release/verify-source.sh "$tag" "$commit"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - id: image-source
+        name: Fingerprint Computer image inputs
+        run: echo "fingerprint=$(node scripts/release/image-fingerprint.mjs)" >> "$GITHUB_OUTPUT"
+      - id: reuse
+        name: Reuse unchanged published Computer image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_FINGERPRINT: ${{ steps.image-source.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          previous_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=20" --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+          if [[ -z "$previous_tag" ]]; then
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p .tmp/previous-release
+          if ! gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern release-manifest.json --dir .tmp/previous-release; then
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          previous_fingerprint=$(jq -r '.image.fingerprint // empty' .tmp/previous-release/release-manifest.json)
+          previous_image=$(jq -r '.image.reference // empty' .tmp/previous-release/release-manifest.json)
+          if [[ "$previous_fingerprint" == "$CURRENT_FINGERPRINT" && "$previous_image" =~ ^docker\.io/[a-z0-9._-]+/[a-z0-9._-]+@sha256:[0-9a-f]{64}$ ]] && docker manifest inspect "$previous_image" >/dev/null 2>&1; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "image=$previous_image" >> "$GITHUB_OUTPUT"
+            echo "digest=${previous_image##*@}" >> "$GITHUB_OUTPUT"
+            echo "Reusing $previous_image (fingerprint $CURRENT_FINGERPRINT)"
+          else
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        if: steps.reuse.outputs.reuse != 'true'
       - name: Build linux/amd64 image
+        if: steps.reuse.outputs.reuse != 'true'
         run: >-
           docker buildx build --platform linux/amd64 --file images/computer/Dockerfile
           --tag opencode-bot:release --metadata-file image-metadata.json
@@ -89,8 +121,10 @@ jobs:
           --cache-to type=inline
           --load .
       - name: Smoke test image
+        if: steps.reuse.outputs.reuse != 'true'
         run: scripts/release/smoke-image.sh opencode-bot:release "$OPENCODE_VERSION" "$SANDBOX_VERSION"
       - name: Smoke test runner health
+        if: steps.reuse.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           docker run --rm -d --name opencode-release-smoke -p 8787:8787 \
@@ -105,6 +139,7 @@ jobs:
           exit 1
       - name: Publish image to Docker Hub
         id: push
+        if: steps.reuse.outputs.reuse != 'true'
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -132,9 +167,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
-          IMAGE_REFERENCE: ${{ steps.push.outputs.image }}
-          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
-          BUILD_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_REFERENCE: ${{ steps.reuse.outputs.image || steps.push.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.reuse.outputs.digest || steps.push.outputs.digest }}
+          BUILD_DIGEST: ${{ steps.reuse.outputs.digest || steps.push.outputs.digest }}
+          IMAGE_FINGERPRINT: ${{ steps.image-source.outputs.fingerprint }}
         run: |
           rm -rf .tmp/node-bundle node-bundle.tar.gz
           mkdir -p .tmp/node-bundle/scripts .tmp/node-bundle/runner .tmp/node-bundle/packages/runtime-opencode2/src .tmp/node-bundle/packages/browser/src
@@ -163,10 +199,10 @@ jobs:
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --archive node-bundle.tar.gz
           node scripts/release/build-bundle.mjs \
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
-            --image-reference "$IMAGE_REFERENCE" --image-digest "$BUILD_DIGEST"
+            --image-reference "$IMAGE_REFERENCE" --image-digest "$BUILD_DIGEST" --image-fingerprint "$IMAGE_FINGERPRINT"
           node scripts/release/write-manifest.mjs --output release-manifest.json \
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
-            --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE" --bundle .tmp/update-bundle/app-bundle.json
+            --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE" --image-fingerprint "$IMAGE_FINGERPRINT" --bundle .tmp/update-bundle/app-bundle.json
           cp .tmp/update-bundle/app-bundle.json app-bundle.json
           sha256sum release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz > SHA256SUMS
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08

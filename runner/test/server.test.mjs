@@ -241,6 +241,26 @@ test('MCP control routes proxy native list and mutations without exposing config
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
+test('MCP OAuth reports manual-control guidance and allows read-only status during active work', async () => {
+  const runtime = new FakeRuntime();
+  runtime.providerOAuthStart = async () => ({ attempt: { attemptID: 'a1', url: 'https://login.example' } });
+  runtime.providerOAuthStatus = async () => ({ status: { status: 'pending' } });
+  const desktop = { controlStatus: () => ({ active: true }), start: async () => {}, stream: async () => { throw new Error('unused'); } };
+  const store = new RunStore(runtime);
+  store.runs.set('busy', { id: 'busy', status: 'running', sessionId: 's1', events: [], final: '' });
+  const server = createServer({ store, desktop, authToken: 'secret' });
+  await new Promise(resolve => server.listen(0, resolve));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const headers = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+    const start = await fetch(`${base}/mcps/oauth/start`, { method: 'POST', headers, body: JSON.stringify({ integrationID: 'cf', methodID: 'oauth' }) });
+    assert.equal(start.status, 409);
+    assert.match((await start.json()).error, /manual control/i);
+    const status = await fetch(`${base}/mcps/oauth/status`, { method: 'POST', headers, body: JSON.stringify({ integrationID: 'cf', attemptID: 'a1' }) });
+    assert.equal(status.status, 200);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('provider failures retain their explanation instead of an empty success', async () => {
   const runtime = new FakeRuntime();
   runtime.events = undefined;

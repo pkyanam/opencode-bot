@@ -89,7 +89,10 @@ export class RunStore {
 
   async updateConfiguration(fn) {
     await this.recoverNativeOwnership();
-    if (this.paused || this.configuring || this.ownershipUncertain || this.desktop?.controlStatus?.().active || this.terminalRegistry?.active() || [...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing computer settings');
+    if (this.paused || this.configuring || this.ownershipUncertain) throw httpError(409,'Computer settings or checkpoint are being updated');
+    if (this.desktop?.controlStatus?.().active) throw httpError(409,'Computer is under manual control. Release desktop control before changing MCP settings.', { code: 'human_control_active' });
+    if (this.terminalRegistry?.active()) throw httpError(409,'Close Native OpenCode before changing MCP settings.', { code: 'native_terminal_active' });
+    if ([...this.runs.values()].some(run=>!isTerminal(run.status))) throw httpError(409,'Finish active work before changing MCP settings.', { code: 'active_run' });
     this.configuring = true;
     try { await this.waitForRuntimeIdle(); return await fn(); }
     finally { this.configuring = false; }
@@ -634,13 +637,12 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (oauthMethod) {
           if (req.method !== 'POST' || !runtime[oauthMethod]) return json(res, req.method === 'POST' ? 501 : 405, { error: 'MCP OAuth API is unavailable' });
           const input = await readJson(req);
-          if (store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'Finish the active request or close Native OpenCode before changing MCP settings.' });
           try {
             const invoke = () => runtime[oauthMethod]({ ...input, directory: workspace });
             const result = await (suffix === 'oauth/status' ? store.withRuntime(invoke) : store.updateConfiguration(invoke));
             return json(res, 200, result);
           } catch (error) {
-            if (error?.statusCode === 409) return json(res, 409, { error: 'Finish active work before changing computer settings' });
+            if (error?.statusCode === 409) return json(res, 409, { error: error.message, ...(error.code ? { code: error.code } : {}) });
             return json(res, 400, { error: 'OpenCode could not complete MCP OAuth. Check integrationID, methodID, and the native OAuth flow.' });
           }
         }
@@ -649,12 +651,11 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (req.method !== 'POST' || !method) return json(res, 404, { error: 'MCP operation not found' });
         if (!runtime[method]) return json(res, 501, { error: 'MCP API is unavailable' });
         const input = await readJson(req);
-        if (store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'Finish the active request or close Native OpenCode before changing MCP settings.' });
         try {
           const result = await store.updateConfiguration(() => runtime[method]({ ...input, directory: workspace }));
           return json(res, 200, result);
         } catch (error) {
-          if (error?.statusCode === 409) return json(res, 409, { error: 'Finish active work before changing computer settings' });
+          if (error?.statusCode === 409) return json(res, 409, { error: error.message, ...(error.code ? { code: error.code } : {}) });
           return json(res, 400, { error: 'OpenCode could not complete the MCP operation. Check the server name, configuration, and credentials.' });
         }
       }

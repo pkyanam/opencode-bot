@@ -26,7 +26,7 @@ export type ReleaseBundle = {
     metadata: { assets: { config: typeof import("./build-bundle.mjs").ASSETS_ROUTING_CONFIG } };
   };
   assets: BundleAsset[];
-  computerImage: { reference: string; digest: string };
+  computerImage: { reference: string; digest: string; fingerprint?: string };
   runtime: { opencodeVersion: string; sandboxVersion: string };
   bundleSha256: string;
 };
@@ -45,5 +45,6 @@ export function buildBundle(options: {
   commit: string;
   imageReference: string;
   imageDigest: string;
+  imageFingerprint?: string;
   skipBuild?: boolean;
 }): Promise<ReleaseBundle>;

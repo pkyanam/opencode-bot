@@ -80,7 +80,7 @@ async function run(command, commandArgs) {
   });
 }
 
-export async function buildBundle({ output, workerDirectory, assetsDirectory, version, commit, imageReference, imageDigest, skipBuild = false }) {
+export async function buildBundle({ output, workerDirectory, assetsDirectory, version, commit, imageReference, imageDigest, imageFingerprint, skipBuild = false }) {
   const out = resolve(root, output ?? ".tmp/update-bundle/app-bundle.json");
   const worker = resolve(root, workerDirectory ?? ".tmp/update-bundle/worker");
   const assets = resolve(root, assetsDirectory ?? "apps/web/dist");
@@ -138,7 +138,7 @@ export async function buildBundle({ output, workerDirectory, assetsDirectory, ve
       },
     },
     assets: assetRecords,
-    computerImage: { reference, digest },
+    computerImage: { reference, digest, ...(imageFingerprint ? { fingerprint: imageFingerprint } : {}) },
     runtime: { opencodeVersion: runnerPackage.dependencies["@opencode/cli"], sandboxVersion: packageJson.dependencies["@cloudflare/sandbox"] },
   };
   // The identity hash covers the canonical bundle payload without the hash
@@ -156,5 +156,5 @@ async function runCapture(command, commandArgs) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  await buildBundle({ output: args.get("--output"), version: args.get("--version"), commit: args.get("--commit"), imageReference: args.get("--image-reference"), imageDigest: args.get("--image-digest"), skipBuild: args.has("--skip-build") });
+  await buildBundle({ output: args.get("--output"), version: args.get("--version"), commit: args.get("--commit"), imageReference: args.get("--image-reference"), imageDigest: args.get("--image-digest"), imageFingerprint: args.get("--image-fingerprint"), skipBuild: args.has("--skip-build") });
 }

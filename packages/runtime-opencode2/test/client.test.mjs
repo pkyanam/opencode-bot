@@ -301,6 +301,46 @@ test('computer browser is directly exposed and attaches to the live desktop CDP 
   } finally { if(previousDisplay===undefined)delete process.env.DISPLAY;else process.env.DISPLAY=previousDisplay;await rm(root,{recursive:true,force:true}); }
 });
 
+test('runtime startup returns after daemon health while MCP readiness continues in background', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-boot-'));
+  const directory = join(root, 'workspace');
+  let releaseMcp;
+  const mcpGate = new Promise(resolve => { releaseMcp = resolve; });
+  const fakeClient = {
+    server: { info: async () => ({}) },
+    mcp: { list: async () => { await mcpGate; return { data: [{ name: 'computer_browser', status: { status: 'connected' } }] }; } },
+    session: { create: async () => ({ id: 'ses_boot' }) },
+  };
+  const runtime = new OpenCode2Runtime({ root, directory, browser: true, service: { ensure: async () => ({ url: 'http://127.0.0.1:4096' }), stop: async () => undefined, headers: () => ({}) }, openCodeFactory: () => fakeClient });
+  let started = false;
+  const start = runtime.start().then(() => { started = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(started, true);
+  releaseMcp();
+  await start;
+  await runtime.createSession();
+  await rm(root, { recursive: true, force: true });
+});
+
+test('stopping and restarting clears a failed MCP readiness result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-mcp-restart-'));
+  const directory = join(root, 'workspace');
+  let connected = false;
+  const fakeClient = {
+    server: { info: async () => ({}) },
+    mcp: { list: async () => ({ data: [{ name: 'computer_browser', status: { status: connected ? 'connected' : 'failed' } }] }) },
+    session: { create: async () => ({ id: 'ses_restart' }) },
+  };
+  const runtime = new OpenCode2Runtime({ root, directory, browser: true, service: { ensure: async () => ({ url: 'http://127.0.0.1:4096' }), stop: async () => undefined, headers: () => ({}) }, openCodeFactory: () => fakeClient });
+  await runtime.start();
+  await assert.rejects(() => runtime.createSession(), /MCP failed/);
+  await runtime.stop();
+  connected = true;
+  await runtime.start();
+  assert.equal(await runtime.createSession(), 'ses_restart');
+  await rm(root, { recursive: true, force: true });
+});
+
 test('concurrent catalog readers share one native hydration pass', async () => {
   let calls=0;
   const list=async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,10));return {data:[{id:'test'}]};};

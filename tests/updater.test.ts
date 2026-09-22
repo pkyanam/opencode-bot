@@ -43,6 +43,26 @@ async function advance(h: ReturnType<typeof harness>, phases = 20) {
 }
 
 describe("resumable updater", () => {
+  it("keeps the running Computer when only the Worker changes", async () => {
+    const h = harness();
+    h.options.api.listContainerApplications = async () => [{ id: "app-1", name: "computer", configuration: { image: bundle().computerImage.reference } }];
+    await advance(h);
+    expect(h.job?.phase).toBe("completed");
+    expect(h.calls).toEqual(["idle", "assets", "worker", "promote", "health"]);
+    expect(h.calls).not.toContain("checkpoint");
+    expect(h.calls).not.toContain("rollout");
+    expect(h.calls).not.toContain("restore");
+    expect(h.job?.phaseTimings?.checkpointing).toBeUndefined();
+    expect(h.job?.phaseTimings?.quiescing?.durationMs).toBeDefined();
+  });
+
+  it("still checkpoints when the Computer image changes", async () => {
+    const h = harness({ phase: "quiescing", previous: { containerApplicationId: "app-1", imageReference: "docker.io/preethamk/opencode-bot@sha256:" + "0".repeat(64) } });
+    await resumeUpdate(h.options);
+    expect(h.job?.phase).toBe("checkpointing");
+    expect(h.calls).toEqual(["idle"]);
+  });
+
   it("resumes from a recorded uploaded version without repeating upload or promotion", async () => {
     const h = harness({ phase: "promoting", uploadedWorkerVersionId: "worker-new", previous: { workerVersionId: "worker-old" } });
     await resumeUpdate(h.options);

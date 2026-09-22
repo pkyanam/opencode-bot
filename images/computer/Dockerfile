@@ -33,14 +33,19 @@ RUN arch=x64 \
 WORKDIR /opt/opencode-bot
 COPY runner/package.json runner/package-lock.json* ./runner/
 COPY packages/runtime-opencode2/package.json ./packages/runtime-opencode2/
+# The headed browser is required by the desktop and browser MCP. The Chromium
+# headless shell is a separate download and is never launched.
 RUN cd runner && npm_config_ignore_scripts=false npm ci --omit=dev --include=optional \
   && npm_config_ignore_scripts=false npm rebuild @opencode/cli \
-  && npx playwright install --with-deps chromium \
+  && npx playwright install --with-deps --no-shell chromium \
   && test -x /opt/opencode-bot/runner/node_modules/@opencode/cli-linux-x64/bin/opencode \
   && test -x /opt/opencode-bot/runner/node_modules/.bin/playwright-mcp \
   && ln -sf /opt/opencode-bot/runner/node_modules/@opencode/cli-linux-x64/bin/opencode /usr/local/bin/opencode \
   && ln -sf /opt/opencode-bot/runner/node_modules/.bin/playwright-mcp /usr/local/bin/playwright-mcp \
-  && ln -s /opt/opencode-bot/runner/node_modules /opt/opencode-bot/node_modules
+  && ln -s /opt/opencode-bot/runner/node_modules /opt/opencode-bot/node_modules \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm cache clean --force \
+  && rm -rf /tmp/*
 COPY runner ./runner
 COPY packages/runtime-opencode2 ./packages/runtime-opencode2
 COPY packages/browser ./packages/browser

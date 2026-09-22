@@ -1137,6 +1137,9 @@ button:disabled {
 .mcp-auth-panel p { margin: 0; color: #b6a994; font-size: 11px; line-height: 1.4; }
 .mcp-auth-panel a { color: #d6aa7e; font-size: 11px; }
 .mcp-auth-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-pending-list { display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px solid #38352f; border-radius: 7px; }
+.mcp-pending-row { display: flex; align-items: center; gap: 7px; }
+.mcp-pending-row span { flex: 1; color: #c9c1b5; font-size: 11px; }
 .mcp-method-picker { display: flex; align-items: end; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #38352f; }
 .mcp-method-picker .field-label { margin: 0; flex: 1; }
 .storage-settings { display: flex; flex-direction: column; gap: 12px; }

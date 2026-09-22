@@ -6,11 +6,24 @@ Open **Settings → MCP services**, or type `/mcps` (`/mcp` is an alias).
 The list comes from the installed OpenCode runtime. Services that need credentials
 show **Sign in**. Choose a native OAuth method when more than one is available.
 
-Some services return to a localhost callback inside the hosted Computer. For
-these, choose **Sign in on Computer**, then **Take control** and **Open login in
-Computer**. Finish login directly in that browser, return control, and check the
-service's status. Never paste a password or MFA code into the bot conversation.
-The login attempt stays in Settings; Cancel cancels it through OpenCode.
+Choose **Sign in on this device** to open the service in your own browser.
+If login ends at a localhost callback that cannot load, copy the **entire address**
+(including `code` and `state`) into **Callback completion**, then select
+**Complete login**. That localhost listener belongs to the hosted Computer.
+The callback is a one-time login response, not an API token.
+
+Pending sign-ins can be resumed after closing Settings or reloading the same
+browser tab. Each service has its own attempt. Callback URLs and entered codes
+are not saved. An expired attempt or a Computer restart requires a new sign-in.
+
+Follow the instructions returned by each service: a service may finish
+automatically or provide a one-time code. API keys and custom authorization
+headers are separate from OAuth; configure those through Native OpenCode's MCP
+configuration until the web UI exposes the corresponding credential form.
+Not every service supports OAuth or every registration method.
+
+**Sign in on Computer** remains an alternative. Return desktop control before
+completing login in Settings. Never paste passwords or MFA codes into chat.
 
 For native operations without a web equivalent, open **Native OpenCode** and use
 its own interactive command menu. The web Commands menu combines the runtime's
@@ -57,11 +70,3 @@ shared files, and the browser profile in R2. The Cloudflare provider uses multip
 uploads and ranged restores for archives up to 2 GiB; adapters without those
 capabilities retain the 32 MiB limit. Restoration verifies the archive checksum
 before replacing workspace files. Keep independent backups of important files.
-
-### Sign in to an MCP service
-
-Open **Settings → MCP → Sign in**. **Sign in on Computer** opens the provider's authorization page inside the bot's Computer, where its callback listener runs. Expand the Computer and take control to complete the login. The service list checks the result automatically.
-
-You can also use **Open authorization link** in your own browser. Some services, including Cloudflare, finish at an address such as `http://127.0.0.1:12345/callback?code=…&state=…`. That address belongs to the remote Computer, so a connection error in your browser is expected. Copy the **entire address** into **Callback completion** and select **Complete login**. This is a one-time callback, not an API token.
-
-The app checks the callback against the exact pending login before delivering it to the Computer. An expired attempt or a Computer restart requires a fresh sign-in. Callback URLs are not saved as credentials; don't post them in chat or issues.

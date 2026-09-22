@@ -58,6 +58,8 @@ export type UpdateJob = {
   replacementWaitAttempts?: number;
   /** Phase to retry after an operator completes recovery from rollback_required. */
   resumePhase?: UpdatePhase;
+  /** Durable timing data for diagnosing slow control-plane phases. */
+  phaseTimings?: Partial<Record<UpdatePhase, { startedAt: string; completedAt?: string; durationMs?: number }>>;
 };
 
 export interface UpdateStore { read(): Promise<UpdateJob | null>; write(job: UpdateJob): Promise<void>; }
@@ -131,7 +133,24 @@ function decode(value: string): Uint8Array {
 }
 
 function transition(job: UpdateJob, phase: UpdatePhase, now: () => string, extra: Partial<UpdateJob> = {}): UpdateJob {
-  return { ...job, ...extra, phase, updatedAt: now(), error: undefined };
+  const timestamp = now();
+  const phaseTimings = { ...(job.phaseTimings ?? {}) };
+  if (job.phase !== phase) {
+    const previous = phaseTimings[job.phase];
+    if (previous && !previous.completedAt) phaseTimings[job.phase] = completePhaseTiming(previous, timestamp);
+    if (!phaseTimings[phase] || phaseTimings[phase]?.completedAt) phaseTimings[phase] = { startedAt: timestamp };
+  }
+  return { ...job, ...extra, phase, updatedAt: timestamp, phaseTimings, error: undefined };
+}
+
+function completePhaseTiming(timing: { startedAt: string; completedAt?: string; durationMs?: number }, completedAt: string) {
+  const started = Date.parse(timing.startedAt);
+  const ended = Date.parse(completedAt);
+  return { ...timing, completedAt, ...(Number.isFinite(started) && Number.isFinite(ended) ? { durationMs: Math.max(0, ended - started) } : {}) };
+}
+
+function computerImageUnchanged(job: UpdateJob, bundle: ReleaseBundle): boolean {
+  return job.previous?.imageReference === bundle.computerImage.reference;
 }
 
 /** Execute one bounded phase. Call repeatedly from a Durable Object alarm. */
@@ -162,7 +181,11 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
       job = transition(job, "quiescing", now, { previous: { workerVersionId: current.workerVersionId, deploymentId: current.deploymentId, containerApplicationId: app?.id, imageReference: typeof app?.configuration?.image === "string" ? app.configuration.image : undefined } });
       await options.store.write(job); return job;
     }
-    if (job.phase === "quiescing") { await options.lifecycle.assertIdle(); job = transition(job, "checkpointing", now); await options.store.write(job); return job; }
+    if (job.phase === "quiescing") {
+      await options.lifecycle.assertIdle();
+      job = transition(job, computerImageUnchanged(job, bundle) ? "uploading_assets" : "checkpointing", now);
+      await options.store.write(job); return job;
+    }
     if (job.phase === "checkpointing") {
       const checkpoint = await options.lifecycle.checkpoint();
       if (!checkpoint?.id || !/^[A-Za-z0-9._:-]{1,200}$/.test(checkpoint.id) || !/^sha256:[0-9a-f]{64}$/.test(checkpoint.sha256)) fail("checkpoint receipt is missing a valid id or sha256");
@@ -184,7 +207,7 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
     if (job.phase === "promoting") {
       if (!job.uploadedWorkerVersionId) fail("worker version is missing");
       const promoted = await options.api.promote(job.uploadedWorkerVersionId!);
-      job = transition(job, "rolling_out_container", now, { deploymentId: promoted.deploymentId }); await options.store.write(job); return job;
+      job = transition(job, computerImageUnchanged(job, bundle) ? "health_check" : "rolling_out_container", now, { deploymentId: promoted.deploymentId }); await options.store.write(job); return job;
     }
     if (job.phase === "rolling_out_container") {
       const applicationId = job.previous?.containerApplicationId;
@@ -232,12 +255,17 @@ export async function resumeUpdate(options: UpdaterOptions): Promise<UpdateJob |
     // whose image has already changed. Leave the checkpoint and maintenance
     // fence intact for an operator-driven recovery action.
     const promotionMayHaveHappened = ["promoting", "rolling_out_container", "waiting_container", "restoring", "health_check"].includes(job.phase);
+    const timestamp = now();
+    const phaseTimings = { ...(job.phaseTimings ?? {}) };
+    const currentTiming = phaseTimings[job.phase];
+    if (currentTiming && !currentTiming.completedAt) phaseTimings[job.phase] = completePhaseTiming(currentTiming, timestamp);
     job = {
       ...job,
       phase: promotionMayHaveHappened ? "rollback_required" : "failed",
       resumePhase: promotionMayHaveHappened ? job.phase : undefined,
       error: message,
-      updatedAt: now(),
+      updatedAt: timestamp,
+      phaseTimings,
     };
     await options.store.write(job); return job;
   }
