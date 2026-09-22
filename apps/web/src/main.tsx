@@ -2721,7 +2721,6 @@ function ModelPicker({
     .filter((item) => item.id);
   const selectedHash = value.indexOf("#");
   const selectedModel = selectedHash < 0 ? value : value.slice(0, selectedHash);
-  const selectedVariant = selectedHash < 0 ? "" : value.slice(selectedHash + 1);
   const filtered = normalized.filter((item) =>
     `${item.id} ${item.provider} ${item.variants.map((variant) => `${variant.id} ${variant.name}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()),
   );
@@ -2800,11 +2799,11 @@ function ModelPicker({
                       : "Pricing unavailable"}
                 </div>
                 {group.map((item) => (
-                  <div key={item.id}>
+                  <div key={item.id} className="model-choice">
                     <button
                       type="button"
                       role="option"
-                      aria-selected={selectedModel === item.id && !selectedVariant}
+                      aria-selected={selectedModel === item.id}
                       className="model-option"
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => {
@@ -2813,12 +2812,13 @@ function ModelPicker({
                         setOpen(false);
                       }}
                     >
-                      <span>{item.id}</span>
+                      <span className="model-option-name" title={item.id}>{String(item.model.name || item.id.replace(`${item.provider}/`, ""))}</span>
                       <small>{item.provider || "catalog"}</small>
                     </button>
                     {item.variants.length > 0 && (
                       <div className="model-variants" aria-label={`Variants for ${item.id}`}>
-                        <span>Variant</span>
+                        <span className="model-variants-label">Effort</span>
+                        <div className="model-variant-options">
                         {item.variants.map((variant) => {
                           const variantValue = `${item.id}#${variant.id}`;
                           return (
@@ -2834,10 +2834,11 @@ function ModelPicker({
                                 setOpen(false);
                               }}
                             >
-                              {variant.name}
+                              {variant.name.charAt(0).toUpperCase() + variant.name.slice(1)}
                             </button>
                           );
                         })}
+                        </div>
                       </div>
                     )}
                   </div>

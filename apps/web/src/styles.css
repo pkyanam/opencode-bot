@@ -2692,40 +2692,76 @@ a:focus-visible {
   margin-top: 6px;
   left: 0;
   right: 0;
-  background: #211a15;
-  border: 1px solid #5b4838;
-  border-radius: 5px;
-  max-height: 250px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: min(340px, 45dvh);
   overflow: auto;
-  box-shadow: 0 12px 32px #0008;
+  overscroll-behavior: contain;
+  box-shadow: 0 16px 40px #0006;
 }
 .model-group-label {
-  padding: 12px;
-  color: #ac9582;
-  font-size: 9px;
+  padding: 10px 10px 8px;
+  color: var(--muted);
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
 }
+.model-choice {
+  border-radius: 5px;
+  margin-bottom: 3px;
+  overflow: hidden;
+}
+.model-choice:has([aria-selected="true"]) {
+  background: var(--panel-2);
+}
 .model-option {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
   text-align: left;
   width: 100%;
-  padding: 10px 12px;
+  padding: 11px 10px;
   background: transparent;
   border: 0;
-  color: #e9d9ca;
-  font-size: 12px;
-  overflow-wrap: anywhere;
+  color: var(--cream);
+  font-size: 13px;
+  line-height: 1.5;
 }
-.model-option:hover,
-.model-option[aria-selected="true"] {
-  background: #35291f;
-}
+.model-option:hover { background: var(--panel-2); }
+.model-option-name { min-width: 0; overflow-wrap: anywhere; }
 .model-option small {
-  color: #a58c77;
+  flex-shrink: 0;
+  color: var(--muted);
   font-size: 10px;
+}
+.model-variants {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 10px 12px;
+  font-size: 10px;
+}
+.model-variants-label { color: var(--muted); padding-top: 5px; }
+.model-variant-options { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.model-variant {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  padding: 5px 9px;
+  color: var(--soft);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.model-variant:hover { color: var(--cream); border-color: var(--muted); }
+.model-variant[aria-pressed="true"] { background: var(--cream); border-color: var(--cream); color: var(--bg); }
+.model-option:focus-visible, .model-variant:focus-visible { outline: 2px solid var(--cream); outline-offset: -2px; }
+@media (max-width: 480px) {
+  .model-option { flex-wrap: wrap; gap: 2px 10px; }
+  .model-option-name { flex-basis: 100%; }
 }
 .model-empty {
   padding: 15px;
