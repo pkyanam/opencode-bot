@@ -127,12 +127,12 @@ methods that the runtime advertises; it does not claim to expose every native
 resource browsing, or other TUI/CLI-only operations.
 
 When a service needs OAuth, choose **Sign in** and select a method if the
-runtime reports more than one. Use **Sign in on Computer** for services whose
-callback must reach the headed shared browser. Take control only while the
-Computer is idle, choose **Open login in Computer**, finish the login there,
-then choose **Return to bot** before resuming work. The login URL is kept only
-in the open settings flow. Never paste passwords, API keys, or MFA codes into
-the bot conversation.
+runtime reports more than one. **Sign in on this device** opens your own browser.
+If it finishes at a localhost callback that cannot load, paste the full address
+into **Callback completion**. Pending attempts survive closing Settings and
+reloading the same tab; use **Pending sign-ins → Resume**. Entered callbacks and
+codes are not saved. See [service authentication](mcp-service-auth.md) for
+supported methods and limitations. Never paste passwords or MFA codes into chat.
 
 The web command menu combines the live native session command catalog, supported
 session actions, and workspace shortcuts. It is not a prompt-based wrapper for
