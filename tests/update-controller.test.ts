@@ -38,6 +38,13 @@ describe("UpdateController", () => {
     expect(h.schedule).not.toHaveBeenCalled();
   });
 
+  it("re-enters restoring before health check when a retained checkpoint exists", async () => {
+    const h = harness({ job: { ...baseJob("rollback_required"), resumePhase: "health_check", checkpointId: "shared:1:2" }, config: { accountId: "a", workerName: "w", token: "t".repeat(20) } });
+    await h.controller.recover();
+    expect(h.job?.phase).toBe("restoring");
+    expect(h.schedule).toHaveBeenCalled();
+  });
+
   it("refuses to start a second version while work is active", async () => {
     const h = harness({ job: baseJob("waiting_container"), config: { accountId: "a", workerName: "w", token: "t".repeat(20) } });
     await expect(h.controller.start("v2.0.1")).rejects.toThrow("already in progress");

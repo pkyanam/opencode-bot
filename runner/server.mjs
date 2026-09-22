@@ -520,20 +520,32 @@ export class RunStore {
     await this.recoverNativeOwnership();
     if (this.configuring || this.paused || this.ownershipUncertain || this.desktop?.controlStatus?.().active) throw httpError(409, "computer settings or checkpoint are being updated");
     this.paused = true;
-    // Preserve the fast conflict response for ordinary active work. A run
-    // already in review may still be unwinding after an ownership loss, so it
-    // is drained by the runtime idle barrier below before the archive starts.
-    const activeBeforeWait = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");
-    if (activeBeforeWait.length) { this.paused = false; throw httpError(409, "cannot checkpoint while runs are active"); }
-    await this.waitForRuntimeIdle();
-    if (this.terminalRegistry?.active()) { this.paused = false; throw httpError(409, "cannot checkpoint while terminal controller is active"); }
-    const active = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");
-    if (active.length) { this.paused = false; throw httpError(409, "cannot checkpoint while runs are active"); }
-    if (this.runtime.stop) await this.runtime.stop();
-    const checkpoint = { version: 1, createdAt: new Date().toISOString(), runs: [...this.runs.values()].map((run) => ({ runId: run.id, status: run.status, sessionId: run.sessionId, eventSeq: run.events.length })) };
-    if (this.stateDir) fs.writeFileSync(path.join(this.stateDir, "checkpoint.json.tmp"), JSON.stringify(checkpoint));
-    if (this.stateDir) fs.renameSync(path.join(this.stateDir, "checkpoint.json.tmp"), path.join(this.stateDir, "checkpoint.json"));
-    return checkpoint;
+    let prepared = false;
+    try {
+      // Preserve the fast conflict response for ordinary active work. A run
+      // already in review may still be unwinding after an ownership loss, so it
+      // is drained by the runtime idle barrier below before the archive starts.
+      const activeBeforeWait = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");
+      if (activeBeforeWait.length) throw httpError(409, "cannot checkpoint while runs are active");
+      await this.waitForRuntimeIdle();
+      if (this.terminalRegistry?.active()) throw httpError(409, "cannot checkpoint while terminal controller is active");
+      const active = [...this.runs.values()].filter((run) => !isTerminal(run.status) && run.status !== "needs_review");
+      if (active.length) throw httpError(409, "cannot checkpoint while runs are active");
+      if (this.runtime.stop) await this.runtime.stop();
+      const checkpoint = { version: 1, createdAt: new Date().toISOString(), runs: [...this.runs.values()].map((run) => ({ runId: run.id, status: run.status, sessionId: run.sessionId, eventSeq: run.events.length })) };
+      if (this.stateDir) fs.writeFileSync(path.join(this.stateDir, "checkpoint.json.tmp"), JSON.stringify(checkpoint));
+      if (this.stateDir) fs.renameSync(path.join(this.stateDir, "checkpoint.json.tmp"), path.join(this.stateDir, "checkpoint.json"));
+      // From this point the provider may begin archiving the quiesced disk;
+      // only its explicit /checkpoint/resume may clear the barrier.
+      prepared = true;
+      return checkpoint;
+    } catch (error) {
+      // Failures before returning a checkpoint have not handed the archive a
+      // quiesced filesystem, so release the barrier for a safe retry. Keep it
+      // set after successful preparation until the provider resumes explicitly.
+      if (!prepared) this.paused = false;
+      throw error;
+    }
   }
 
   async resume() {

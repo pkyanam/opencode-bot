@@ -26,6 +26,12 @@ export type RunnerState = {
   fresh?: boolean;
   checkpointId?: string;
   activeRuns?: number;
+  quiesced?: boolean;
+  paused?: boolean;
+  configuring?: boolean;
+  ownershipUncertain?: boolean;
+  humanControlActive?: boolean;
+  nativeTerminalActive?: boolean;
 };
 
 export type ComputerReadiness = {
@@ -152,6 +158,12 @@ function parseRunnerState(value: unknown): RunnerState {
     fresh: candidate.fresh === true,
     checkpointId: typeof candidate.checkpointId === "string" ? candidate.checkpointId : undefined,
     activeRuns: typeof candidate.activeRuns === "number" ? candidate.activeRuns : undefined,
+    quiesced: candidate.quiesced === true,
+    paused: candidate.paused === true,
+    configuring: candidate.configuring === true,
+    ownershipUncertain: candidate.ownershipUncertain === true,
+    humanControlActive: candidate.humanControlActive === true,
+    nativeTerminalActive: candidate.nativeTerminalActive === true,
   };
 }
 

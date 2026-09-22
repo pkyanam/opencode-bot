@@ -220,6 +220,14 @@ test("checkpoint refuses active work and maps product approval to v2 decision", 
   await assert.rejects(() => store.approval(run, { requestId: "p1", decision: "approve" }), (error) => error.statusCode === 409);
 });
 
+test("checkpoint clears quiescence when preparation fails before returning an archive barrier", async () => {
+  const fake = new FakeRuntime();
+  fake.stop = async () => { throw new Error("runtime stop failed"); };
+  const store = new RunStore(fake);
+  await assert.rejects(() => store.checkpoint(), /runtime stop failed/);
+  assert.equal(store.paused, false);
+});
+
 test("quiescing blocks catalog and desktop startup while the archive is active", async () => {
   const fake = new FakeRuntime();
   const desktop = {

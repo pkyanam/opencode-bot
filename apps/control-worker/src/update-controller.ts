@@ -88,7 +88,11 @@ export class UpdateController {
     if (job?.phase !== "rollback_required" || !job.resumePhase) throw new Error("There is no paused update to resume.");
     if (!await this.config()) throw new Error("Restore update access first.");
     await this.options.lifecycle.assertIdle();
-    await this.options.storage.put(jobKey, { ...job, phase: job.resumePhase, error: undefined, rolloutWaitAttempts: 0, replacementWaitAttempts: 0, updatedAt: new Date().toISOString() });
+    // A health check can run against a replacement runner before its restored
+    // checkpoint identity is visible. Re-enter restoring when a retained
+    // checkpoint exists so the next alarm repairs state before checking health.
+    const phase = job.resumePhase === "health_check" && job.checkpointId ? "restoring" : job.resumePhase;
+    await this.options.storage.put(jobKey, { ...job, phase, error: undefined, rolloutWaitAttempts: 0, replacementWaitAttempts: 0, updatedAt: new Date().toISOString() });
     this.options.schedule();
     return this.status();
   }

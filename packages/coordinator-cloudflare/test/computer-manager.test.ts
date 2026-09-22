@@ -56,4 +56,10 @@ describe("ComputerManager", () => {
     expect(pointers.value?.runnerInstanceId).toBe("current");
     expect((await manager.prepare({ computerId: "shared", runnerToken: "token" })).state).toBe("ready");
   });
+
+  it("retains runner quiescence blocker fields for diagnostics", async () => {
+    const manager = new ComputerManager(fakeProvider({ instanceId: "current", quiesced: false, humanControlActive: true, nativeTerminalActive: true, configuring: false, ownershipUncertain: false }, []), store());
+    const readiness = await manager.prepare({ computerId: "shared", runnerToken: "token" });
+    expect(readiness.runnerState).toMatchObject({ humanControlActive: true, nativeTerminalActive: true, configuring: false, ownershipUncertain: false });
+  });
 });

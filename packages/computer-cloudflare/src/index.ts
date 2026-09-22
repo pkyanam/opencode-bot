@@ -255,7 +255,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
       const transport = this.transport(managed, managed.generation, managed.spec.runnerToken);
       const quiesced = await transport.fetch("/checkpoint/quiesce", { method: "POST" });
       if (!quiesced.ok) {
-        throw new Error(`Runner refused checkpoint quiesce (HTTP ${quiesced.status})`);
+        throw new Error(`Runner refused checkpoint quiesce (HTTP ${quiesced.status})${await runnerResponseDetail(quiesced)}`);
       }
       const paths = this.options.checkpointPaths ?? ["/workspace/state", managed.spec.workspacePath, "/workspace/browser"];
       validateCheckpointPaths(paths, managed.spec.workspacePath);
@@ -329,7 +329,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
     const archiveName = `/tmp/opencode-bot-restore-${safeId(id)}.tar.gz`;
     const transport = this.transport(managed, managed.generation, managed.spec.runnerToken);
     const quiesced = await transport.fetch("/checkpoint/quiesce", { method: "POST" });
-    if (!quiesced.ok) throw new Error(`Runner refused restore quiesce (HTTP ${quiesced.status})`);
+    if (!quiesced.ok) throw new Error(`Runner refused restore quiesce (HTTP ${quiesced.status})${await runnerResponseDetail(quiesced)}`);
     try {
       if (ranged && bucket.head) {
         await rangedRestore(bucket, checkpoint.checkpointKey, objectSize, managed.sandbox, archiveName);
@@ -771,6 +771,23 @@ function validateArchiveListing(listing: string, roots: string[]): void {
     if (!entry) continue;
     if (entry.startsWith("../") || entry.includes("/../") || entry === ".." || entry.includes("\\")) throw new Error(`Checkpoint archive contains unsafe path: ${rawEntry}`);
     if (!relativeRoots.some((root) => entry === root || entry.startsWith(`${root}/`))) throw new Error(`Checkpoint archive contains path outside configured roots: ${rawEntry}`);
+  }
+}
+
+/** Preserve a bounded, non-secret runner rejection reason for diagnosis. */
+async function runnerResponseDetail(response: Response): Promise<string> {
+  let raw = "";
+  try { raw = (await response.text()).slice(0, 2048); } catch { return ""; }
+  if (!raw) return "";
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const reason = [value.error, value.code, value.reason]
+      .filter((item): item is string => typeof item === "string" && item.length > 0)
+      .map((item) => item.replace(/[\r\n]/g, " ").slice(0, 256));
+    return reason.length ? `: ${reason.join("; ")}` : "";
+  } catch {
+    const text = raw.replace(/[\r\n]/g, " ").trim().slice(0, 256);
+    return text ? `: ${text}` : "";
   }
 }
 

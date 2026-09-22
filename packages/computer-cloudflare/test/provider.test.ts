@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "vitest";
 import { CloudflareComputerProvider, type CloudflareSandboxBinding } from "../src/index.js";
 
-function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; sdkStream?: boolean; resumeFailure?: boolean; states?: string[]; stopFailure?: boolean } = {}) {
+function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; sdkStream?: boolean; resumeFailure?: boolean; quiesceFailure?: { status: number; body?: unknown }; states?: string[]; stopFailure?: boolean } = {}) {
   let starts = 0;
   const calls = options.calls ?? [];
   const process = {
@@ -17,6 +17,7 @@ function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number;
     containerFetch: async (_url: string, init: RequestInit) => {
       calls.push(`${init.method ?? "GET"} ${_url}`);
       if (options.resumeFailure && _url.endsWith("/checkpoint/resume")) return new Response(null, { status: 503 });
+      if (options.quiesceFailure && _url.endsWith("/checkpoint/quiesce")) return new Response(JSON.stringify(options.quiesceFailure.body ?? {}), { status: options.quiesceFailure.status, headers: { "content-type": "application/json" } });
       if (init.method === "GET") {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
@@ -163,6 +164,20 @@ it("quiesces, uploads, and restores an R2 checkpoint, including resume on size r
   const second = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => oversized as never, checkpointBucket: bucket as never, maxCheckpointBytes: 10 });
   await second.ensure({ computerId: "c4", runnerToken: "secret" });
   await assert.rejects(() => second.checkpoint("c4", 1), /maximum/);
+});
+
+it("preserves a bounded runner quiesce rejection reason", async () => {
+  const sandbox = fakeSandbox({ quiesceFailure: { status: 409, body: { error: "Computer is under manual control", code: "human_control_active", secret: "must-not-be-included" } } });
+  const bucket = { put: async () => undefined, get: async () => null };
+  const provider = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => sandbox as never, checkpointBucket: bucket as never });
+  await provider.ensure({ computerId: "blocked", runnerToken: "secret" });
+  await assert.rejects(() => provider.checkpoint("blocked", 1), (error: Error) => {
+    assert.match(error.message, /HTTP 409/);
+    assert.match(error.message, /manual control/);
+    assert.match(error.message, /human_control_active/);
+    assert.doesNotMatch(error.message, /must-not-be-included/);
+    return true;
+  });
 });
 
 it("checks the archive size before buffering and surfaces a failed resume", async () => {
