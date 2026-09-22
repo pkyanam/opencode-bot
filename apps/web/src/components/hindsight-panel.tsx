@@ -411,7 +411,7 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
                   settingsDirty.current = true;
                   setUrl(e.target.value);
                 }}
-                placeholder="Built-in Cloudflare Hindsight"
+                placeholder="Built-in Hindsight"
               />
             </label>
             <label>

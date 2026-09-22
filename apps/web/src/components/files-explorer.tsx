@@ -33,7 +33,7 @@ const fmtSize = (value = 0) =>
       ? `${Math.ceil(value / 1024)} KB`
       : `${(value / 1024 / 1024).toFixed(1)} MB`;
 type FileNode = { id: string; name: string; online: boolean; revokedAt?: string };
-export function FilesExplorer({ nodeId, nodes = [] }: { nodeId?: string; nodes?: FileNode[] }) {
+export function FilesExplorer({ nodeId, nodes = [], computerLabel = "Shared computer" }: { nodeId?: string; nodes?: FileNode[]; computerLabel?: string }) {
   const [selectedNodeId, setSelectedNodeId] = useState(nodeId ?? "");
   const [scope, setScope] = useState<"workspace" | "computer">("workspace");
   const [path, setPath] = useState(".");
@@ -211,7 +211,7 @@ export function FilesExplorer({ nodeId, nodes = [] }: { nodeId?: string; nodes?:
     <main className="main workspace-surface files-explorer">
       <div className="surface-head">
           <div>
-          <div className="eyebrow">{activeNodeId ? nodes.find(node => node.id === activeNodeId)?.name ?? "Selected computer" : "Cloudflare shared computer"}</div>
+          <div className="eyebrow">{activeNodeId ? nodes.find(node => node.id === activeNodeId)?.name ?? "Selected computer" : computerLabel}</div>
           <h1>Files</h1>
           <p>{scope === "workspace" ? "Browse and download artifacts created by your bots." : "Browse files on the selected computer."}</p>
         </div>
@@ -249,7 +249,7 @@ export function FilesExplorer({ nodeId, nodes = [] }: { nodeId?: string; nodes?:
         <button className={scope === "computer" ? "primary-btn" : "soft-btn"} onClick={() => setScope("computer")}>Computer files</button>
         <label htmlFor="files-node">Computer</label>
         <select id="files-node" value={selectedNodeId} onChange={(event) => setSelectedNodeId(event.target.value)}>
-          <option value="">Cloudflare shared computer</option>
+          <option value="">{computerLabel}</option>
           {nodes.filter((node) => !node.revokedAt).map((node) => <option key={node.id} value={node.id}>{node.name}{node.online ? "" : " · offline"}</option>)}
         </select>
       </div>

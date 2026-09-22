@@ -68,6 +68,7 @@ type Env = {
   APP_WORKER_NAME?: string;
   RUNNER_TOKEN?: string;
   HOSTING_PROVIDER?: string;
+  DEFAULT_COMPUTER_LABEL?: string;
   RELEASE_COMMIT?: string;
   APP_UPDATER?: { status(): Promise<unknown>; start(version: unknown): Promise<unknown>; recover(): Promise<unknown> };
   AI?: Ai;
@@ -1188,7 +1189,12 @@ export class Workspace {
     });
   }
   private stateView(): any {
-    return { bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at,attachments:parseJson(m.attachments,[])})) };
+    return { deployment: this.hostMetadata(), host: this.hostMetadata(), bots: this.bots(), threads: this.threads(), runs: this.runs(), pendingMessages: this.rows<any>("SELECT m.* FROM message_inputs m JOIN runs r ON r.id=m.run_id WHERE m.status IN ('pending','dispatching','needs_review') OR (m.status='accepted' AND r.status NOT IN ('succeeded','failed','cancelled','needs_review')) ORDER BY m.created_at LIMIT 100").map(m => ({id:m.idempotency_key,threadId:m.thread_id,runId:m.run_id,content:m.prompt,status:m.status,nativeId:m.native_id,createdAt:m.created_at,attachments:parseJson(m.attachments,[])})) };
+  }
+  private hostMetadata() {
+    const provider = this.env.HOSTING_PROVIDER === "boat" || this.env.HOSTING_PROVIDER === "local" ? this.env.HOSTING_PROVIDER : "cloudflare";
+    const defaultComputerLabel = this.env.DEFAULT_COMPUTER_LABEL ?? (provider === "boat" ? "Boat computer" : provider === "local" ? "Local computer" : "Cloudflare computer");
+    return { host: provider, computerLabel: defaultComputerLabel };
   }
   private routines(): any[] {
     return this.rows<any>("SELECT * FROM routines ORDER BY created_at").map(
@@ -2762,7 +2768,12 @@ export class Workspace {
     return keys.filter((key): key is string => typeof key === "string");
   }
   private async storageRoute(request: Request, url: URL): Promise<Response> {
-    if (!this.env.ARTIFACTS) throw new HttpError(409, "Deployment storage is unavailable");
+    const host = this.hostMetadata();
+    const storage = { backend: host.host === "cloudflare" ? "r2" : "local", supportsAutomaticCheckpoints: Boolean(this.env.ARTIFACTS), durable: Boolean(this.env.ARTIFACTS), metered: host.host === "cloudflare", scope: "artifact-objects" };
+    if (!this.env.ARTIFACTS) {
+      if (request.method !== "GET" || url.pathname !== "/api/storage") throw new HttpError(409, "Deployment storage is unavailable");
+      return response({ objects: [], totals: { bytes: 0, checkpointBytes: 0, otherBytes: 0, objects: 0 }, truncated: false, storage, policy: await this.backupPolicy(), lastAutomaticCheckpointAt: await this.state.storage.get("backup:lastAutomaticAt"), lastError: await this.state.storage.get("backup:lastError") });
+    }
     if (request.method === "POST") {
       if (this.maintenance) throw new HttpError(409, "Wait for Computer maintenance to finish");
       const input = await body(request);
@@ -2780,7 +2791,7 @@ export class Workspace {
       } else throw new HttpError(404, "Storage operation not found");
     } else if (request.method !== "GET" || url.pathname !== "/api/storage") throw new HttpError(405, "Method not allowed");
     const listing = await listStorageObjects(this.env.ARTIFACTS, { checkpointPrefix: "checkpoints/shared", protectedKeys: await this.protectedCheckpointKeys() });
-    return response({ ...listing, objects: listing.objects.map(({ key, size, uploaded, category, protected: protectedObject }) => ({ key, size, uploaded, category, protected: protectedObject })), policy: await this.backupPolicy(), lastAutomaticCheckpointAt: await this.state.storage.get("backup:lastAutomaticAt"), lastError: await this.state.storage.get("backup:lastError") });
+    return response({ ...listing, objects: listing.objects.map(({ key, size, uploaded, category, protected: protectedObject }) => ({ key, size, uploaded, category, protected: protectedObject })), storage, policy: await this.backupPolicy(), lastAutomaticCheckpointAt: await this.state.storage.get("backup:lastAutomaticAt"), lastError: await this.state.storage.get("backup:lastError") });
   }
   private async pruneCheckpoints(): Promise<void> {
     if (!this.env.ARTIFACTS) return;

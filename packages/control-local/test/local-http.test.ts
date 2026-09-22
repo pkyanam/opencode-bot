@@ -37,8 +37,12 @@ test("bundled control-local serves real Workspace and persists SQLite state", { 
     const ready = await waitFor(`http://127.0.0.1:${port}/api/state`, headers);
     assert.equal(ready.status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/bots`)).status, 401);
-    const state = await ready.json() as { bots: unknown[] };
+    const state = await ready.json() as { bots: unknown[]; deployment?: { host: string; computerLabel: string } };
     assert.deepEqual(state.bots, []);
+    assert.deepEqual(state.deployment, { host: "local", computerLabel: "Local computer" });
+    const storage = await (await fetch(`http://127.0.0.1:${port}/api/storage`, { headers })).json() as { storage?: { backend: string; supportsAutomaticCheckpoints: boolean } };
+    assert.equal(storage.storage?.backend, "local");
+    assert.equal(storage.storage?.supportsAutomaticCheckpoints, true);
     const bot = await (await fetch(`http://127.0.0.1:${port}/api/bots`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ name: "Integration bot" }) })).json() as { id: string };
     assert.match(bot.id, /^bot_/);
     await waitReady(`http://127.0.0.1:${port}/api/computer/readiness`, headers);
@@ -52,6 +56,10 @@ test("bundled control-local serves real Workspace and persists SQLite state", { 
     child = execFile(process.execPath, [join(root, "packages/control-local/dist/control-local.js")], { cwd: root, env });
     const bots = await (await waitFor(`http://127.0.0.1:${port}/api/bots`, headers)).json() as Array<{ id: string }>;
     assert.equal(bots[0]?.id, bot.id);
+    child.kill("SIGTERM"); await new Promise(resolve => child.once("exit", resolve));
+    child = execFile(process.execPath, [join(root, "packages/control-local/dist/control-local.js")], { cwd: root, env: { ...env, HOSTING_PROVIDER: "boat" } });
+    const boatState = await (await waitFor(`http://127.0.0.1:${port}/api/state`, headers)).json() as { deployment?: { host: string; computerLabel: string } };
+    assert.deepEqual(boatState.deployment, { host: "boat", computerLabel: "Boat computer" });
   } finally {
     child.kill("SIGTERM");
     await new Promise(resolve => child.once("exit", resolve));

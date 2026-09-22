@@ -258,7 +258,7 @@ export async function createLocalControl(
   const appToken =
     options.appToken ??
     (await tokenFromFile(options.appTokenFile)) ??
-    options.env?.APP_TOKEN;
+    (typeof options.env?.APP_TOKEN === "string" ? options.env.APP_TOKEN : undefined);
   if (!appToken) {
     storage.close();
     throw new Error("APP_TOKEN or appTokenFile is required for control-local");
@@ -266,12 +266,19 @@ export async function createLocalControl(
   const runnerToken =
     options.runnerToken ??
     (await tokenFromFile(options.runnerTokenFile)) ??
-    options.env?.RUNNER_TOKEN ??
+    (typeof options.env?.RUNNER_TOKEN === "string" ? options.env.RUNNER_TOKEN : undefined) ??
     appToken;
+  const hostingProvider = typeof options.env?.HOSTING_PROVIDER === "string" ? options.env.HOSTING_PROVIDER : "local";
+  const defaultComputerLabel = typeof options.env?.DEFAULT_COMPUTER_LABEL === "string"
+    ? options.env.DEFAULT_COMPUTER_LABEL
+    : hostingProvider === "local" ? "Local computer" : undefined;
   const env = {
     ...(options.env ?? {}),
     APP_TOKEN: appToken,
     RUNNER_TOKEN: runnerToken,
+    HOSTING_PROVIDER: hostingProvider,
+    ...(defaultComputerLabel ? { DEFAULT_COMPUTER_LABEL: defaultComputerLabel } : {}),
+    WORKSPACE: null as unknown as DurableObjectNamespace,
   } as LocalEnv;
   if (options.boatUpdater) env.APP_UPDATER = options.boatUpdater;
   env.WORKSPACE = namespace(ctor, storage, env, options.workspaceFactory);
@@ -410,6 +417,10 @@ export async function startLocalControl(
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const control = await startLocalControl({
+    env: {
+      ...(process.env.HOSTING_PROVIDER ? { HOSTING_PROVIDER: process.env.HOSTING_PROVIDER } : {}),
+      ...(process.env.DEFAULT_COMPUTER_LABEL ? { DEFAULT_COMPUTER_LABEL: process.env.DEFAULT_COMPUTER_LABEL } : {}),
+    },
     host: process.env.APP_HOST ?? "127.0.0.1",
     port: Number(process.env.APP_PORT ?? 8789),
     databasePath: process.env.OPENCODE_STATE ?? "./.local/control.sqlite",

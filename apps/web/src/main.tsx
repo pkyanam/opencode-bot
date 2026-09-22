@@ -1032,7 +1032,7 @@ function App() {
             }}
           />
         ) : surface === "files" ? (
-          <FilesWorkspace bot={bot} />
+          <FilesWorkspace bot={bot} computerLabel={state.deployment?.computerLabel ?? state.host?.computerLabel} />
         ) : (
           <main className="main">
             {(computerWarming || catalogWarming) && !computerOpen && (
@@ -1264,10 +1264,10 @@ function App() {
         )}
         {surface === "chat" && (
             <ComputerPreview
-              key={`${connectionRevision}:${thread?.nodeId ?? bot?.nodeId ?? "cloudflare"}`}
+              key={`${connectionRevision}:${thread?.nodeId ?? bot?.nodeId ?? "shared"}`}
               // A thread's affinity is authoritative once it exists. Before
               // the first message, use the bot's configured execution node
-              // so the preview cannot silently fall back to Cloudflare.
+              // so the preview cannot silently fall back to another computer.
               nodeId={thread?.nodeId ?? bot?.nodeId}
               open={computerOpen}
               loginUrl={requestedLoginUrl}
@@ -2197,14 +2197,14 @@ function SkillsWorkspace({
   );
 }
 
-function FilesWorkspace({ bot }: { bot?: Bot }) {
+function FilesWorkspace({ bot, computerLabel }: { bot?: Bot; computerLabel?: string }) {
   const [nodes, setNodes] = useState<Array<{ id: string; name: string; online: boolean; revokedAt?: string }>>([]);
   useEffect(() => {
     void request<{ nodes: Array<{ id: string; name: string; online: boolean; revokedAt?: string }> }>("/api/nodes")
       .then((result) => setNodes(result.nodes.filter((node) => !node.revokedAt)))
       .catch(() => setNodes([]));
   }, []);
-  return <FilesExplorer nodeId={bot?.nodeId} nodes={nodes} />;
+  return <FilesExplorer nodeId={bot?.nodeId} nodes={nodes} computerLabel={computerLabel} />;
 }
 
 function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
@@ -2630,7 +2630,7 @@ function ComputerModal({
             <span>
               {status?.computerId
                 ? `Computer ${status.computerId}`
-                : "Cloud execution computer"}
+                : "Shared execution computer"}
             </span>
           </div>
         </div>
@@ -2929,7 +2929,7 @@ function BotModal({
     setNodeCatalogLoading(true);
     // Always load the target's catalog. The parent catalog may describe the
     // currently selected bot's node, which is unrelated when creating or
-    // editing a bot for another target (including the shared Cloudflare node).
+    // editing a bot for another target (including the shared computer).
     void api.catalog(nodeId || undefined).then((next) => {
       if (catalogRequest.current === requestID) setNodeCatalog(next);
     }).catch((e) => {
@@ -3013,7 +3013,7 @@ function BotModal({
           value={nodeId}
           onChange={(e) => changeNode(e.target.value)}
         >
-          <option value="">Cloudflare shared computer</option>
+          <option value="">Shared computer</option>
           {nodes.map((n) => (
             <option key={n.id} value={n.id}>
               {n.name}

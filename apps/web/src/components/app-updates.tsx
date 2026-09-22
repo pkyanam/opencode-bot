@@ -308,10 +308,10 @@ export function AppUpdates() {
         <>
           <p className="app-update-copy">
             {status?.host === "boat"
-              ? "Finish active work before updating. Your bots, files, and connection stay on this Box; the app reconnects after installation."
+              ? "Finish active work before updating. Your bots, files, and connection stay on this Boat installation; the app reconnects after installation."
               : "Active work must finish first. The updater saves a Computer checkpoint before changing the app."}
           </p>
-          {status?.host !== "boat" && (!status?.configured || replaceAccess) ? (
+          {status && status.host !== "boat" && (!status.configured || replaceAccess) ? (
             <div className="update-config">
               <h4>
                 {replaceAccess ? "Replace deployment token" : "Enable updates"}

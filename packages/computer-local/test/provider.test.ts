@@ -75,6 +75,25 @@ describe("LocalComputerProvider", () => {
     ).rejects.toThrow(/generation/);
   });
 
+  it("keeps preview bodies alive beyond the request timeout and respects caller cancellation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "local-preview-")); roots.push(root);
+    let previewSignal: AbortSignal | undefined;
+    const provider = new LocalComputerProvider({ dataDir: root, requestTimeoutMs: 15,
+      spawn: () => fakeProcess(), fetch: async (url, init) => {
+        if (String(url).includes("/preview")) previewSignal = init?.signal as AbortSignal;
+        return new Response("ok");
+      },
+    });
+    const handle = await provider.ensure({ computerId: "preview", runnerToken: "secret" });
+    const transport = await provider.connect("preview", { computerId: "preview", generation: handle.generation, token: "secret" });
+    const caller = new AbortController();
+    await transport.fetch("/preview?fps=20", { signal: caller.signal });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(previewSignal?.aborted).toBe(false);
+    caller.abort();
+    expect(previewSignal?.aborted).toBe(true);
+  });
+
   it("uses the provider workspace default when the spec omits one", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "local-computer-"));
     roots.push(root);

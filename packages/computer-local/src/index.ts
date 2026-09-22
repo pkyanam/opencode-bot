@@ -548,7 +548,7 @@ export class LocalComputerProvider implements ComputerProvider {
       },
     };
   }
-  private request(
+  private async request(
     m: Managed,
     requestPath: string,
     init: RequestInit = {},
@@ -557,13 +557,23 @@ export class LocalComputerProvider implements ComputerProvider {
     headers.set("Authorization", `Bearer ${m.spec.runnerToken}`);
     const nonce = (m as Managed & { startupNonce?: string }).startupNonce;
     if (nonce) headers.set("X-Opencode-Startup-Nonce", nonce);
-    const signal =
-      init.signal ??
-      AbortSignal.timeout(this.options.requestTimeoutMs ?? 5_000);
-    return this.fetcher(
-      `http://127.0.0.1:${m.spec.runnerPort}${requestPath.startsWith("/") ? requestPath : `/${requestPath}`}`,
-      { ...init, headers, signal },
-    );
+    // A preview is a long-lived response: only bound the wait for headers.
+    // AbortSignal.timeout remains active after fetch resolves and otherwise
+    // disconnects a healthy video stream every five seconds.
+    const streaming = /^\/?(?:preview|desktop\/stream)(?:\?|$)/.test(requestPath);
+    const headerTimeout = streaming ? new AbortController() : undefined;
+    const timer = headerTimeout ? setTimeout(() => headerTimeout.abort(new Error("Computer stream did not respond in time")), this.options.requestTimeoutMs ?? 5_000) : undefined;
+    const signal = headerTimeout
+      ? (init.signal ? AbortSignal.any([init.signal, headerTimeout.signal]) : headerTimeout.signal)
+      : init.signal ?? AbortSignal.timeout(this.options.requestTimeoutMs ?? 5_000);
+    try {
+      return await this.fetcher(
+        `http://127.0.0.1:${m.spec.runnerPort}${requestPath.startsWith("/") ? requestPath : `/${requestPath}`}`,
+        { ...init, headers, signal },
+      );
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 

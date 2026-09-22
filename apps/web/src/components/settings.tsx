@@ -30,6 +30,7 @@ import { OpenCodeProviders } from "./opencode-providers";
 import { AppUpdates } from "./app-updates";
 import { McpSettings } from "./mcp-settings";
 import { StorageSettings } from "./storage-settings";
+import { computerLabelFromState } from "../hosting-ui";
 
 type Node = {
   id: string;
@@ -42,12 +43,12 @@ type Node = {
   capabilities: { runner: boolean; browser: boolean; desktop: boolean };
 };
 
-function NodeTargetPicker({ nodes, value, onChange }: { nodes: Node[]; value: string; onChange: (value: string) => void }) {
+function NodeTargetPicker({ nodes, value, onChange, computerLabel }: { nodes: Node[]; value: string; onChange: (value: string) => void; computerLabel: string }) {
   return (
     <div className="setting-fact" style={{ alignItems: "center", gap: 10 }}>
       <label htmlFor="settings-node-target"><strong>Configure computer</strong></label>
       <select id="settings-node-target" className="settings-input" value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="">Cloudflare shared computer</option>
+        <option value="">{computerLabel}</option>
         {nodes.filter((node) => !node.revokedAt).map((node) => <option key={node.id} value={node.id}>{node.name}{node.online ? "" : " · offline"}</option>)}
       </select>
     </div>
@@ -75,6 +76,7 @@ export function SettingsModal({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [computerLabel, setComputerLabel] = useState("Shared computer");
   const [pairExpired, setPairExpired] = useState(false);
   const [installPlatform, setInstallPlatform] = useState<"unix" | "windows">("unix");
   const [pair, setPair] = useState<{ token: string; expiresAt: string } | null>(
@@ -109,8 +111,14 @@ export function SettingsModal({
       setBusy(false);
     }
   };
-  const loadNodes = async () =>
-    setNodes((await request<{ nodes: Node[] }>("/api/nodes")).nodes);
+  const loadNodes = async () => {
+    const [nodeResult, state] = await Promise.all([
+      request<{ nodes: Node[] }>("/api/nodes"),
+      api.state().catch(() => undefined),
+    ]);
+    setNodes(nodeResult.nodes);
+    setComputerLabel(computerLabelFromState(state));
+  };
   const loadTelegram = async () => {
     if (botId) {
       const result: any = await request(`/api/bots/${botId}/telegram`);
@@ -300,14 +308,14 @@ export function SettingsModal({
                 </button>
               </div>
               <p>
-                Cloudflare hosts the default computer. Pair another computer you
-                own through an outbound connection.
+                {computerLabel} is available by default. Pair another
+                computer you own through an outbound connection.
               </p>
               <div className="node-card">
                 <Monitor size={20} />
                 <div>
-                  <strong>Cloudflare</strong>
-                  <p>Default · managed sandbox</p>
+                  <strong>{computerLabel}</strong>
+                  <p>Default · managed workspace</p>
                   <small>Runs, browser, files, and native OpenCode</small>
                 </div>
               </div>
@@ -478,7 +486,7 @@ export function SettingsModal({
                       Polling — local or always-on server
                     </option>
                     <option value="webhook">
-                      Webhook — Cloudflare deployment
+                      Webhook — hosted deployment
                     </option>
                   </select>
                   {telegramMode === "webhook" && (
@@ -491,11 +499,12 @@ export function SettingsModal({
                         className="settings-input"
                         value={publicUrl}
                         onChange={(e) => setPublicUrl(e.target.value)}
-                        placeholder="https://your-app.workers.dev"
+                        placeholder="https://your-app.example.com"
                       />
                       <p className="settings-muted">
                         Telegram delivers messages to this HTTPS address. Your
-                        Cloudflare deployment URL is filled automatically.
+                        The hosted deployment URL is filled automatically when
+                        one is available.
                       </p>
                     </>
                   )}
@@ -633,7 +642,7 @@ export function SettingsModal({
               )}
             </TabsContent>
             <TabsContent value="runtime">
-              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} />
+              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} computerLabel={computerLabel} />
               <div className="settings-section-head">
                 <h3>OpenCode</h3>
                 <button
@@ -683,7 +692,7 @@ export function SettingsModal({
               </p>
             </TabsContent>
             <TabsContent value="mcp">
-              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} />
+              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} computerLabel={computerLabel} />
               <McpSettings nodeId={selectedNodeId || undefined} onSaved={() => { onSaved(); void action(loadCatalog); }} onOpenComputer={onOpenComputer} />
             </TabsContent>
             <TabsContent value="storage">

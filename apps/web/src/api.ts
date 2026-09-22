@@ -227,8 +227,14 @@ export type StorageSummary = {
   totals: { bytes: number; checkpointBytes: number; otherBytes: number; objects: number };
   truncated: boolean;
   policy: StoragePolicy;
+  /** Optional host supplied labels; older servers may omit these fields. */
+  provider?: string;
+  providerLabel?: string;
+  description?: string;
+  policyDescription?: string;
   lastAutomaticCheckpointAt?: string;
   lastError?: string;
+  storage?: { backend: "r2" | "local"; supportsAutomaticCheckpoints: boolean; durable: boolean; metered: boolean; scope: string };
 };
 export type Skill = {
   id: string;
@@ -299,6 +305,8 @@ export type McpServer = {
 export type McpAuthMethod = { id: string; type?: string; label?: string; form?: Record<string, unknown> };
 export type McpServerList = { location?: string; servers: McpServer[]; integrations?: Array<{ id: string; methods?: McpAuthMethod[] }> };
 export type State = {
+  deployment?: { host: "cloudflare" | "boat" | "local"; computerLabel: string };
+  host?: { host: "cloudflare" | "boat" | "local"; computerLabel: string };
   pendingMessages?: Array<{
     id: string;
     threadId: string;
