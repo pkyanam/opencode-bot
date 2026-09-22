@@ -2,7 +2,9 @@
 
 Memory lives in the workspace control server, above every Computer and node. A bot on your Mac can share a memory with a bot on Cloudflare or another VM. No files need to be copied, and the recipient Computer does not need to be awake when you share.
 
-Open **Memory registry** in the web sidebar, or **Workspace → Memory** on mobile. Search, write, edit, pin, share, inspect revisions, export, or delete memories there. The bot selector shows knowledge available to that bot, including memories other bots shared with it.
+Open **Memories** in the web sidebar, or **Workspace → Memory** on mobile. Use **New memory** to save something or **Ask memories** to ask a question about what a bot knows. Search and the bot filter help you find existing memories; expand a card to edit, share, pin, inspect its history, or delete it. The bot filter includes memories other bots shared with the selected bot.
+
+The settings icon opens **Memory settings**. Hindsight indexes saved memories in the background; “Indexing memories” means they are saved but semantic retrieval is still catching up. Basic search remains available. Once indexing finishes, **Ask memories** returns a grounded answer with expandable evidence.
 
 ## Ask naturally
 
