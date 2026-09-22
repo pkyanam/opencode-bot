@@ -326,11 +326,11 @@ export function HindsightPanel({ bots, mode = "all" }: Props) {
           className={`hindsight-status hindsight-status-${engine?.status ?? "unavailable"}`}
           aria-live="polite"
         >
-          {loading ? "Checking…" : statusLabel[engine?.status ?? "unavailable"]}
+          {loading ? "Checking…" : engine?.status === "starting" && (engine.pending ?? 0) > 0 ? "Indexing memories…" : statusLabel[engine?.status ?? "unavailable"]}
         </div>
       </div>}
       {askMode && <p className="hindsight-muted">Ask a question using the memories available to the selected bot.</p>}
-      {askMode && engine?.status !== "ready" && <p role="status">Memory search is {statusLabel[engine?.status ?? "starting"].toLowerCase()}. Your saved memories are still available.</p>}
+      {askMode && engine?.status !== "ready" && <p role="status">{engine?.status === "starting" && (engine.pending ?? 0) > 0 ? "New memories are being indexed for search." : `Memory search is ${statusLabel[engine?.status ?? "starting"].toLowerCase()}.`} Your saved memories are still available.</p>}
       {(error || engineError) && (
         <div className="hindsight-error">
           <AlertCircle size={14} /> <span>{error || engineError}</span>

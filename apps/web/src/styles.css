@@ -3892,7 +3892,6 @@ a:focus-visible {
 .memory-title-button svg { color: var(--muted); transition: transform .16s ease; }
 .memory-title-button[aria-expanded="true"] svg { transform: rotate(180deg); }
 .memory-registry .memory-content-markdown:not(.is-expanded) { max-height: 4.8em; overflow: hidden; position: relative; }
-.memory-registry .memory-content-markdown:not(.is-expanded)::after { content: ""; position: absolute; inset: auto 0 0; height: 1.6em; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
 .memory-registry .memory-content-markdown:not(.is-expanded) :is(h1, h2, h3, h4) { font-size: 14px; line-height: 1.6; margin: 0; }
 .memory-registry .memory-content-markdown.is-expanded { max-height: 50vh; }
 .memory-registry .registry-actions { justify-content: flex-end; flex-wrap: wrap; margin-top: 5px; }
