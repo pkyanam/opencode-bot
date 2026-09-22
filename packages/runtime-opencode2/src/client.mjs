@@ -528,10 +528,16 @@ export class OpenCode2Runtime {
     if (pending && pending.expiresAt <= Date.now()) { pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`); throw new Error("OAuth callback attempt expired; start sign-in again"); }
     if (callbackUrl !== undefined && !pending) throw new Error("This callback has no matching pending login. Start sign-in again, or use Sign in on Computer.");
     let completionCode = callbackUrl === undefined ? code : parseLocalOAuthCallback(callbackUrl);
-    if (callbackUrl !== undefined && pending?.mode === "auto") {
+    if (pending?.mode === "auto") {
+      if (code !== undefined) throw new Error("This service needs the full callback URL, including its security state, rather than only the code.");
       if (pending.expiresAt <= Date.now()) { pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`); throw new Error("OAuth callback attempt expired; start sign-in again"); }
-      await deliverOAuthCallback(pending, callbackUrl);
-      completionCode = undefined;
+      if (callbackUrl !== undefined) await deliverOAuthCallback(pending, callbackUrl);
+      const status = await waitForOAuthAutoStatus(this.client, integrationID, attemptID, directory ?? this.directory);
+      if (status === "complete") {
+        pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`);
+        return { ok: true, integrationID, attemptID };
+      }
+      return { ok: true, pending: true, integrationID, attemptID };
     }
     await this.start();
     if (!this.client.integration?.oauth?.complete) throw new Error("OpenCode provider OAuth API is unavailable");
@@ -676,6 +682,22 @@ export class OpenCode2Runtime {
     if (this.desktop?.close) await this.desktop.close();
     this.client = undefined;
     this.endpoint = undefined;
+  }
+}
+
+async function waitForOAuthAutoStatus(client, integrationID, attemptID, directory) {
+  if (!client.integration?.oauth?.status) throw new Error("OpenCode OAuth status API is unavailable for automatic callback completion");
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    let result;
+    try { result = await client.integration.oauth.status({ integrationID, attemptID, ...nativeLocation(directory) }); }
+    catch { throw new Error("OpenCode could not read the automatic OAuth status"); }
+    const value = result?.data ?? result;
+    const status = value?.status?.status ?? value?.status;
+    if (status === "complete" || status === "completed" || status === "connected" || status === "success") return "complete";
+    if (["failed", "error", "expired", "cancelled"].includes(status)) throw new Error("Automatic OAuth callback failed or expired");
+    if (Date.now() >= deadline) return "pending";
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 }
 

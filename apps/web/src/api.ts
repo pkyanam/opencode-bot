@@ -677,7 +677,7 @@ export const api = {
     authStatus: (payload: { integrationID: string; attemptID: string }) =>
       request<Record<string, unknown>>("/api/mcps/oauth/status", { method: "POST", body: JSON.stringify(payload) }),
     authComplete: (payload: { integrationID: string; attemptID: string; code?: string; callbackUrl?: string }) =>
-      request<{ ok: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
+      request<{ ok: boolean; pending?: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
     authCancel: (payload: { integrationID: string; attemptID: string }) =>
       request<{ ok: boolean }>("/api/mcps/oauth/cancel", { method: "POST", body: JSON.stringify(payload) }),
   },

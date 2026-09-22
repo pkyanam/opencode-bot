@@ -731,7 +731,7 @@ export class Workspace {
         if (pendingOAuthUntil && pendingOAuthUntil > Date.now()) throw new HttpError(409, "Finish MCP sign-in before putting the Computer to sleep");
         if (pendingOAuthUntil) await this.state.storage.delete("computer:mcpOAuthPendingUntil");
         this.maintenance = true;
-        try { const result = await this.autoSleepController().sleep(await this.computerSpec(), await this.computerGeneration()); this.startup.invalidate(); return response({ status: "sleeping", ...result, checkpoint: (await this.state.storage.get<any>("computer-checkpoint:shared"))?.manifest ?? null }); }
+        try { const result = await this.autoSleepController().sleep(await this.computerSpec(), await this.computerGeneration()); await this.pruneCheckpoints().catch(async () => { await this.state.storage.put("backup:lastError", "Backup saved; old backup cleanup will retry after the next backup."); }); this.startup.invalidate(); return response({ status: "sleeping", ...result, checkpoint: (await this.state.storage.get<any>("computer-checkpoint:shared"))?.manifest ?? null }); }
         finally { this.maintenance = false; }
       }
       if (url.pathname === "/api/computer/wake" && request.method === "POST") {
@@ -2959,7 +2959,7 @@ export class Workspace {
     const key = id ? `${input?.integrationID}:${id}` : undefined;
     if (key && path.endsWith("/start")) pending[key] = Date.now() + 15 * 60_000;
     const status = typeof data.status === "object" ? data.status?.status : data.status ?? data.state;
-    if (key && (/\/(complete|cancel)$/.test(path) || /^(completed?|connected|success|failed|cancelled|canceled|expired)$/.test(String(status)))) delete pending[key];
+    if (key && ((path.endsWith("/cancel") || (path.endsWith("/complete") && data.pending !== true)) || /^(completed?|connected|success|failed|cancelled|canceled|expired)$/.test(String(status)))) delete pending[key];
     await this.state.storage.put("computer:oauthPending", pending);
   }
   private async providerProxy(request: Request, url: URL): Promise<Response> {

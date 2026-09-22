@@ -91,8 +91,20 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
     if (!auth?.attemptID) return;
     let value: { code?: string; callbackUrl?: string };
     try { value = callbackValue(code); } catch (e) { setError(e instanceof Error ? e.message : "Enter the callback URL or one-time code."); return; }
-    const completed = await run(auth.server, () => api.mcp.authComplete({ integrationID: auth.integrationID, attemptID: auth.attemptID!, ...value }), "Service login completed.");
-    if (completed) { setAuth(undefined); setCode(""); }
+    setBusy(auth.server); setError(""); setNotice("");
+    try {
+      const result = await api.mcp.authComplete({ integrationID: auth.integrationID, attemptID: auth.attemptID!, ...value });
+      if (result.pending) {
+        setNotice("Finishing sign-in… keep this panel open while the service confirms the callback.");
+      } else {
+        setNotice("Service login completed.");
+        setAuth(undefined); setCode("");
+        await load();
+        onSaved?.();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not complete service login");
+    } finally { setBusy(""); }
   };
   const checkAuth = async () => {
     if (!auth?.attemptID) return;

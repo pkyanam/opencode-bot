@@ -234,6 +234,7 @@ test("auto OAuth loopback callback is delivered only to the exact pending listen
   const port = server.address().port;
   const fake = { integration: { oauth: {
     connect: async () => ({ data: { attemptID: "auto_1", mode: "auto", url: `https://login.example/authorize?redirect_uri=${encodeURIComponent(`http://127.0.0.1:${port}/callback`)}&state=state_1` } }),
+    status: async () => ({ data: { status: "complete" } }),
     complete: async input => { calls.push(input); },
   } } };
   const runtime = new OpenCode2Runtime({ client: fake, directory: "/project" });
@@ -246,7 +247,7 @@ test("auto OAuth loopback callback is delivered only to the exact pending listen
     assert.equal(requests.length, 1);
     assert.equal(requests[0].pathname, "/callback");
     assert.equal(requests[0].searchParams.get("code"), "c_1");
-    assert.equal(calls[0].code, undefined);
+    assert.equal(calls.length, 0);
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
