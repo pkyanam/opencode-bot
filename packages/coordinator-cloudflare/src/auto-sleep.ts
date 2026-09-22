@@ -1,5 +1,6 @@
 import type {
   CheckpointPointerStore,
+  CommittedCheckpoint,
   ComputerManager,
 } from "./index";
 import type {
@@ -20,7 +21,7 @@ export type PlannedComputerSleep = {
 export interface PlannedSleepStore {
   read(computerId: string): Promise<PlannedComputerSleep | null>;
   write(marker: PlannedComputerSleep): Promise<void>;
-  clear(computerId: string): Promise<void>;
+  clear(computerId: string): Promise<unknown>;
 }
 
 export type SleepGuards = {
@@ -35,6 +36,8 @@ export type AutoSleepOptions = {
   checkpoints: CheckpointPointerStore;
   markers: PlannedSleepStore;
   guards: SleepGuards;
+  /** Optional application-owned R2/manifest verification before stop intent is committed. */
+  verifyCheckpoint?(pointer: CommittedCheckpoint): Promise<void>;
 };
 
 /**
@@ -54,6 +57,11 @@ export class AutoSleepController {
     const readiness = await this.options.manager.prepare(spec);
     if (readiness.state !== "ready") throw new Error(`Computer cannot be checkpointed while ${readiness.state}`);
     const pointer = await this.options.manager.checkpoint(spec.computerId, fence, 0, readiness.runnerState?.instanceId);
+    // The checkpoint operation is asynchronous; recheck admission after it so
+    // work that arrived during the archive cannot race the stop.
+    await this.assertIdle();
+    await this.options.verifyCheckpoint?.(pointer);
+    await this.assertIdle();
     const marker: PlannedComputerSleep = {
       version: 1,
       computerId: spec.computerId,
@@ -66,6 +74,7 @@ export class AutoSleepController {
     // but before stopping the ephemeral runner.
     await this.options.markers.write(marker);
     await this.options.provider.stop(spec.computerId, "graceful");
+    if (this.options.provider.isRunning && await this.options.provider.isRunning(spec.computerId)) throw new Error("Sandbox container is still running after stop");
     const stopped = { ...marker, phase: "stopped" as const, stoppedAt: new Date().toISOString() };
     await this.options.markers.write(stopped);
     return stopped;
@@ -73,16 +82,18 @@ export class AutoSleepController {
 
   async wake(spec: ComputerSpec): Promise<{ restored: boolean; marker?: PlannedComputerSleep }> {
     const marker = await this.options.markers.read(spec.computerId);
-    await this.options.provider.ensure(spec);
     if (!marker) {
+      await this.options.provider.ensure(spec);
       // Recovery of an unplanned replacement is intentionally observational.
       // The caller may surface state_unknown/restore_required for a human.
       const readiness = await this.options.manager.prepare(spec);
-      return { restored: false, ...(readiness.state === "ready" ? {} : { marker: undefined }) };
+      if (readiness.state !== "ready") throw new Error(`Computer wake requires recovery (${readiness.state})`);
+      return { restored: false };
     }
     if (marker.phase !== "stopped") throw new Error("Computer sleep was planned but did not finish stopping; manual recovery is required");
     const pointer = await this.options.checkpoints.read(spec.computerId);
     if (!pointer || pointer.manifest.id !== marker.checkpointId) throw new Error("Planned sleep checkpoint is missing or no longer current");
+    await this.options.provider.ensure(spec);
     // prepare() records the current runner identity for restore() and proves
     // that the replacement can accept requests. It does not authorize restore.
     await this.options.manager.prepare(spec);

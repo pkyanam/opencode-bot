@@ -405,15 +405,18 @@ function x11KeyName(value) {
 
 function runCommand(command, args, input, display) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: { ...process.env, DISPLAY: display }, stdio: ["pipe", "pipe", "pipe"] });
+    // xclip forks a clipboard owner. Its inherited output pipes must not keep
+    // this request open after the parent exits. Input still travels over stdin.
+    const clipboardOwner = command === "xclip" && args.includes("-in");
+    const child = spawn(command, args, { env: { ...process.env, DISPLAY: display }, stdio: ["pipe", clipboardOwner ? "ignore" : "pipe", clipboardOwner ? "ignore" : "pipe"] });
     const stdout = [];
     const stderr = [];
     let size = 0;
     const timer = setTimeout(() => { child.kill("SIGKILL"); reject(httpError(504, `${command} timed out`)); }, 5_000);
-    child.stdout.on("data", (chunk) => { size += chunk.byteLength; if (size <= 256 * 1024) stdout.push(chunk); });
-    child.stderr.on("data", (chunk) => { if (stderr.reduce((n, part) => n + part.byteLength, 0) <= 32 * 1024) stderr.push(chunk); });
+    child.stdout?.on("data", (chunk) => { size += chunk.byteLength; if (size <= 256 * 1024) stdout.push(chunk); });
+    child.stderr?.on("data", (chunk) => { if (stderr.reduce((n, part) => n + part.byteLength, 0) <= 32 * 1024) stderr.push(chunk); });
     child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("close", (code) => {
+    child.once(clipboardOwner ? "exit" : "close", (code) => {
       clearTimeout(timer);
       if (code !== 0) return reject(httpError(502, `${command} failed: ${Buffer.concat(stderr).toString().slice(0, 400)}`));
       resolve(Buffer.concat(stdout).toString());

@@ -1668,8 +1668,26 @@ function ComputerPreview({
   const [expanded, setExpanded] = useState(false);
   const previous = useRef<string | undefined>(undefined);
   const [reconnect, setReconnect] = useState(0);
+  const [power, setPower] = useState<"unknown" | "awake" | "sleeping">("unknown");
+  const [powerBusy, setPowerBusy] = useState(false);
+  const [powerError, setPowerError] = useState("");
   useEffect(() => {
-    if (!open || nodeId || !visible) return;
+    if (!open || nodeId) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const readiness = await api.computerReadiness();
+        if (!cancelled) setPower(readiness.state === "sleeping" ? "sleeping" : "awake");
+      } catch { /* The preview request reports actionable connection errors. */ }
+    };
+    void check();
+    const timer = window.setInterval(check, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [open, nodeId]);
+  useEffect(() => {
+    // Readiness is checked first so opening the panel never wakes a sleeping
+    // Computer through a preview request.
+    if (!open || nodeId || !visible || power !== "awake") return;
     const controller = new AbortController();
     let cancelled = false;
     let retryTimer: number | undefined;
@@ -1791,7 +1809,20 @@ function ComputerPreview({
       previous.current && URL.revokeObjectURL(previous.current);
       previous.current = undefined;
     };
-  }, [open, reconnect, nodeId, visible]);
+  }, [open, reconnect, nodeId, visible, power]);
+  const sleep = async () => {
+    if (!window.confirm("Save current work and stop the Computer?")) return;
+    setPowerBusy(true); setPowerError("");
+    try { await api.sleepComputer(); setPower("sleeping"); setFrame(undefined); setError(""); }
+    catch (e) { setPowerError(e instanceof Error ? e.message : "Could not save and stop the Computer."); }
+    finally { setPowerBusy(false); }
+  };
+  const wake = async () => {
+    setPowerBusy(true); setPowerError("");
+    try { await api.wakeComputer(); setPower("awake"); setReconnect((value) => value + 1); }
+    catch (e) { setPowerError(e instanceof Error ? e.message : "Could not wake the Computer. Try again when no task is active."); }
+    finally { setPowerBusy(false); }
+  };
   return (
     <aside
       className={`computer-rail ${open ? "computer-rail-open" : "computer-rail-closed"}`}
@@ -1820,10 +1851,12 @@ function ComputerPreview({
             <div className="computer-preview-head">
               <span>LIVE PREVIEW</span>
               <span className="preview-state">
-                {warming ? "Starting" : error ? "Reconnecting" : frame ? "Streaming" : "Connecting"}
+                {power === "sleeping" ? "Sleeping" : warming ? "Starting" : error ? "Reconnecting" : frame ? "Streaming" : "Connecting"}
               </span>
             </div>
-            {frame ? (
+            {power === "sleeping" ? (
+              <div className="preview-placeholder"><span>Computer is sleeping. Wake it when you need to continue.</span><Button variant="outline" size="sm" onClick={() => void wake()} disabled={powerBusy}>{powerBusy ? "Waking…" : "Wake computer"}</Button></div>
+            ) : frame ? (
               <button
                 type="button"
                 className="computer-preview-expand"
@@ -1858,6 +1891,8 @@ function ComputerPreview({
                 )}
               </div>
             )}
+            {powerError && <p className="inline-error" role="alert">{powerError}</p>}
+            {power === "awake" && !powerBusy && <button className="computer-sleep-btn" type="button" onClick={() => void sleep()}>Sleep computer</button>}
             <Dialog open={expanded} onOpenChange={setExpanded}>
               <DialogContent className="computer-preview-dialog" onEscapeKeyDown={(event) => event.preventDefault()}>
                 <DialogTitle className="computer-preview-dialog-title">
@@ -2588,7 +2623,19 @@ function ComputerModal({
       setBusy(false);
     }
   };
+  const sleep = async () => {
+    if (!window.confirm("Save current work and stop the Computer?")) return;
+    try { setBusy(true); setStatus(await api.sleepComputer()); setError(""); }
+    catch (e) { setError(e instanceof Error ? e.message : "Could not save and stop the Computer."); }
+    finally { setBusy(false); }
+  };
+  const wake = async () => {
+    try { setBusy(true); setStatus(await api.wakeComputer()); setError(""); }
+    catch (e) { setError(e instanceof Error ? e.message : "Could not wake the Computer. Try again when no task is active."); }
+    finally { setBusy(false); }
+  };
   const cp = status?.checkpoint ?? status?.lastCheckpoint;
+  const sleeping = status?.status === "sleeping" || status?.state === "sleeping";
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
@@ -2658,7 +2705,7 @@ function ComputerModal({
           does not guarantee recovery of work still in progress.
         </p>
         <div className="modal-actions">
-          <button className="soft-btn" onClick={load}>
+            <button className="soft-btn" onClick={load}>
             <RefreshCw size={14} /> Refresh
           </button>
           <button
@@ -2670,12 +2717,13 @@ function ComputerModal({
           </button>
           <button
             className="primary-btn"
-            disabled={busy || active}
+            disabled={busy || active || sleeping}
             onClick={checkpoint}
           >
             {busy && <LoaderCircle size={14} className="spin" />}Create
             checkpoint
           </button>
+          {sleeping ? <button className="primary-btn" disabled={busy || active} onClick={() => void wake()}>{busy && <LoaderCircle size={14} className="spin" />}Wake computer</button> : <button className="soft-btn" disabled={busy || active} onClick={() => void sleep()}>Sleep computer</button>}
         </div>
         {active && (
           <div className="modal-note">

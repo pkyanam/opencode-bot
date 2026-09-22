@@ -567,7 +567,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       if (await terminals.handle(req, res)) return;
       if (req.url === "/checkpoint/quiesce" && req.method === "POST") return json(res, 200, await store.checkpoint());
       if (req.url === "/checkpoint/resume" && req.method === "POST") return json(res, 200, await store.resume());
-      if (req.url === "/checkpoint/state" && req.method === "GET") return json(res, 200, { instanceId: store.instanceId, quiesced: store.paused });
+      if (req.url === "/checkpoint/state" && req.method === "GET") return json(res, 200, { instanceId: store.instanceId, quiesced: store.paused, humanControlActive: Boolean(desktop?.controlStatus?.().active), nativeTerminalActive: Boolean(store.terminalRegistry?.active()), activeRuns: [...store.runs.values()].filter(run => !isTerminal(run.status)).length });
       // Resume is handled above; every other mutating route is fenced while
       // the filesystem is quiesced so cancel/approval cannot restart runtime.
       if (store.paused && req.method !== "GET") return json(res, 409, { error: "runner is quiesced" });

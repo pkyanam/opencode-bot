@@ -27,6 +27,7 @@ type Routine = {
 };
 type Computer = {
   state?: string;
+  readiness?: string;
   status?: string;
   phase?: string;
   checkpoint?: { createdAt?: string };
@@ -119,6 +120,22 @@ export default function Workspace() {
       setSaving(false);
     }
   }
+  async function wakeComputer() {
+    setSaving(true);
+    setError("");
+    try {
+      setComputer(
+        await request<Computer>(baseUrl, "/api/computer/wake", {
+          method: "POST",
+          timeoutMs: 120000,
+        }),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not wake the computer.");
+    } finally {
+      setSaving(false);
+    }
+  }
   return (
     <SafeAreaView style={styles.screen} edges={["top", "bottom"]}>
       <View style={local.header}>
@@ -207,12 +224,23 @@ export default function Workspace() {
               {section === "computer" && (
                 <View style={styles.card}>
                   <Text style={local.name}>Shared computer</Text>
-                  <Text style={styles.subtitle}>
-                    {computer?.state ??
-                      computer?.status ??
-                      computer?.phase ??
-                      "Status unavailable"}
-                  </Text>
+                  {String(computer?.state ?? computer?.readiness ?? "").toLowerCase() === "sleeping" ? (
+                    <>
+                      <Text style={styles.subtitle}>Sleeping to save resources.</Text>
+                      <Text style={local.body}>Wake it when you need to inspect the desktop or run a task.</Text>
+                      <Pressable
+                        style={[styles.button, { marginTop: 16, opacity: saving ? 0.5 : 1 }]}
+                        disabled={saving}
+                        onPress={() => void wakeComputer()}
+                      >
+                        <Text style={styles.buttonText}>{saving ? "Waking…" : "Wake computer"}</Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    <Text style={styles.subtitle}>
+                      {computer?.state ?? computer?.readiness ?? computer?.status ?? computer?.phase ?? "Status unavailable"}
+                    </Text>
+                  )}
                   <Text style={local.body}>
                     Your bots continue working here when you close the app.
                   </Text>
@@ -231,7 +259,7 @@ export default function Workspace() {
                       styles.ghost,
                       { marginTop: 20, opacity: saving ? 0.5 : 1 },
                     ]}
-                    disabled={saving}
+                    disabled={saving || String(computer?.state ?? computer?.readiness ?? "").toLowerCase() === "sleeping"}
                     onPress={checkpoint}
                   >
                     <Text style={styles.ghostText}>

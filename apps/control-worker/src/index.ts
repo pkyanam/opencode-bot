@@ -41,6 +41,7 @@ import {
   ComputerManager,
   DurableObjectCheckpointStore,
 } from "../../../packages/coordinator-cloudflare/src/index";
+import { AutoSleepController } from "../../../packages/coordinator-cloudflare/src/auto-sleep";
 import { PairingError, PairingService } from "./pairing";
 import { createMcpHandler } from "./mcp";
 import { verifyCheckpointObject } from "./checkpoint-verification";
@@ -136,6 +137,7 @@ export class Workspace {
   private updateController?: UpdateController;
   private computerProvider?: CloudflareComputerProvider;
   private computerCoordinator?: ComputerManager;
+  private autoSleep?: AutoSleepController;
   private pairingService?: PairingService;
   constructor(
     private readonly state: DurableObjectState,
@@ -676,7 +678,7 @@ export class Workspace {
         },
       })(request);
     }
-    const computerDependent = /^\/api\/(catalog|mcps(?:\/.*)?|providers(?:\/.*)?|computer\/(?:preview|control)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
+    const computerDependent = /^\/api\/(catalog|files(?:\/.*)?|attachments(?:\/.*)?|mcps(?:\/.*)?|providers(?:\/.*)?|computer\/(?:preview|control)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
       if (url.pathname === "/api/pairing/redeem" && request.method === "POST")
         {
@@ -704,6 +706,8 @@ export class Workspace {
       }
       if ((url.pathname === "/api/pairing/session" || url.pathname === "/api/pairing/session/me") && request.method === "GET")
         return response(client ? { role: "client", ...client } : { role: "owner" });
+      if ((url.pathname === "/api/updates" || url.pathname.startsWith("/api/updates/")) && request.method === "POST" && (await this.plannedSleep())?.phase === "stopped")
+        return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer before updating it." }, 503);
       if (url.pathname === "/api/updates" || url.pathname.startsWith("/api/updates/"))
         return await this.updateRoute(request, url);
       if (typeof this.state.storage.get === "function" && await this.updates(url).active()) {
@@ -718,9 +722,35 @@ export class Workspace {
       if (!["GET", "HEAD"].includes(request.method) && /^\/api\/(files|attachments|providers|mcps|terminal|extensions)(?:\/|$)/.test(url.pathname) && !url.pathname.endsWith("/status")) {
         if (typeof this.state.storage.put === "function") await this.state.storage.put("backup:dirtyAt", Date.now());
       }
+      if (url.pathname === "/api/computer/sleep" && request.method === "POST") {
+        if (!ownerAuthorized) throw new HttpError(403, "Owner access is required to put the Computer to sleep");
+        if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
+        const pendingAttempts = await this.state.storage.get<Record<string, number>>("computer:oauthPending") ?? {};
+        if (Object.values(pendingAttempts).some(until => until > Date.now())) throw new HttpError(409, "Finish service sign-in before putting the Computer to sleep");
+        const pendingOAuthUntil = await this.state.storage.get<number>("computer:mcpOAuthPendingUntil");
+        if (pendingOAuthUntil && pendingOAuthUntil > Date.now()) throw new HttpError(409, "Finish MCP sign-in before putting the Computer to sleep");
+        if (pendingOAuthUntil) await this.state.storage.delete("computer:mcpOAuthPendingUntil");
+        this.maintenance = true;
+        try { const result = await this.autoSleepController().sleep(await this.computerSpec(), await this.computerGeneration()); this.startup.invalidate(); return response({ status: "sleeping", ...result }); }
+        finally { this.maintenance = false; }
+      }
+      if (url.pathname === "/api/computer/wake" && request.method === "POST") {
+        if (!ownerAuthorized && !client) throw new HttpError(401, "Authentication is required to wake the Computer");
+        if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
+        this.maintenance = true;
+        try { const result = await this.autoSleepController().wake(await this.computerSpec()); this.startup.invalidate(); this.state.storage.setAlarm(Date.now() + 100); return response({ status: "ready", ...result }); }
+        finally { this.maintenance = false; }
+      }
+      const sleeping = await this.plannedSleep();
+      if (sleeping?.phase === "planned" && (computerDependent || /^\/api\/computer\/(readiness|status)$/.test(url.pathname))) return response({ state: "error", code: "sleep_incomplete", error: "The Computer could not confirm that it stopped. Your saved checkpoint is protected; check Computer & checkpoints before continuing." }, 503);
+      const sleepingCheckpoint = sleeping?.phase === "stopped" && typeof this.state.storage.get === "function" ? await this.state.storage.get<any>("computer-checkpoint:shared") : null;
       if (url.pathname === "/api/computer/readiness" && ["GET", "POST"].includes(request.method))
-        return response(this.computerReadiness(request.method === "POST"));
+        return sleeping?.phase === "stopped" ? response({ state: "sleeping", checkpointId: sleeping.checkpointId, checkpoint: sleepingCheckpoint?.manifest ?? null }) : response(this.computerReadiness(request.method === "POST"));
+      if (url.pathname === "/api/computer/status" && request.method === "GET" && sleeping?.phase === "stopped")
+        return response({ state: "sleeping", readiness: "sleeping", checkpoint: sleepingCheckpoint?.manifest ?? null });
+      if (sleeping && /^\/api\/(uploads(?:\/|$)|computer\/(checkpoint|restore)$)/.test(url.pathname)) return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer to continue." }, 503);
       if (computerDependent) {
+        if (sleeping?.phase === "stopped") return response({ state: "sleeping", code: "computer_sleeping", error: "Wake the Computer to continue." }, 503);
         const readiness = this.computerReadiness();
         if (readiness.state !== "ready") return response({
           ...readiness,
@@ -2161,7 +2191,8 @@ export class Workspace {
       this.state.storage.setAlarm(Date.now() + 1000);
       return;
     }
-    await this.flushMessageInputs();
+    const asleep = Boolean(await this.plannedSleep());
+    if (!asleep) await this.flushMessageInputs();
     let run = this.one<any>(
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
@@ -2173,9 +2204,10 @@ export class Workspace {
     run = this.one<any>(
       "SELECT * FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY CASE WHEN status IN ('provisioning','running','waiting_approval','cancelling') THEN 0 ELSE 1 END, created_at, rowid LIMIT 1",
     );
+    if (asleep) run = this.one<any>("SELECT r.* FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NOT NULL AND r.status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY r.created_at LIMIT 1");
     if (!run) {
       await this.automaticCheckpoint();
-      this.schedule();
+      this.schedule(asleep);
       return;
     }
     const affinity = this.one<{ node_id?: string }>(
@@ -2207,7 +2239,7 @@ export class Workspace {
         )?.n
       )
         this.state.storage.setAlarm(Date.now() + 3000);
-      this.schedule();
+      this.schedule(asleep);
       return;
     }
     if (!this.env.SANDBOX || !this.env.RUNNER_TOKEN) {
@@ -2263,15 +2295,15 @@ export class Workspace {
       || this.one<{ n: number }>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n
     )
       this.state.storage.setAlarm(Date.now() + 3000);
-    this.schedule();
+    this.schedule(asleep);
   }
-  private schedule(): void {
+  private schedule(computerAsleep = false): void {
     const due = this.one<any>(
       "SELECT MIN(CAST(strftime('%s',next_run_at) AS INTEGER)*1000) AS at FROM routines WHERE enabled=1",
     );
     const active =
       this.one<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling')",
+        computerAsleep ? "SELECT COUNT(*) AS n FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NOT NULL AND r.status IN ('queued','provisioning','running','waiting_approval','cancelling')" : "SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','cancelling')",
       )?.n ?? 0;
     this.telegram();
     const polling = this.one<any>(
@@ -2279,7 +2311,7 @@ export class Workspace {
     )?.n;
     const inputs = this.one<{n:number}>("SELECT COUNT(*) AS n FROM message_inputs WHERE status IN ('pending','dispatching')")?.n;
     const wake = Math.min(
-      inputs ? Date.now() + 3000 : Infinity,
+      inputs && !computerAsleep ? Date.now() + 3000 : Infinity,
       polling ? Date.now() + 5000 : Infinity,
       due?.at ? Number(due.at) : Infinity,
       active ? Date.now() + 3000 : Infinity,
@@ -2341,6 +2373,47 @@ export class Workspace {
       new DurableObjectCheckpointStore(this.state.storage),
     );
     return this.computerCoordinator;
+  }
+  private plannedSleepStore() {
+    return {
+      read: (computerId: string) => this.state.storage.get<any>(`computer-sleep:${computerId}`).then(value => value ?? null),
+      write: (marker: any) => this.state.storage.put(`computer-sleep:${marker.computerId}`, marker),
+      clear: async (computerId: string) => { await this.state.storage.delete(`computer-sleep:${computerId}`); },
+    };
+  }
+  private autoSleepController(): AutoSleepController {
+    return this.autoSleep ??= new AutoSleepController({
+      manager: this.computerManager(),
+      provider: this.provider(),
+      checkpoints: new DurableObjectCheckpointStore(this.state.storage),
+      markers: this.plannedSleepStore(),
+      verifyCheckpoint: async (pointer) => {
+        if (!this.env.ARTIFACTS || !pointer.manifest.checkpointKey || typeof pointer.manifest.bytes !== "number" || !pointer.manifest.sha256) throw new Error("Checkpoint verification is unavailable");
+        const saved = await this.env.ARTIFACTS.get(pointer.manifest.checkpointKey);
+        if (!saved) throw new Error("Checkpoint verification failed. The app has not been changed.");
+        await verifyCheckpointObject(saved, pointer.manifest.bytes, pointer.manifest.sha256);
+      },
+      guards: {
+        activeJobs: async () => this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued','provisioning','running','waiting_approval','waiting_human','cancelling','recovering')")?.n ?? 0,
+        humanControlActive: async () => this.runnerControlActive(),
+        nativeTerminalActive: async () => this.runnerControlActive("nativeTerminalActive"),
+      },
+    });
+  }
+  private async plannedSleep() {
+    if (typeof this.state.storage.get !== "function") return null;
+    return this.state.storage.get<any>("computer-sleep:shared");
+  }
+  private async runnerControlActive(field = "humanControlActive"): Promise<boolean> {
+    if (!this.computerProvider || !this.env.RUNNER_TOKEN) return false;
+    const status = await this.computerProvider.inspect("shared");
+    if (status.state !== "ready") return false;
+    try {
+      const transport = await this.computerProvider.connect("shared", { computerId: "shared", generation: status.generation, token: this.env.RUNNER_TOKEN });
+      const result = await transport.fetch("/checkpoint/state");
+      if (!result.ok) return false;
+      return Boolean((await result.json() as any)?.[field]);
+    } catch { return false; }
   }
   private async computerGeneration(): Promise<number> {
     if (typeof this.state.storage.get !== "function") return 1;
@@ -2492,7 +2565,7 @@ export class Workspace {
   private async automaticCheckpoint(): Promise<void> {
     if (!this.env.ARTIFACTS || this.maintenance || typeof this.state.storage.get !== "function" || this.startup.peek()?.state !== "ready") return;
     const policy = await this.backupPolicy();
-    if (!policy.automatic) return;
+    if (!policy.automatic || await this.plannedSleep() || !await this.provider().isRunning("shared")) return;
     const pointer = await this.state.storage.get<any>("computer-checkpoint:shared");
     const last = Date.parse(pointer?.committedAt ?? "") || 0;
     const changed = this.one<any>("SELECT MAX(r.updated_at) AS at FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NULL");
@@ -2873,6 +2946,18 @@ export class Workspace {
       },
     });
   }
+  private async trackOAuthAttempt(path: string, input: any, result: Response): Promise<void> {
+    if (!result.ok || !/\/oauth\/(start|status|complete|cancel)$/.test(path) || typeof this.state.storage.get !== "function") return;
+    const data = await result.clone().json().catch(() => ({})) as any;
+    const pending = await this.state.storage.get<Record<string, number>>("computer:oauthPending") ?? {};
+    for (const [key, until] of Object.entries(pending)) if (until <= Date.now()) delete pending[key];
+    const id = data.attempt?.attemptID ?? input?.attemptID;
+    const key = id ? `${input?.integrationID}:${id}` : undefined;
+    if (key && path.endsWith("/start")) pending[key] = Date.now() + 15 * 60_000;
+    const status = typeof data.status === "object" ? data.status?.status : data.status ?? data.state;
+    if (key && (/\/(complete|cancel)$/.test(path) || /^(completed?|connected|success|failed|cancelled|canceled|expired)$/.test(String(status)))) delete pending[key];
+    await this.state.storage.put("computer:oauthPending", pending);
+  }
   private async providerProxy(request: Request, url: URL): Promise<Response> {
     if (this.maintenance)
       throw new HttpError(409, "computer maintenance is in progress");
@@ -2896,6 +2981,7 @@ export class Workspace {
           }
         : {}),
     });
+    await this.trackOAuthAttempt(path, input, result);
     return new Response(result.body, {
       status: result.status,
       headers: {
@@ -2927,6 +3013,7 @@ export class Workspace {
     const input = request.method === "POST" ? await body(request) : undefined;
     const transport = await this.transport();
     const result = await transport.fetch(path, { method: request.method, ...(input ? { headers: { "content-type": "application/json" }, body: JSON.stringify(input) } : {}) });
+    await this.trackOAuthAttempt(path, input, result);
     if (result.status === 404) {
       // Older runners already expose native integrations and MCP catalog data.
       // Keep sign-in usable without replacing the user's running Computer.
@@ -2940,6 +3027,7 @@ export class Workspace {
       }
       if (/^\/mcps\/oauth\/(start|status|complete|cancel)$/.test(path)) {
         const legacy = await transport.fetch(path.replace("/mcps/", "/providers/"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+        await this.trackOAuthAttempt(path, input, legacy);
         return new Response(legacy.body, { status: legacy.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
       }
       return response({ error: "This Computer version does not yet support this MCP operation. Use Native OpenCode → /mcps, or update the Computer." }, 501);
@@ -2993,6 +3081,7 @@ export class Workspace {
     };
   }
   private async transport() {
+    if (await this.plannedSleep()) throw new HttpError(503, "The Computer is sleeping. Wake it to continue.");
     const readiness = await this.computerManager().prepare(
       await this.computerSpec(),
     );
@@ -3573,7 +3662,7 @@ const CLIENT_MCP_TOOLS = new Set([
   "bot_list", "bot_create", "bot_update", "bot_delete", "thread_list", "thread_create", "thread_update", "thread_delete", "thread_messages",
   "run_list", "run_start", "run_get", "run_events", "run_cancel", "run_approve", "delegation_list", "delegation_create",
   "skill_list", "skill_create", "skill_update", "skill_delete", "file_list", "file_read", "file_write", "file_upload", "file_mkdir", "file_move", "file_delete", "upload_file", "attachment_read",
-  "computer_readiness", "computer_status", "pairing_session", "routine_list", "routine_create", "routine_update", "routine_delete",
+  "computer_readiness", "computer_status", "computer_wake", "pairing_session", "routine_list", "routine_create", "routine_update", "routine_delete",
   "memory_list", "memory_add", "memory_delete", "catalog_get", "thread_bot_skills", "thread_assign_skills", "thread_action",
 ]);
 
@@ -3585,7 +3674,7 @@ function clientRouteAllowed(request: Request, url: URL): boolean {
   if (/^\/api\/(files|catalog)(?:\/|$)/.test(url.pathname)) return true;
   if (/^\/api\/uploads(?:\/|$)/.test(url.pathname)) return true;
   if (/^\/api\/computer\/(readiness|status|preview|control)$/.test(url.pathname)) return true;
-  if (url.pathname === "/api/computer/checkpoint" && request.method === "POST") return true;
+  if (["/api/computer/checkpoint", "/api/computer/wake"].includes(url.pathname) && request.method === "POST") return true;
   if (/^\/api\/terminal(?:\/|$)/.test(url.pathname)) return true;
   // Trusted clients can manage workspace skills; installation/admin routes remain owner-only.
   if (url.pathname === "/api/skills" || /^\/api\/skills\//.test(url.pathname)) return true;

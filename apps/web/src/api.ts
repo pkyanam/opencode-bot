@@ -135,7 +135,7 @@ export type ComputerStatus = {
   computerId?: string;
 };
 export type ComputerReadiness = {
-  state: "starting" | "ready" | "error" | string;
+  state: "starting" | "ready" | "sleeping" | "error" | string;
   startedAt?: string;
   error?: string;
   retryAfterMs?: number;
@@ -331,7 +331,13 @@ export async function request<T>(
     headers,
     signal:
       init.signal ??
-      AbortSignal.timeout(path.includes("/computer/") ? 120_000 : 30_000),
+      AbortSignal.timeout(
+        /\/api\/computer\/(?:sleep|wake|checkpoint|restore)/.test(path)
+          ? 300_000
+          : path.includes("/computer/")
+            ? 120_000
+            : 30_000,
+      ),
   });
   if (!response.ok) {
     const body = await response.text();
@@ -563,6 +569,8 @@ export const api = {
   computerStatus: () => request<ComputerStatus>("/api/computer/status"),
   computerReadiness: () =>
     request<ComputerReadiness>("/api/computer/readiness"),
+  sleepComputer: () => request<ComputerStatus>("/api/computer/sleep", { method: "POST" }),
+  wakeComputer: () => request<ComputerStatus>("/api/computer/wake", { method: "POST" }),
   updates: () => request<UpdateStatus>("/api/updates"),
   configureUpdates: (payload: {
     accountId: string;
@@ -668,7 +676,7 @@ export const api = {
       request<{ attempt?: { attemptID?: string; url?: string; instructions?: string; mode?: string } }>("/api/mcps/oauth/start", { method: "POST", body: JSON.stringify(payload) }),
     authStatus: (payload: { integrationID: string; attemptID: string }) =>
       request<Record<string, unknown>>("/api/mcps/oauth/status", { method: "POST", body: JSON.stringify(payload) }),
-    authComplete: (payload: { integrationID: string; attemptID: string; code?: string }) =>
+    authComplete: (payload: { integrationID: string; attemptID: string; code?: string; callbackUrl?: string }) =>
       request<{ ok: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
     authCancel: (payload: { integrationID: string; attemptID: string }) =>
       request<{ ok: boolean }>("/api/mcps/oauth/cancel", { method: "POST", body: JSON.stringify(payload) }),

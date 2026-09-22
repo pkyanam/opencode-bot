@@ -1152,6 +1152,8 @@ button:disabled {
 .storage-object strong, .storage-object small { display: block; overflow-wrap: anywhere; }
 .storage-object strong { color: #c9c1b5; font: 10px "DM Mono", monospace; }
 .storage-object small { color: #888277; font-size: 10px; margin-top: 3px; }
+.computer-sleep-btn { align-self: flex-start; border: 0; background: transparent; color: #8e887e; font-size: 10px; padding: 2px 0; }
+.computer-sleep-btn:hover { color: #d2a27d; }
 .approval-detail small {
   display: block;
   color: #79736c;

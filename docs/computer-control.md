@@ -19,6 +19,11 @@ subcommands are not interchangeable with session slash commands.
 
 ## Use the Computer
 
+Use **Sleep computer** when you are done to save current state and stop the
+Computer. The preview does not wake it automatically. Choose **Wake computer**
+explicitly when you want to continue; waking restores the last saved state and
+requires that no task is active.
+
 Expand the live Computer preview and choose **Take control**. Click the desktop
 to focus it, then use the pointer, keyboard, scroll wheel, or text input. On a Mac,
 common Command shortcuts map to Control on the Linux Computer. The preview panel
@@ -52,3 +57,11 @@ shared files, and the browser profile in R2. The Cloudflare provider uses multip
 uploads and ranged restores for archives up to 2 GiB; adapters without those
 capabilities retain the 32 MiB limit. Restoration verifies the archive checksum
 before replacing workspace files. Keep independent backups of important files.
+
+### Sign in to an MCP service
+
+Open **Settings → MCP → Sign in**. **Sign in on Computer** opens the provider's authorization page inside the bot's Computer, where its callback listener runs. Expand the Computer and take control to complete the login. The service list checks the result automatically.
+
+You can also use **Open authorization link** in your own browser. Some services, including Cloudflare, finish at an address such as `http://127.0.0.1:12345/callback?code=…&state=…`. That address belongs to the remote Computer, so a connection error in your browser is expected. Copy the **entire address** into **Callback completion** and select **Complete login**. This is a one-time callback, not an API token.
+
+The app checks the callback against the exact pending login before delivering it to the Computer. An expired attempt or a Computer restart requires a fresh sign-in. Callback URLs are not saved as credentials; don't post them in chat or issues.

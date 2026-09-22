@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle, RefreshCw, Unplug } from "lucide-react";
 import { api, type McpAuthMethod, type McpServer } from "../api";
 
@@ -8,6 +8,20 @@ const statusLabel = (server: McpServer) => {
   if (status === "failed") return "Unavailable";
   return status.replaceAll("_", " ");
 };
+
+function callbackValue(value: string): { code?: string; callbackUrl?: string } {
+  const input = value.trim();
+  if (!input) throw new Error("Paste the one-time callback URL or authorization code first.");
+  if (!/^https?:\/\//i.test(input)) return { code: input };
+  let url: URL;
+  try { url = new URL(input); } catch { throw new Error("That callback URL is not valid."); }
+  const query = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.search.slice(1));
+  const error = query.get("error");
+  if (error) throw new Error(`The service denied login: ${error}.`);
+  const code = query.get("code");
+  if (!code) throw new Error("That callback URL has no authorization code.");
+  return { callbackUrl: input };
+}
 
 export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void; onOpenComputer?: (url: string) => void }) {
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -19,6 +33,7 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
   const [auth, setAuth] = useState<{ server: string; integrationID: string; methodID: string; attemptID?: string; url?: string; instructions?: string }>();
   const [methodPicker, setMethodPicker] = useState<{ server: string; integrationID: string; methods: McpAuthMethod[] }>();
   const [code, setCode] = useState("");
+  const statusPoll = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,18 +89,23 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
   };
   const completeAuth = async () => {
     if (!auth?.attemptID) return;
-    const completed = await run(auth.server, () => api.mcp.authComplete({ integrationID: auth.integrationID, attemptID: auth.attemptID!, code: code || undefined }), "Service login completed.");
+    let value: { code?: string; callbackUrl?: string };
+    try { value = callbackValue(code); } catch (e) { setError(e instanceof Error ? e.message : "Enter the callback URL or one-time code."); return; }
+    const completed = await run(auth.server, () => api.mcp.authComplete({ integrationID: auth.integrationID, attemptID: auth.attemptID!, ...value }), "Service login completed.");
     if (completed) { setAuth(undefined); setCode(""); }
   };
   const checkAuth = async () => {
     if (!auth?.attemptID) return;
+    if (statusPoll.current) return;
+    statusPoll.current = true;
     try {
       const result = await api.mcp.authStatus({ integrationID: auth.integrationID, attemptID: auth.attemptID });
       const statusValue = result.status;
       const status = typeof statusValue === "object" && statusValue !== null ? String((statusValue as Record<string, unknown>).status ?? "pending") : String(statusValue ?? result.state ?? "pending");
       setNotice(`Login status: ${status}.`);
-      if (/complete|connected|success/i.test(status)) { setAuth(undefined); await load(); }
+      if (/^(completed?|connected|success|succeeded)$/i.test(status)) { setAuth(undefined); await load(); }
     } catch (e) { setError(e instanceof Error ? e.message : "Could not check service login"); }
+    finally { statusPoll.current = false; }
   };
   const cancelAuth = async () => {
     if (!auth?.attemptID) { setAuth(undefined); return; }
@@ -94,6 +114,29 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
       setAuth(undefined); setCode(""); setNotice("Service login canceled.");
     } catch (e) { setError(e instanceof Error ? e.message : "Could not cancel service login"); }
   };
+  useEffect(() => {
+    if (!auth?.attemptID) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled || statusPoll.current) return;
+      statusPoll.current = true;
+      try {
+        const result = await api.mcp.authStatus({ integrationID: auth.integrationID, attemptID: auth.attemptID! });
+        if (cancelled) return;
+        const statusValue = result.status;
+        const status = typeof statusValue === "object" && statusValue !== null ? String((statusValue as Record<string, unknown>).status ?? "pending") : String(statusValue ?? result.state ?? "pending");
+        if (/^(completed?|connected|success|succeeded)$/i.test(status)) {
+          setNotice("Service login completed.");
+          setAuth(undefined); setCode("");
+          await load();
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Could not check service login");
+      } finally { statusPoll.current = false; }
+    };
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [auth?.attemptID, auth?.integrationID, load]);
 
   return (
     <section className="mcp-settings" aria-label="MCP services">
@@ -117,10 +160,12 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
         })}
       </div> : <p className="settings-muted">No MCP services are configured.</p>}
       {auth && <div className="mcp-auth-panel">
-        <strong>Complete login for {auth.server}</strong>
+        <strong>Authorize {auth.server}</strong>
         {auth.instructions && <p>{auth.instructions}</p>}
-        {auth.url && <div className="mcp-auth-links"><a href={auth.url} target="_blank" rel="noreferrer">Open login link ↗</a>{onOpenComputer && <button className="soft-btn" onClick={() => onOpenComputer(auth.url!)}>Sign in on Computer</button>}</div>}
-        <input className="settings-input" aria-label="Login code" value={code} onChange={(event) => setCode(event.target.value)} placeholder="Paste a code if the service provides one" />
+        {auth.url && <div className="mcp-auth-links"><a href={auth.url} target="_blank" rel="noreferrer">Open authorization link ↗</a>{onOpenComputer && <button className="primary-btn" onClick={() => onOpenComputer(auth.url!)}>Preferred: Sign in on Computer</button>}</div>}
+        <label className="field-label" htmlFor="mcp-callback">Callback completion</label>
+        <p>After authorization, paste the full callback URL here, or enter the one-time code. This is not an API token.</p>
+        <input id="mcp-callback" className="settings-input" aria-label="OAuth callback URL or code" value={code} onChange={(event) => setCode(event.target.value)} placeholder="https://localhost/callback?code=… or one-time code" />
         <div className="settings-actions"><button className="soft-btn" onClick={() => void checkAuth()}>Check status</button><button className="primary-btn" onClick={() => void completeAuth()} disabled={!auth.attemptID}>Complete login</button><button className="soft-btn" onClick={() => void cancelAuth()}>Cancel</button></div>
       </div>}
       <p className="settings-muted">Changing MCP settings requires no active run. Login opens through the OpenCode service flow; this page never stores service credentials. Add or remove services from Native OpenCode when needed.</p>

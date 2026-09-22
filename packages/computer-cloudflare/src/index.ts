@@ -84,6 +84,8 @@ export interface ComputerProvider {
   connect(id: string, lease: RunnerLease): Promise<RunnerTransport>;
   checkpoint(id: string, fence: number): Promise<CheckpointManifest>;
   restore(id: string, checkpoint: CheckpointManifest): Promise<void>;
+  /** Inspect the known Sandbox without ensuring/starting it. */
+  isRunning?(id: string): Promise<boolean>;
   stop(id: string, mode: "graceful" | "force"): Promise<void>;
   destroy(id: string): Promise<void>;
 }
@@ -370,8 +372,24 @@ export class CloudflareComputerProvider implements ComputerProvider {
     // keepAlive intentionally pins the container during normal operation;
     // stopping the computer must release that pin or the SDK will continue
     // heartbeating an otherwise idle container.
-    if (managed.keepAlive && typeof managed.sandbox.setKeepAlive === "function") await managed.sandbox.setKeepAlive(false).catch(() => undefined);
-    if (mode === "force") await managed.sandbox.stop("SIGKILL").catch(() => undefined);
+    if (managed.keepAlive && typeof managed.sandbox.setKeepAlive === "function") await managed.sandbox.setKeepAlive(false);
+    await managed.sandbox.stop(mode === "graceful" ? "SIGTERM" : "SIGKILL");
+    if (typeof managed.sandbox.getState !== "function") throw new Error("Sandbox does not expose non-waking container state; physical stop cannot be confirmed");
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const state = await managed.sandbox.getState() as { status?: string };
+      if (state.status === "stopped" || state.status === "stopped_with_code") return;
+      if (!["running", "stopping", "healthy"].includes(state.status ?? "")) throw new Error(`Sandbox container ${id} returned unknown state; physical stop cannot be confirmed`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`Sandbox container ${id} did not stop within 30 seconds`);
+  }
+
+  async isRunning(id: string): Promise<boolean> {
+    const managed = this.computers.get(id);
+    if (!managed || typeof managed.sandbox.getState !== "function") return Boolean(managed?.process);
+    const state = await managed.sandbox.getState() as { status?: string };
+    return ["running", "stopping", "healthy"].includes(state.status ?? "");
   }
 
   async destroy(id: string): Promise<void> {

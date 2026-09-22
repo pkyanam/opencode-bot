@@ -117,7 +117,8 @@ export async function listStorageObjects(
       const checkpoint = checkpointKey(object.key, checkpointPrefix);
       objects.push({ ...object, category: checkpoint ? "checkpoint" : object.key.startsWith("uploads/") ? "artifact" : "other", protected: protectedKeys.has(object.key) });
     }
-    if (objects.length >= maxObjects || !page.truncated) break;
+    if (objects.length >= maxObjects) { truncated = page.truncated; break; }
+    if (!page.truncated) break;
     if (pages >= maxPages || !page.cursor) { truncated = true; break; }
     cursor = page.cursor;
   } while (true);

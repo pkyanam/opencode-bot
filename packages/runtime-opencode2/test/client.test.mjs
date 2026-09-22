@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { OpenCode2Runtime, eventText } from "../src/client.mjs";
 
 test("runtime qualifies service with isolated roots and maps v2 calls", async () => {
@@ -210,13 +211,43 @@ test("provider OAuth methods preserve native attempt status while omitting secre
   assert.equal(JSON.stringify(started).includes("secret"), false);
   assert.deepEqual(await runtime.providerOAuthStatus({ integrationID: "xai", attemptID: "attempt_1" }), { status: { status: "pending", time: { created: 1, expires: 2 } } });
   await runtime.providerOAuthComplete({ integrationID: "xai", attemptID: "attempt_1", code: "one-time-code" });
+  // A second, fresh attempt is required for callback URL validation.
+  const callbackRuntime = new OpenCode2Runtime({ client: fake, directory: "/project" });
+  await callbackRuntime.providerOAuthStart({ integrationID: "xai", methodID: "oauth" });
+  await callbackRuntime.providerOAuthComplete({ integrationID: "xai", attemptID: "attempt_1", callbackUrl: "http://127.0.0.1:36339/callback?code=redirect-code&state=attempt-state" });
   await runtime.providerOAuthCancel({ integrationID: "xai", attemptID: "attempt_1" });
   assert.deepEqual(calls, [
     ["connect", { integrationID: "xai", location: { directory: "/project" }, methodID: "oauth", answer: { region: "us" } }],
     ["status", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" } }],
     ["complete", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" }, code: "one-time-code" }],
+    ["connect", { integrationID: "xai", location: { directory: "/project" }, methodID: "oauth" }],
+    ["complete", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" }, code: "redirect-code" }],
     ["cancel", { integrationID: "xai", attemptID: "attempt_1", location: { directory: "/project" } }],
   ]);
+});
+
+test("auto OAuth loopback callback is delivered only to the exact pending listener", async () => {
+  const calls = [];
+  const requests = [];
+  const server = createServer((request, response) => { requests.push(new URL(request.url, `http://${request.headers.host}`)); response.writeHead(204).end(); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const fake = { integration: { oauth: {
+    connect: async () => ({ data: { attemptID: "auto_1", mode: "auto", url: `https://login.example/authorize?redirect_uri=${encodeURIComponent(`http://127.0.0.1:${port}/callback`)}&state=state_1` } }),
+    complete: async input => { calls.push(input); },
+  } } };
+  const runtime = new OpenCode2Runtime({ client: fake, directory: "/project" });
+  await runtime.providerOAuthStart({ integrationID: "cloudflare", methodID: "oauth" });
+  try {
+    await assert.rejects(() => runtime.providerOAuthComplete({ integrationID: "cloudflare", attemptID: "auto_1", callbackUrl: `http://127.0.0.1:${port + 1}/callback?code=c_2&state=state_1` }), /pending authorization state or redirect/);
+    await assert.rejects(() => runtime.providerOAuthComplete({ integrationID: "cloudflare", attemptID: "auto_1", callbackUrl: `http://127.0.0.1:${port}/callback?code=c_2&code=c_3&state=state_1` }), /duplicate code or state/);
+    await assert.rejects(() => runtime.providerOAuthComplete({ integrationID: "cloudflare", attemptID: "auto_1", callbackUrl: `http://127.0.0.1:${port}/callback?code=c_2&state=wrong` }), /pending authorization state or redirect/);
+    await runtime.providerOAuthComplete({ integrationID: "cloudflare", attemptID: "auto_1", callbackUrl: `http://127.0.0.1:${port}/callback?code=c_1&state=state_1` });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].pathname, "/callback");
+    assert.equal(requests[0].searchParams.get("code"), "c_1");
+    assert.equal(calls[0].code, undefined);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
 test("custom provider writes the documented v2 config schema atomically and keeps key server-side", async () => {

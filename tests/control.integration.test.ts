@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
+    async isRunning() { return true; }
     async ensure() {
       return { transport: { fetch: async (path: string, init: RequestInit = {}) => {
         remote.calls.push(`${init.method ?? 'GET'} ${path}`);
@@ -932,4 +933,31 @@ it('automatically commits a checkpoint only for changed, warm, idle workspaces',
     await f.alarm();
     expect(checkpoint).toHaveBeenCalledTimes(1);
   } finally { prepare.mockRestore(); checkpoint.mockRestore(); }
+});
+
+
+describe('deliberate Computer sleep', () => {
+  it('keeps readiness, status, and files from waking a sleeping computer', async () => {
+    const f = fixture(true);
+    f.kv.set('computer-sleep:shared', { phase: 'stopped', checkpointId: 'saved' });
+    const ready = await f.request('/api/computer/readiness');
+    expect(ready.body.state).toBe('sleeping');
+    expect((await f.request('/api/computer/status')).body.state).toBe('sleeping');
+    expect((await f.request('/api/files')).status).toBe(503);
+    expect(remote.calls).toEqual([]);
+  });
+  it('does not wake an ambiguous planned stop from a readiness poll', async () => {
+    const f = fixture(true);
+    f.kv.set('computer-sleep:shared', { phase: 'planned', checkpointId: 'saved' });
+    expect((await f.request('/api/computer/readiness')).body.code).toBe('sleep_incomplete');
+    expect(remote.calls).toEqual([]);
+  });
+  it('blocks sleep while a tracked service authorization is pending', async () => {
+    const f = fixture(true);
+    f.kv.set('computer:oauthPending', { 'integration:attempt': Date.now() + 60000 });
+    const result = await f.request('/api/computer/sleep', 'POST', {});
+    expect(result.status).toBe(409);
+    expect(result.body.error).toMatch(/sign-in/);
+    expect(remote.calls).toEqual([]);
+  });
 });

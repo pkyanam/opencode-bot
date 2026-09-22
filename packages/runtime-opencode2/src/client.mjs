@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { createPlaywrightMcpServer } from "../../browser/src/index.ts";
 
 const Service = ServiceModule.Service ?? ServiceModule;
+const pendingOAuthCallbacks = new Map();
 
 /**
  * Owns one OpenCode 2 daemon and exposes only the operations the application
@@ -506,6 +507,7 @@ export class OpenCode2Runtime {
     } catch {
       throw new Error("OpenCode provider OAuth connection failed");
     }
+    rememberOAuthCallback(integrationID, result);
     return sanitizeAttemptResult(result);
   }
 
@@ -517,17 +519,28 @@ export class OpenCode2Runtime {
     return sanitizeStatusResult(await this.client.integration.oauth.status({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) }));
   }
 
-  async providerOAuthComplete({ integrationID, attemptID, code, directory } = {}) {
+  async providerOAuthComplete({ integrationID, attemptID, code, callbackUrl, directory } = {}) {
     this.catalogCache.clear();
     requireNonEmpty(integrationID, "integrationID");
     requireNonEmpty(attemptID, "attemptID");
+    if (code !== undefined && callbackUrl !== undefined) throw new Error("Provide code or callbackUrl, not both");
+    const pending = pendingOAuthCallbacks.get(`${integrationID}:${attemptID}`);
+    if (pending && pending.expiresAt <= Date.now()) { pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`); throw new Error("OAuth callback attempt expired; start sign-in again"); }
+    if (callbackUrl !== undefined && !pending) throw new Error("This callback has no matching pending login. Start sign-in again, or use Sign in on Computer.");
+    let completionCode = callbackUrl === undefined ? code : parseLocalOAuthCallback(callbackUrl);
+    if (callbackUrl !== undefined && pending?.mode === "auto") {
+      if (pending.expiresAt <= Date.now()) { pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`); throw new Error("OAuth callback attempt expired; start sign-in again"); }
+      await deliverOAuthCallback(pending, callbackUrl);
+      completionCode = undefined;
+    }
     await this.start();
     if (!this.client.integration?.oauth?.complete) throw new Error("OpenCode provider OAuth API is unavailable");
     try {
-      await this.client.integration.oauth.complete({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory), ...(code === undefined ? {} : { code }) });
+      await this.client.integration.oauth.complete({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory), ...(completionCode === undefined ? {} : { code: completionCode }) });
     } catch {
       throw new Error("OpenCode provider OAuth completion failed");
     }
+    pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`);
     return { ok: true, integrationID, attemptID };
   }
 
@@ -537,6 +550,7 @@ export class OpenCode2Runtime {
     await this.start();
     if (!this.client.integration?.oauth?.cancel) throw new Error("OpenCode provider OAuth API is unavailable");
     await this.client.integration.oauth.cancel({ integrationID, attemptID, ...nativeLocation(directory ?? this.directory) });
+    pendingOAuthCallbacks.delete(`${integrationID}:${attemptID}`);
     return { ok: true, integrationID, attemptID };
   }
 
@@ -663,6 +677,59 @@ export class OpenCode2Runtime {
     this.client = undefined;
     this.endpoint = undefined;
   }
+}
+
+function parseLocalOAuthCallback(value) {
+  if (typeof value !== "string" || value.length > 4096) throw new Error("callbackUrl must be a bounded URL");
+  let url;
+  try { url = new URL(value); } catch { throw new Error("callbackUrl must be a valid URL"); }
+  if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) || url.pathname !== '/callback') throw new Error("callbackUrl must be the local OAuth callback URL");
+  if (url.searchParams.get('error')) throw new Error(`OAuth callback returned ${url.searchParams.get('error')}`);
+  if (url.searchParams.getAll('code').length > 1 || url.searchParams.getAll('state').length > 1) throw new Error("OAuth callback URL contains duplicate code or state");
+  const callbackCode = url.searchParams.get('code');
+  if (!callbackCode) throw new Error("OAuth callback URL is missing code");
+  if (!url.searchParams.get('state')) throw new Error("OAuth callback URL is missing state");
+  return callbackCode;
+}
+
+function rememberOAuthCallback(integrationID, result) {
+  const attempt = result?.data ?? result;
+  const attemptID = attempt?.attemptID;
+  if (typeof attemptID !== "string") return;
+  let authorization;
+  try { authorization = new URL(attempt.url); } catch { return; }
+  const redirect = authorization.searchParams.get("redirect_uri");
+  const state = authorization.searchParams.get("state");
+  if (attempt.mode === "code") { pendingOAuthCallbacks.set(`${integrationID}:${attemptID}`, { mode: "code", expiresAt: Date.now() + 15 * 60_000 }); if (pendingOAuthCallbacks.size > 32) pendingOAuthCallbacks.delete(pendingOAuthCallbacks.keys().next().value); return; }
+  if (!redirect || !state || attempt.mode !== "auto") return;
+  let redirectUrl;
+  try { redirectUrl = validateLoopbackUrl(redirect); } catch { return; }
+  pendingOAuthCallbacks.set(`${integrationID}:${attemptID}`, { redirectUrl, state, mode: "auto", expiresAt: Date.now() + 15 * 60_000 });
+  if (pendingOAuthCallbacks.size > 32) pendingOAuthCallbacks.delete(pendingOAuthCallbacks.keys().next().value);
+}
+
+function validateLoopbackUrl(value) {
+  const url = new URL(value);
+  if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname) || url.username || url.password || url.hash || !url.port || Number(url.port) < 1 || Number(url.port) > 65535 || url.pathname !== "/callback") throw new Error("OAuth callback must be the exact local loopback callback");
+  return url;
+}
+
+async function deliverOAuthCallback(pending, value) {
+  const callback = validateLoopbackUrl(value);
+  const expected = pending.redirectUrl;
+  if (callback.origin !== expected.origin || callback.pathname !== expected.pathname || callback.searchParams.get("state") !== pending.state) throw new Error("OAuth callback does not match the pending authorization state or redirect");
+  if (callback.searchParams.getAll("code").length !== 1 || callback.searchParams.getAll("state").length !== 1) throw new Error("OAuth callback URL contains duplicate code or state");
+  if (callback.searchParams.get("error")) throw new Error(`OAuth callback returned ${callback.searchParams.get("error")}`);
+  if (!callback.searchParams.get("code")) throw new Error("OAuth callback URL is missing code");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(callback, { redirect: "manual", signal: controller.signal });
+    if (response.status >= 400) throw new Error(`OAuth callback listener returned HTTP ${response.status}`);
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("OAuth callback listener timed out");
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
 async function readConfig(filename) {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "vitest";
 import { CloudflareComputerProvider, type CloudflareSandboxBinding } from "../src/index.js";
 
-function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; sdkStream?: boolean; resumeFailure?: boolean } = {}) {
+function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number; calls?: string[]; execs?: string[]; reads?: { value: number }; streamReads?: { value: number }; streamArchive?: boolean; sdkStream?: boolean; resumeFailure?: boolean; states?: string[]; stopFailure?: boolean } = {}) {
   let starts = 0;
   const calls = options.calls ?? [];
   const process = {
@@ -27,7 +27,8 @@ function fakeSandbox(options: { archive?: Uint8Array; archiveStatBytes?: number;
       return process;
     },
     getProcess: async () => starts ? process : null,
-    stop: async () => undefined,
+    stop: async () => { if (options.stopFailure) throw new Error("stop failed"); },
+    getState: async () => ({ status: options.states?.length ? options.states.shift() : "stopped" }),
     destroy: async () => undefined,
     exec: async (command: string) => { options.execs?.push(command); return { success: true, exitCode: 0, stdout: command.startsWith("stat") ? String(options.archiveStatBytes ?? options.archive?.byteLength ?? 0) : command.startsWith("sha256sum") ? `${"a".repeat(64)}  archive\n` : command.startsWith("tar -tzf") ? "workspace/state/\nworkspace/shared/\nworkspace/browser/\n" : "", stderr: "", command, duration: 0, timestamp: new Date().toISOString() }; },
     ...(options.sdkStream ? { readFileStream: async () => {
@@ -100,6 +101,24 @@ it("passes keepAlive to the Sandbox factory by default and honors an explicit id
   });
   await idleProvider.ensure({ computerId: "idle", runnerToken: "secret" });
   assert.deepEqual(seen, [{ keepAlive: true, sleepAfter: undefined }, { keepAlive: false, sleepAfter: "30m" }]);
+});
+
+it("inspects and physically stops the Sandbox without ensuring it", async () => {
+  const sandbox = fakeSandbox({ states: ["healthy", "stopped"] });
+  const provider = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => sandbox as never });
+  await provider.ensure({ computerId: "physical", runnerToken: "secret" });
+  assert.equal(await provider.isRunning("physical"), true);
+  await provider.stop("physical", "graceful");
+  assert.equal(await provider.isRunning("physical"), false);
+});
+
+it("does not claim a physical stop for unknown state or swallowed stop failure", async () => {
+  const unknown = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => fakeSandbox({ states: ["mystery"] }) as never });
+  await unknown.ensure({ computerId: "unknown-stop", runnerToken: "secret" });
+  await assert.rejects(() => unknown.stop("unknown-stop", "graceful"), /unknown state/);
+  const failed = new CloudflareComputerProvider({ sandboxNamespace: {} as CloudflareSandboxBinding, sandboxFactory: () => fakeSandbox({ stopFailure: true }) as never });
+  await failed.ensure({ computerId: "failed-stop", runnerToken: "secret" });
+  await assert.rejects(() => failed.stop("failed-stop", "graceful"), /stop failed/);
 });
 
 it("reports ephemeral disk as unsupported without R2 and rejects stale leases", async () => {
