@@ -1,0 +1,8 @@
+{
+  "name": "@opencode-bot/node-transfer",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=20" }
+}

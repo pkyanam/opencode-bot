@@ -7,11 +7,24 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import net from "node:net";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { checkLocalModelReadiness } from "./node-model-readiness.mjs";
+import { transferFile } from "./node-transfer.mjs";
 
 const VERSION = "0.1.0";
+let installedVersion;
+async function agentVersion() {
+  if (installedVersion !== undefined) return installedVersion;
+  try {
+    const metadata = JSON.parse(await readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "bundle-version.json"), "utf8"));
+    installedVersion = /^v\d+\.\d+\.\d+$/.test(metadata.version) ? metadata.version : VERSION;
+  } catch { installedVersion = VERSION; }
+  return installedVersion;
+}
 const DEFAULT_POLL_MS = 3000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
+const MAX_NODE_FILE_RELAY_BYTES = 50 * 1024 * 1024;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function args(argv) {
@@ -65,6 +78,62 @@ async function loadConfig(file) {
 async function saveConfig(file, value) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await chmod(path.dirname(file), 0o700);
+  await chmod(file, 0o600);
+}
+
+async function updateLocked(configFile) {
+  try { await stat(path.join(path.dirname(configFile), "update.lock")); return true; }
+  catch (error) { if (error?.code === "ENOENT") return false; throw error; }
+}
+
+async function availableLoopbackPort(preferred = 8787) {
+  const candidate = Number(preferred);
+  const tryPort = (port) => new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen({ host: "127.0.0.1", port }, () => {
+      const address = probe.address();
+      const selected = typeof address === "object" && address ? address.port : undefined;
+      probe.close((error) => error ? reject(error) : resolve(selected));
+    });
+  });
+  try { return await tryPort(Number.isInteger(candidate) && candidate > 0 && candidate < 65536 ? candidate : 0); }
+  catch (error) {
+    if (error?.code !== "EADDRINUSE") throw error;
+    return tryPort(0);
+  }
+}
+
+async function waitForOwnedRunner(url, token, child, timeoutMs = 15_000, startupNonce) {
+  const deadline = Date.now() + timeoutMs;
+  let childError;
+  const onError = (error) => { childError = error; };
+  const onExit = (code, signal) => { childError = new Error(`local runner exited before health check (code ${code ?? "unknown"}, signal ${signal ?? "none"})`); };
+  child.once("error", onError);
+  child.once("exit", onExit);
+  try {
+    while (Date.now() < deadline) {
+      if (childError) throw childError;
+      try {
+        const response = await fetch(`${url.origin}/health`, { headers: { accept: "application/json", ...(startupNonce ? {} : { authorization: `Bearer ${token}` }) }, signal: AbortSignal.timeout(1000) });
+        const body = await response.json().catch(() => null);
+        if (response.ok && body?.ok === true && body?.service === "opencode2-runner" && typeof body.instanceId === "string" && body.instanceId) {
+          if (!startupNonce) return;
+          if (body.startupNonce !== startupNonce) continue;
+          if (childError || (child.exitCode !== undefined && child.exitCode !== null)) throw childError ?? new Error("local runner exited before authenticated health check");
+          const state = await fetch(`${url.origin}/checkpoint/state`, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(1000) });
+          const stateBody = await state.json().catch(() => null);
+          if (state.ok && stateBody?.instanceId === body.instanceId) return;
+        }
+      } catch { /* runner is still starting or the port is not ours */ }
+      await sleep(100);
+    }
+    throw new Error("local runner did not pass its authenticated health check");
+  } finally {
+    child.off("error", onError);
+    child.off("exit", onExit);
+  }
 }
 
 async function jsonFetch(url, { token, method = "GET", body } = {}) {
@@ -77,16 +146,62 @@ async function jsonFetch(url, { token, method = "GET", body } = {}) {
   return value;
 }
 
-function capabilities(runner = Boolean(process.env.NODE_RUNNER_TOKEN)) {
-  return { os: platform(), arch: process.arch, runner, desktop: false, browser: false, maxParallelJobs: 1 };
+function computerPath(value) {
+  if (typeof value !== "string" || !value || value.includes("\0") || !path.isAbsolute(value)) throw new Error("computer file path must be absolute");
+  return path.normalize(value);
+}
+
+function relayUrl(controlUrl, relayId) {
+  if (typeof relayId !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(relayId)) throw new Error("relayId is invalid");
+  const control = new URL(controlUrl);
+  return new URL(`/api/node-files/${encodeURIComponent(relayId)}/content`, control.origin).toString();
+}
+
+async function relayComputerFile({ direction, runner, runnerToken, controlUrl, relayId, relayToken, filePath, overwrite = false, size }) {
+  if (typeof relayToken !== "string" || !relayToken) throw new Error("relayToken is required");
+  const target = computerPath(filePath);
+  const relay = relayUrl(controlUrl, relayId);
+  const headers = { authorization: `Bearer ${relayToken}`, accept: "application/octet-stream" };
+  if (direction === "export") {
+    const local = await fetch(`${runner}/files/content?scope=computer&path=${encodeURIComponent(target)}`, { headers: { authorization: `Bearer ${runnerToken}`, accept: "application/octet-stream" }, signal: AbortSignal.timeout(120_000) });
+    if (!local.ok || !local.body) throw new Error(`local computer file export failed (${local.status})`);
+    const declared = Number(local.headers.get("content-length") || size || 0);
+    if (declared > MAX_NODE_FILE_RELAY_BYTES) throw new Error("computer file exceeds relay limit");
+    let bytes = 0;
+    const bounded = local.body.pipeThrough(new TransformStream({ transform(chunk, controller) { bytes += chunk.byteLength; if (bytes > MAX_NODE_FILE_RELAY_BYTES) { controller.error(new Error("computer file exceeds relay limit")); return; } controller.enqueue(chunk); } }));
+    const uploaded = await fetch(relay, { method: "PUT", headers: { ...headers, "content-type": local.headers.get("content-type") || "application/octet-stream", ...(declared ? { "content-length": String(declared) } : {}) }, body: bounded, duplex: "half", signal: AbortSignal.timeout(120_000) });
+    if (!uploaded.ok) throw new Error(`computer file relay upload failed (${uploaded.status})`);
+    return { relayId, path: target, direction, bytes: bytes || declared };
+  }
+  const downloaded = await fetch(relay, { headers, signal: AbortSignal.timeout(120_000) });
+  if (!downloaded.ok || !downloaded.body) throw new Error(`computer file relay download failed (${downloaded.status})`);
+  const declared = Number(downloaded.headers.get("content-length") || size || 0);
+  if (declared > MAX_NODE_FILE_RELAY_BYTES) throw new Error("computer file exceeds relay limit");
+  const local = await fetch(`${runner}/files?scope=computer&path=${encodeURIComponent(target)}&overwrite=${overwrite ? "true" : "false"}`, { method: "POST", headers: { authorization: `Bearer ${runnerToken}`, "content-type": downloaded.headers.get("content-type") || "application/octet-stream", ...(declared ? { "content-length": String(declared) } : {}) }, body: downloaded.body, duplex: "half", signal: AbortSignal.timeout(120_000) });
+  if (!local.ok) throw new Error(`local computer file import failed (${local.status})`);
+  return { relayId, path: target, direction, bytes: declared || undefined };
+}
+
+function capabilities(runner = Boolean(process.env.NODE_RUNNER_TOKEN), browser = Boolean(process.env.OPENCODE_BOT_BROWSER)) {
+  return { os: platform(), arch: process.arch, runner, desktop: false, browser, maxParallelJobs: 1 };
 }
 
 async function liveCapabilities(config) {
   try {
     const url = new URL(config.runnerUrl || 'http://127.0.0.1:8787');
     if (!['127.0.0.1','localhost','[::1]'].includes(url.hostname)) return capabilities(false);
-    const response = await fetch(`${url.origin}/health`, { signal: AbortSignal.timeout(2000) });
-    return capabilities(Boolean(config.runnerToken) && response.ok);
+    const response = await fetch(`${url.origin}/health`, { headers: { accept: "application/json", ...(config.runnerStartupNonce ? {} : config.runnerToken ? { authorization: `Bearer ${config.runnerToken}` } : {}) }, signal: AbortSignal.timeout(2000) });
+    const body = await response.json().catch(() => null);
+    let runnerReady = Boolean(config.runnerToken) && response.ok && body?.ok === true && body?.service === "opencode2-runner" && typeof body.instanceId === "string" && body.instanceId.length > 0;
+    if (runnerReady && config.runnerStartupNonce) {
+      runnerReady = body.startupNonce === config.runnerStartupNonce;
+    }
+    if (runnerReady && config.runnerStartupNonce) {
+      const state = await fetch(`${url.origin}/checkpoint/state`, { headers: { authorization: `Bearer ${config.runnerToken}`, accept: "application/json" }, signal: AbortSignal.timeout(2000) });
+      const stateBody = await state.json().catch(() => null);
+      runnerReady = state.ok && stateBody?.instanceId === body.instanceId;
+    }
+    return capabilities(runnerReady, runnerReady && Boolean(config.browser));
   } catch { return capabilities(false); }
 }
 
@@ -96,11 +211,12 @@ async function register(options) {
   const base = controlBase(options.control_url);
   const result = await jsonFetch(`${base}/register`, { method: "POST", body: {
     pairingToken: options.pairing_token, name: options.name, platform: platform(), arch: process.arch,
-    agentVersion: VERSION, capabilities: capabilities(Boolean(options.runner_token || process.env.NODE_RUNNER_TOKEN)),
+    agentVersion: await agentVersion(), capabilities: capabilities(Boolean(options.runner_token || process.env.NODE_RUNNER_TOKEN)),
   } });
   await saveConfig(file, { controlUrl: base, nodeId: result.node.id, nodeSecret: result.nodeSecret,
     runnerUrl: options.runner_url || process.env.NODE_RUNNER_URL || "http://127.0.0.1:8787",
-    runnerToken: options.runner_token || process.env.NODE_RUNNER_TOKEN || randomBytes(32).toString("hex") });
+    runnerToken: options.runner_token || process.env.NODE_RUNNER_TOKEN || randomBytes(32).toString("hex"),
+    workspaceDirectory: path.join(path.dirname(file), "workspace") });
   process.stdout.write(`${JSON.stringify({ node: result.node, config: file })}\n`);
   return result;
 }
@@ -108,7 +224,39 @@ async function register(options) {
 function terminalStatus(status) { return ["succeeded", "failed", "cancelled", "needs_review"].includes(status); }
 
 async function executeRunner(job, config, onProgress) {
+  if (await updateLocked(config._file || process.env.NODE_CONFIG || defaultConfigPath())) throw new Error("node update is in progress; job was not admitted");
   const payload = job.payload || {};
+  if (payload.nodeId && String(payload.nodeId) !== String(config.nodeId)) throw new Error("node job is bound to a different execution node");
+  if (payload.run?.executionNodeId && String(payload.run.executionNodeId) !== String(config.nodeId)) throw new Error("runner run is bound to a different execution node");
+  if (payload.kind === "node.transfer") {
+    const manifest = payload.transfer ?? payload.manifest;
+    const transferToken = payload.transferToken ?? payload.token;
+    if (!manifest || typeof manifest !== "object") throw new Error("node.transfer payload is missing manifest");
+    if (payload.direction !== "upload" && payload.direction !== "download") throw new Error("transfer direction is required");
+    const direction = payload.direction;
+    const expectedNode = direction === "upload" ? manifest.sourceNodeId : manifest.targetNodeId;
+    if (expectedNode !== config.nodeId) throw new Error("transfer is bound to a different node");
+    if (typeof transferToken !== "string" || !transferToken) throw new Error("node.transfer payload is missing scoped token");
+    const controlRoot = String(config.controlUrl || "").replace(/\/api\/nodes\/?$/, "");
+    if (!controlRoot) throw new Error("node transfer control URL is missing");
+    const workspace = config.workspaceDirectory;
+    if (!workspace) throw new Error("node transfer workspace is missing");
+    return transferFile({ direction, baseUrl: controlRoot, token: transferToken, manifest, sourceRoot: workspace, destinationRoot: workspace, overwrite: payload.overwrite === true });
+  }
+  if (payload.kind === "runtime.operation") {
+    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
+    if (typeof payload.operation !== "string" || !allowed.has(payload.operation)) throw new Error("unsupported node runtime operation");
+    if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runtime operations");
+    const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(runner).hostname)) throw new Error("Local runner URL must use loopback");
+    if (payload.operation === "file_export" || payload.operation === "file_import") {
+      const input = payload.input && typeof payload.input === "object" ? payload.input : {};
+      if (input.scope !== "computer") throw new Error("computer file relay requires scope=computer");
+      return relayComputerFile({ direction: payload.operation === "file_export" ? "export" : "import", runner, runnerToken: config.runnerToken, controlUrl: config.controlUrl, relayId: input.relayId, relayToken: input.relayToken, filePath: input.path, overwrite: input.overwrite === true, size: input.size });
+    }
+    const result = await jsonFetch(`${runner}/runtime/operation`, { method: "POST", token: config.runnerToken, body: { operation: payload.operation, input: payload.input && typeof payload.input === "object" ? payload.input : {} } });
+    return result.result;
+  }
   if (payload.kind === "runner.cancel" || payload.kind === "runner.approval") {
     if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runner commands");
     const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
@@ -125,7 +273,8 @@ async function executeRunner(job, config, onProgress) {
   if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runner.run jobs");
   const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(runner).hostname)) throw new Error("Local runner URL must use loopback");
-  const input = payload.run;
+  await checkLocalModelReadiness({ runnerUrl: runner, runnerToken: config.runnerToken, model: payload.run.model });
+  const input = { ...payload.run, directory: config.workspaceDirectory || payload.run.directory };
   const started = await jsonFetch(`${runner}/runs`, { method: "POST", token: config.runnerToken, body: input });
   let current = started;
   const runnerRunId = String(input.runId || started.runId || job.id);
@@ -142,30 +291,54 @@ async function executeRunner(job, config, onProgress) {
 
 async function run(options) {
   const file = options.config || process.env.NODE_CONFIG || defaultConfigPath();
-  const config = await loadConfig(file);
+  let config = await loadConfig(file);
+  config = { ...config, _file: file };
   const base = controlBase(options.control_url || config.controlUrl || process.env.NODE_CONTROL_URL || "");
   if (!config.nodeId || !config.nodeSecret) throw new Error(`node is not registered; run the register command first (config: ${file})`);
   let localRunner;
+  let localRunnerError;
   if (options.start_runner || options.start || options._?.[0] === "start") {
     if (!config.runnerToken) throw new Error("runner token is required when starting the local runner");
     const entrypoint = process.env.NODE_RUNNER_ENTRYPOINT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../runner/server.mjs");
-    await mkdir(path.join(path.dirname(file), "state"), { recursive: true });
-    await mkdir(path.join(path.dirname(file), "workspace"), { recursive: true });
+    await mkdir(path.join(path.dirname(file), "state"), { recursive: true, mode: 0o700 });
+    await mkdir(path.join(path.dirname(file), "workspace"), { recursive: true, mode: 0o700 });
     const runnerBin = path.join(path.dirname(entrypoint), "node_modules", ".bin");
-    localRunner = spawn(process.execPath, [entrypoint], { cwd: path.dirname(entrypoint), env: { ...process.env, PATH: [runnerBin, process.env.PATH].filter(Boolean).join(path.delimiter), OPENCODE_BOT_DESKTOP: process.env.OPENCODE_BOT_DESKTOP ?? "0", RUNTIME_ROOT: path.join(path.dirname(file), "state"), WORKSPACE_DIRECTORY: path.join(path.dirname(file), "workspace"), RUNNER_HOST: "127.0.0.1", RUNNER_TOKEN: config.runnerToken, RUNNER_PORT: new URL(config.runnerUrl || "http://127.0.0.1:8787").port || "8787" }, stdio: "inherit", windowsHide: false });
-    process.once("SIGINT", () => localRunner.kill("SIGINT"));
-    process.once("SIGTERM", () => localRunner.kill("SIGTERM"));
+    const configuredUrl = new URL(config.runnerUrl || "http://127.0.0.1:8787");
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(configuredUrl.hostname)) throw new Error("Local runner URL must use loopback");
+    const runnerPort = await availableLoopbackPort(configuredUrl.port || 8787);
+    const runnerUrl = new URL(configuredUrl);
+    runnerUrl.hostname = "127.0.0.1";
+    runnerUrl.port = String(runnerPort);
+    const browserRoot = path.resolve(path.dirname(entrypoint), "../../browsers");
+    const browserConfig = path.join(path.dirname(file), "browser");
+    const startupNonce = randomBytes(32).toString("hex");
+    config = { ...config, runnerUrl: runnerUrl.origin, browser: true, workspaceDirectory: path.join(path.dirname(file), "workspace"), runnerStartupNonce: startupNonce };
+    const { runnerStartupNonce: _startupNonce, _file: _configFile, ...persistedConfig } = config;
+    await saveConfig(file, persistedConfig);
+    await mkdir(browserConfig, { recursive: true, mode: 0o700 });
+    await mkdir(path.join(browserConfig, "profile"), { recursive: true, mode: 0o700 });
+    await mkdir(path.join(browserConfig, "output"), { recursive: true, mode: 0o700 });
+    localRunner = spawn(process.execPath, [entrypoint], { cwd: path.dirname(entrypoint), env: { ...process.env, PATH: [runnerBin, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter), OPENCODE_BOT_DESKTOP: process.env.OPENCODE_BOT_DESKTOP ?? "0", OPENCODE_BOT_BROWSER: "1", PLAYWRIGHT_BROWSERS_PATH: browserRoot, PLAYWRIGHT_MCP_JS: path.join(path.dirname(entrypoint), "node_modules", "@playwright", "mcp", "cli.js"), PLAYWRIGHT_PROFILE_DIR: path.join(browserConfig, "profile"), PLAYWRIGHT_OUTPUT_DIR: path.join(browserConfig, "output"), PLAYWRIGHT_NO_SANDBOX: "0", NODE_RUNNER_STARTUP_NONCE: startupNonce, RUNTIME_ROOT: path.join(path.dirname(file), "state"), WORKSPACE_DIRECTORY: path.join(path.dirname(file), "workspace"), RUNNER_HOST: "127.0.0.1", RUNNER_TOKEN: config.runnerToken, RUNNER_PORT: String(runnerPort) }, stdio: "inherit", windowsHide: false });
+    localRunner.once("error", (error) => { localRunnerError = error; });
+    localRunner.once("exit", (code, signal) => { localRunnerError = new Error(`local runner exited (code ${code ?? "unknown"}, signal ${signal ?? "none"})`); });
+    const stopRunner = () => { if (localRunner && localRunner.exitCode === null) localRunner.kill("SIGINT"); };
+    process.once("SIGINT", stopRunner);
+    process.once("SIGTERM", stopRunner);
+    try { await waitForOwnedRunner(runnerUrl, config.runnerToken, localRunner, 15_000, startupNonce); }
+    catch (error) { stopRunner(); throw error; }
   }
   let lastHeartbeat = 0;
   let count = 0;
   do {
     const now = Date.now();
     let response;
+    if (localRunnerError) throw localRunnerError;
     try {
       if (now - lastHeartbeat >= Number(options.heartbeat_ms || process.env.NODE_HEARTBEAT_MS || DEFAULT_HEARTBEAT_MS)) {
-        await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: VERSION, capabilities: await liveCapabilities(config) } });
+        await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: await agentVersion(), capabilities: await liveCapabilities(config) } });
         lastHeartbeat = now;
       }
+      if (await updateLocked(file)) { await sleep(250); continue; }
       response = await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/poll`, { token: config.nodeSecret });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -178,21 +351,22 @@ async function run(options) {
       const job = response.job;
       let commandBusy = false;
       const keepAlive = setInterval(async () => {
-        jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: VERSION, capabilities: await liveCapabilities(config) } }).catch(() => undefined);
+        jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/heartbeat`, { method: "POST", token: config.nodeSecret, body: { agentVersion: await agentVersion(), capabilities: await liveCapabilities(config) } }).catch(() => undefined);
       }, Number(options.heartbeat_ms || process.env.NODE_HEARTBEAT_MS || DEFAULT_HEARTBEAT_MS));
       const commandPoll = setInterval(async () => {
         if (commandBusy) return;
+        commandBusy = true;
         try {
           const commandResponse = await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/poll`, { token: config.nodeSecret });
           if (!commandResponse.job || commandResponse.job.id === job.id) return;
-          commandBusy = true;
           try {
             const result = await executeRunner(commandResponse.job, config);
             await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(commandResponse.job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: true, result } });
           } catch (error) {
             await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(commandResponse.job.id)}/result`, { method: "POST", token: config.nodeSecret, body: { ok: false, error: error instanceof Error ? error.message : String(error) } });
-          } finally { commandBusy = false; }
+          }
         } catch { /* main run remains authoritative if command polling is interrupted */ }
+        finally { commandBusy = false; }
       }, Number(options.command_poll_ms || 1000));
       try {
         const result = await executeRunner(job, config, async (progress) => {
@@ -225,4 +399,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
 }
 
-export { capabilities, controlBase, executeRunner, register, run };
+export { availableLoopbackPort, capabilities, controlBase, executeRunner, register, run, waitForOwnedRunner };

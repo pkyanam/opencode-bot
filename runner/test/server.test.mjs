@@ -13,6 +13,8 @@ class FakeRuntime {
   async nativeAction(session, name, input) { this.actionCall = { session, name, input }; return { compacted: true }; }
   async removeSession(session) { this.removedSessions ??= []; this.removedSessions.push(session); }
   async catalog(directory) { return { runtime: { name: "opencode2" }, location: directory, models: [{ id: "free", providerID: "test" }], providers: [], agents: [], commands: [{ name: "summarize", execution: "native-session-command" }], clientOnlyCommands: ["help"], mcp: [] }; }
+  async providers(directory) { return { location: directory, providers: [{ id: "test", name: "Test" }] }; }
+  async configureProvider(input) { return { ok: true, integrationID: input.integrationID, key: input.key, apiKey: input.key }; }
   async interrupt(id) { this.interrupts.push(id); }
   async replyApproval(...args) { this.approvals.push(args); }
   async *events() { yield { type: "session.text.delta", properties: { sessionID: "ses_1", delta: "hello" } }; yield { type: "session.execution.succeeded", properties: { sessionID: "ses_1" } }; }
@@ -40,6 +42,41 @@ test("duplicate run admission is idempotent", async () => {
   const b = await store.start({ runId: "same", prompt: "one" });
   assert.equal(a.runId, b.runId); assert.equal(fake.next, 2);
   await assert.rejects(store.start({ runId: 'same', prompt: 'different' }), { statusCode: 409 });
+});
+
+test("authenticated node runtime operations are allowlisted and redact provider secrets", async () => {
+  const server = createServer({ store: new RunStore(new FakeRuntime()), authToken: "secret" });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.equal((await fetch(`${base}/runtime/operation`, { method: "POST", body: JSON.stringify({ operation: "catalog", input: {} }) })).status, 401);
+    const headers = { authorization: "Bearer secret", "content-type": "application/json" };
+    const catalog = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "catalog", input: {} }) }).then((r) => r.json());
+    assert.equal(catalog.result.location, "/workspace/shared");
+    const roots = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "file_roots", input: {} }) }).then((r) => r.json());
+    assert.deepEqual(roots.result, { workspace: "/workspace/shared", home: os.homedir(), root: path.parse("/workspace/shared").root });
+    const provider = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "providers/key", input: { integrationID: "x", key: "do-not-return" } }) }).then((r) => r.json());
+    assert.equal(provider.result.ok, true);
+    assert.equal(provider.result.key, "[redacted]");
+    assert.equal(provider.result.apiKey, "[redacted]");
+    const rejected = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "shell", input: {} }) });
+    assert.equal(rejected.status, 400);
+  } finally { server.close(); }
+});
+
+test("computer file admin operations require explicit scope and stay behind runner auth", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-computer-files-"));
+  fs.writeFileSync(path.join(root, "note.txt"), "local node file");
+  const server = createServer({ store: new RunStore(new FakeRuntime()), authToken: "secret" });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const headers = { authorization: "Bearer secret", "content-type": "application/json" };
+    const listed = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "file_list", input: { scope: "computer", path: root } }) }).then((r) => r.json());
+    assert.equal(listed.result.artifacts[0].path, path.join(root, "note.txt"));
+    const denied = await fetch(`${base}/runtime/operation`, { method: "POST", headers, body: JSON.stringify({ operation: "file_list", input: { path: root } }) });
+    assert.equal(denied.status, 400);
+  } finally { server.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("run attachments become native file prompt parts", async () => {

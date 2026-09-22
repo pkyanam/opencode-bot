@@ -29,6 +29,25 @@ test("runtime qualifies service with isolated roots and maps v2 calls", async ()
   assert.equal(ensureInput, undefined, "injected client should avoid service startup");
 });
 
+test("model references preserve the native provider, id, and variant fields", async () => {
+  const calls = [];
+  const fakeClient = {
+    server: { info: async () => ({}) },
+    session: {
+      create: async input => { calls.push(["create", input]); return { id: "ses_variant" }; },
+      get: async () => ({ id: "ses_variant" }),
+      switchModel: async input => calls.push(["switch", input]),
+    },
+  };
+  const runtime = new OpenCode2Runtime({ client: fakeClient });
+  await runtime.createSession({ model: "openai/gpt-5.6-luna#high" });
+  await runtime.createSession({ sessionId: "ses_variant", model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "balanced", ignored: "drop" } });
+  assert.deepEqual(calls, [
+    ["create", { model: { providerID: "openai", id: "gpt-5.6-luna", variant: "high" }, location: { directory: "/workspace/shared" } }],
+    ["switch", { sessionID: "ses_variant", model: { providerID: "openai", id: "gpt-5.6-luna", variant: "balanced" } }],
+  ]);
+});
+
 test("native session removal maps a missing session to an idempotent 404", async () => {
   const fakeClient = {
     session: {
@@ -357,4 +376,28 @@ test('transcript polls deduplicate while execution reads stay fresh', async () =
   await Promise.all([runtime.messages('ses_x',{cache:true}),runtime.messages('ses_x',{cache:true})]);
   assert.equal(calls,1);
   await runtime.messages('ses_x');assert.equal(calls,2);
+});
+
+test('owned node browser uses its local binary and private directories without Cloudflare CDP', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owned-browser-'));
+  const directory = join(root, 'workspace');
+  const values = { PLAYWRIGHT_MCP_JS: join(root, 'mcp/cli.js'), PLAYWRIGHT_EXECUTABLE_PATH: join(root, 'chromium/chrome'), PLAYWRIGHT_PROFILE_DIR: join(root, 'browser/profile'), PLAYWRIGHT_OUTPUT_DIR: join(root, 'browser/output'), PLAYWRIGHT_NO_SANDBOX: '0' };
+  const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  try {
+    const runtime = new OpenCode2Runtime({ root, directory, browser: true,
+      service: { ensure: async () => ({ url: 'http://127.0.0.1:4096' }), headers: () => ({}) },
+      openCodeFactory: () => ({ server: { info: async () => ({}) }, mcp: { list: async () => ({ data: [{ name: 'computer_browser', status: { status: 'connected' } }] }) } }) });
+    await runtime.start(); await runtime.ensureMcpReady();
+    const config = JSON.parse(await readFile(join(directory, 'opencode.json'), 'utf8'));
+    const args = config.mcp.servers.computer_browser.command;
+    assert.deepEqual(args.slice(0, 2), [process.execPath, values.PLAYWRIGHT_MCP_JS]);
+    for (const [flag, value] of [['--executable-path', values.PLAYWRIGHT_EXECUTABLE_PATH], ['--user-data-dir', values.PLAYWRIGHT_PROFILE_DIR], ['--output-dir', values.PLAYWRIGHT_OUTPUT_DIR]]) assert.equal(args[args.indexOf(flag) + 1], value);
+    assert.equal(args.includes('--cdp-endpoint'), false);
+    assert.equal(args.includes('--no-sandbox'), false);
+    assert.equal(args.includes('--headless'), true);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await rm(root, { recursive: true, force: true });
+  }
 });

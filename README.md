@@ -99,8 +99,9 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
   installer for macOS/Linux or Windows. It accepts the pairing token, installs
   the runtime, pairs the machine, and starts its background service without a Git
   checkout.
-- **Manage workspace files.** Open Workspace → Files to browse folders, search,
-  upload/download files, preview text, and organize the shared computer files.
+- **Browse your computers.** Files offers Workspace and Computer views. Choose a
+  computer, open an absolute path, preview Markdown and images, or upload, download,
+  rename, and remove files. [Computers, models, and access](docs/node-affinity.md).
 - **Manage storage.** Settings → Storage shows measured deployment R2 usage,
   configures idle checkpoints, and lets you discard selected unprotected old
   backups. The account-wide 10 GB-month free allowance is shared across

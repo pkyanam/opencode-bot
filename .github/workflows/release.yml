@@ -175,6 +175,8 @@ jobs:
           rm -rf .tmp/node-bundle node-bundle.tar.gz
           mkdir -p .tmp/node-bundle/scripts .tmp/node-bundle/runner .tmp/node-bundle/packages/runtime-opencode2/src .tmp/node-bundle/packages/browser/src
           cp scripts/node-agent.mjs .tmp/node-bundle/scripts/node-agent.mjs
+          cp scripts/node-update.mjs .tmp/node-bundle/scripts/node-update.mjs
+          cp scripts/node-model-readiness.mjs scripts/node-transfer.mjs .tmp/node-bundle/scripts/
           cp runner/*.mjs runner/package.json runner/package-lock.json .tmp/node-bundle/runner/
           cp packages/runtime-opencode2/src/client.mjs .tmp/node-bundle/packages/runtime-opencode2/src/client.mjs
           cp packages/browser/src/index.ts .tmp/node-bundle/packages/browser/src/index.ts

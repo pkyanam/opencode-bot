@@ -69,6 +69,8 @@ export type NodeRegistryOptions = {
   /** Clock seam for tests and deterministic Durable Object behavior. */
   now?: () => Date;
   randomId?: (prefix: string) => string;
+  /** Workspace secret used to encrypt runtime-operation inputs at rest. */
+  jobSecret?: string;
 };
 
 export type NodeRequestContext = {
@@ -80,6 +82,7 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const DEFAULT_PAIRING_TTL_MS = 10 * 60_000;
 const JOB_LEASE_MS = 45_000;
 const MAX_BODY_BYTES = 256_000;
+const ADMIN_JOB_TTL_MS = 10 * 60_000;
 
 export class NodeHttpError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -171,11 +174,13 @@ export class NodeRegistry {
   private readonly timeout: number;
   private readonly clock: () => Date;
   private readonly idFactory: (prefix: string) => string;
+  private readonly jobSecret?: string;
 
   constructor(private readonly sql: SqlStorage, options: NodeRegistryOptions = {}) {
     this.timeout = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     this.clock = options.now ?? (() => new Date());
     this.idFactory = options.randomId ?? ((prefix) => `${prefix}_${randomToken(16)}`);
+    this.jobSecret = options.jobSecret;
     this.init();
   }
 
@@ -218,6 +223,27 @@ export class NodeRegistry {
   }
 
   private now(): Date { return this.clock(); }
+  private async cryptoKey(): Promise<CryptoKey> {
+    if (!this.jobSecret) throw new NodeHttpError(503, "node runtime operation encryption is unavailable");
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(this.jobSecret));
+    return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  }
+  private encode(value: Uint8Array): string { let binary = ""; for (const byte of value) binary += String.fromCharCode(byte); return btoa(binary); }
+  private decode(value: string): Uint8Array { return Uint8Array.from(atob(value), (char) => char.charCodeAt(0)); }
+  private async encryptAdminInput(nodeId: string, jobId: string, input: unknown): Promise<{ v: 1; iv: string; ciphertext: string }> {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aad = new TextEncoder().encode(`${nodeId}:${jobId}`);
+    const plaintext = new TextEncoder().encode(JSON.stringify(input ?? {}));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: aad }, await this.cryptoKey(), plaintext));
+    return { v: 1, iv: this.encode(iv), ciphertext: this.encode(ciphertext) };
+  }
+  private async decryptAdminInput(nodeId: string, jobId: string, envelope: any): Promise<unknown> {
+    if (!envelope || envelope.v !== 1 || typeof envelope.iv !== "string" || typeof envelope.ciphertext !== "string") throw new Error("invalid encrypted runtime operation");
+    const aad = new TextEncoder().encode(`${nodeId}:${jobId}`);
+    const asBuffer = (value: Uint8Array): ArrayBuffer => value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer;
+    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: asBuffer(this.decode(envelope.iv)), additionalData: asBuffer(aad) }, await this.cryptoKey(), asBuffer(this.decode(envelope.ciphertext)));
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  }
   private rows<T extends Record<string, unknown> = Record<string, unknown>>(query: string, ...args: unknown[]): T[] {
     return this.sql.exec(query, ...args).toArray() as T[];
   }
@@ -323,7 +349,13 @@ export class NodeRegistry {
     const now = this.now();
     const id = this.idFactory("job");
     if (!Number.isInteger(priority) || priority < 0 || priority > 100) throw new NodeHttpError(400, "job priority must be between 0 and 100");
-    this.sql.exec("INSERT INTO node_jobs (id,node_id,status,priority,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", id, nodeId, "queued", priority, JSON.stringify(payload), now.toISOString(), now.toISOString());
+    let storedPayload = payload;
+    if (payload.kind === "runtime.operation") {
+      if (!this.jobSecret) throw new NodeHttpError(503, "node runtime operation encryption is unavailable");
+      const { input, ...metadata } = payload;
+      storedPayload = { ...metadata, ...(input === undefined ? {} : { inputEncrypted: await this.encryptAdminInput(nodeId, id, input) }) };
+    }
+    this.sql.exec("INSERT INTO node_jobs (id,node_id,status,priority,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", id, nodeId, "queued", priority, JSON.stringify(storedPayload), now.toISOString(), now.toISOString());
     return this.job(this.one("SELECT * FROM node_jobs WHERE id=?", id)!);
   }
 
@@ -331,6 +363,7 @@ export class NodeRegistry {
     const node = await this.authenticate(nodeId, secret);
     if (!node) throw new NodeHttpError(401, "invalid node credential");
     const now = this.now();
+    this.sweep(now);
     // An expired lease is ambiguous: the runner may have completed an
     // external side effect before the agent disappeared. Never replay it
     // automatically. Workspace can explicitly review/reconcile by job id.
@@ -338,7 +371,15 @@ export class NodeRegistry {
     const row = this.one("SELECT * FROM node_jobs WHERE node_id=? AND status='queued' ORDER BY priority DESC, created_at LIMIT 1", nodeId);
     if (!row) return null;
     this.sql.exec("UPDATE node_jobs SET status='leased', lease_expires_at=?, updated_at=? WHERE id=? AND status='queued'", new Date(now.getTime() + JOB_LEASE_MS).toISOString(), now.toISOString(), row.id);
-    return this.job(this.one("SELECT * FROM node_jobs WHERE id=?", row.id)!);
+    const leased = this.one("SELECT * FROM node_jobs WHERE id=?", row.id)!;
+    try {
+      const payload = parseJson<any>(leased.payload, {});
+      if (payload.kind === "runtime.operation" && payload.inputEncrypted) payload.input = await this.decryptAdminInput(nodeId, String(row.id), payload.inputEncrypted);
+      return this.job(leased, payload);
+    } catch {
+      this.sql.exec("UPDATE node_jobs SET status='needs_review',error='runtime operation integrity check failed',payload=json_remove(payload,'$.inputEncrypted','$.input'),lease_expires_at=NULL,updated_at=? WHERE id=? AND status='leased'", now.toISOString(), row.id);
+      return null;
+    }
   }
 
   getJob(jobId: string): NodeJob | null {
@@ -360,7 +401,7 @@ export class NodeRegistry {
     if (row.status !== "leased") throw new NodeHttpError(409, "job is no longer leased");
     const now = this.now();
     const succeeded = input.ok === true;
-    this.sql.exec("UPDATE node_jobs SET status=?, result=?, error=?, lease_expires_at=NULL, updated_at=? WHERE id=? AND status='leased'", succeeded ? "succeeded" : "failed", input.result === undefined ? null : JSON.stringify(input.result), typeof input.error === "string" ? input.error.slice(0, 2000) : null, now.toISOString(), jobId);
+    this.sql.exec("UPDATE node_jobs SET status=?, payload=CASE WHEN json_extract(payload,'$.kind')='runtime.operation' THEN json_remove(payload,'$.inputEncrypted','$.input') ELSE payload END, result=?, error=?, lease_expires_at=NULL, updated_at=? WHERE id=? AND status='leased'", succeeded ? "succeeded" : "failed", input.result === undefined ? null : JSON.stringify(input.result), typeof input.error === "string" ? input.error.slice(0, 2000) : null, now.toISOString(), jobId);
     return this.job(this.one("SELECT * FROM node_jobs WHERE id=?", jobId)!);
   }
 
@@ -376,9 +417,22 @@ export class NodeRegistry {
     return this.job(this.one("SELECT * FROM node_jobs WHERE id=?", jobId)!);
   }
 
-  private job(row: Record<string, unknown>): NodeJob {
+  sweep(now = this.now()): void {
+    const cutoff = new Date(now.getTime() - ADMIN_JOB_TTL_MS).toISOString();
+    this.sql.exec("UPDATE node_jobs SET status='needs_review', error='runtime operation expired before delivery', payload=json_remove(payload,'$.inputEncrypted','$.input'), lease_expires_at=NULL, updated_at=? WHERE status='queued' AND json_extract(payload,'$.kind')='runtime.operation' AND created_at<=?", now.toISOString(), cutoff);
+    this.sql.exec("UPDATE node_jobs SET payload=json_remove(payload,'$.inputEncrypted','$.input') WHERE status IN ('succeeded','failed','needs_review') AND json_extract(payload,'$.kind')='runtime.operation'");
+  }
+
+  nextAdminExpiry(): number | undefined {
+    const row = this.one<{ created_at?: string }>("SELECT MIN(created_at) AS created_at FROM node_jobs WHERE status='queued' AND json_extract(payload,'$.kind')='runtime.operation'");
+    if (!row?.created_at) return undefined;
+    const expiry = Date.parse(row.created_at) + ADMIN_JOB_TTL_MS;
+    return Number.isFinite(expiry) ? expiry : undefined;
+  }
+
+  private job(row: Record<string, unknown>, payloadOverride?: Record<string, unknown>): NodeJob {
     return {
-      id: String(row.id), nodeId: String(row.node_id), status: row.status as NodeJob["status"], payload: parseJson(row.payload, {}), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+      id: String(row.id), nodeId: String(row.node_id), status: row.status as NodeJob["status"], payload: payloadOverride ?? parseJson(row.payload, {}), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
       ...(row.lease_expires_at ? { leaseExpiresAt: String(row.lease_expires_at) } : {}), ...(row.result ? { result: parseJson(row.result, null) } : {}), ...(row.error ? { error: String(row.error) } : {}),
     };
   }

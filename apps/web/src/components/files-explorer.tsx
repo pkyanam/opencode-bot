@@ -32,8 +32,12 @@ const fmtSize = (value = 0) =>
     : value < 1024 * 1024
       ? `${Math.ceil(value / 1024)} KB`
       : `${(value / 1024 / 1024).toFixed(1)} MB`;
-export function FilesExplorer() {
+type FileNode = { id: string; name: string; online: boolean; revokedAt?: string };
+export function FilesExplorer({ nodeId, nodes = [] }: { nodeId?: string; nodes?: FileNode[] }) {
+  const [selectedNodeId, setSelectedNodeId] = useState(nodeId ?? "");
+  const [scope, setScope] = useState<"workspace" | "computer">("workspace");
   const [path, setPath] = useState(".");
+  const [pathDraft, setPathDraft] = useState(".");
   const [items, setItems] = useState<FileArtifact[]>([]);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"name" | "modified">("name");
@@ -53,6 +57,9 @@ export function FilesExplorer() {
     null,
   );
   const [actionName, setActionName] = useState("");
+  const activeNodeId = selectedNodeId || undefined;
+  const fileOptions = { scope, nodeId: activeNodeId };
+  useEffect(() => setSelectedNodeId(nodeId ?? ""), [nodeId]);
   const loadController = useRef<AbortController | undefined>(undefined);
   const previewController = useRef<AbortController | undefined>(undefined);
   const load = async (nextPath = path) => {
@@ -61,7 +68,7 @@ export function FilesExplorer() {
     loadController.current = controller;
     try {
       setLoading(true);
-      const result = await api.files(nextPath, controller.signal);
+      const result = await api.files(nextPath, controller.signal, fileOptions);
       if (controller.signal.aborted) return;
       setItems(Array.isArray(result) ? result : (result.artifacts ?? []));
       setError("");
@@ -76,21 +83,34 @@ export function FilesExplorer() {
   useEffect(() => {
     void load();
     return () => loadController.current?.abort();
-  }, [path]);
+  }, [path, selectedNodeId, scope]);
+  useEffect(() => setPathDraft(path), [path]);
+  useEffect(() => {
+    setSelected(null);
+    setPreview("");
+    setImagePreview("");
+    setPreviewError("");
+    setExpanded(false);
+  }, [selectedNodeId, scope, path]);
+  useEffect(() => {
+    setPath(scope === "computer" ? "/" : ".");
+  }, [scope, selectedNodeId]);
   useEffect(
     () => () => {
       if (imagePreview) URL.revokeObjectURL(imagePreview);
     },
     [imagePreview],
   );
-  const current =
-    path === "." ? "" : `${path.replace(/^\.\//, "").replace(/\/$/, "")}/`;
+  const current = path === "." ? "" : path === "/" ? "/" : `${path.replace(/^\.\//, "").replace(/\/$/, "")}/`;
+  const displayPath = (value: string) => value.replaceAll("\\", "/");
+  const displayCurrent = displayPath(current);
   const children = useMemo(() => {
     const seen = new Set<string>();
     return items
       .filter((item) => {
-        const relative = item.path.startsWith(current)
-          ? item.path.slice(current.length)
+        const itemDisplay = displayPath(item.path);
+        const relative = itemDisplay.startsWith(displayCurrent)
+          ? itemDisplay.slice(displayCurrent.length)
           : "";
         if (!relative || relative.includes("/")) return false;
         if (seen.has(relative)) return false;
@@ -100,7 +120,7 @@ export function FilesExplorer() {
       .sort((a, b) =>
         sort === "modified"
           ? String(b.modifiedAt).localeCompare(String(a.modifiedAt))
-          : a.path.localeCompare(b.path),
+          : displayPath(a.path).localeCompare(displayPath(b.path)),
       );
   }, [items, current, query, sort]);
   const open = async (item: FileArtifact) => {
@@ -116,10 +136,12 @@ export function FilesExplorer() {
     setPreviewLoading(true);
     try {
       if (isText(item.path)) {
-        const text = await api.fileContent(item.path, controller.signal);
+        const text = (fileOptions.scope === "computer" || fileOptions.nodeId) && (item.size ?? 0) > 150 * 1024
+          ? await (await api.fileDownload(item.path, controller.signal, fileOptions)).text()
+          : await api.fileContent(item.path, controller.signal, fileOptions);
         if (!controller.signal.aborted) setPreview(text.length > 200_000 ? text.slice(0, 200_000) + "\n… Preview truncated. Download for the complete file." : text || "Empty file");
       } else if (/\.(png|jpe?g|gif|webp|avif|pdf)$/i.test(item.path)) {
-        const blob = await api.fileDownload(item.path, controller.signal);
+        const blob = await api.fileDownload(item.path, controller.signal, fileOptions);
         if (!controller.signal.aborted) setImagePreview(URL.createObjectURL(/\.pdf$/i.test(item.path) ? new Blob([blob], { type: "application/pdf" }) : blob));
       }
     } catch (e) {
@@ -137,7 +159,7 @@ export function FilesExplorer() {
   }, [expanded]);
   const download = async (item: FileArtifact) => {
     try {
-      const blob = await api.fileDownload(item.path);
+      const blob = await api.fileDownload(item.path, undefined, fileOptions);
       const href = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = href;
@@ -154,7 +176,7 @@ export function FilesExplorer() {
     if (items.some(item => item.path === target) && !window.confirm(`Replace ${target}? The existing file will be overwritten.`)) return;
     try {
       setUploading(true);
-      await api.fileUpload(target, await file.arrayBuffer(), file.type);
+      await api.fileUpload(target, await file.arrayBuffer(), file.type, fileOptions);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not upload file.");
@@ -167,14 +189,14 @@ export function FilesExplorer() {
     if (!action || (action !== "delete" && !name) || uploading) return;
     setUploading(true);
     try {
-      if (action === "mkdir") await api.fileMkdir(current + name);
+      if (action === "mkdir") await api.fileMkdir(current + name, fileOptions);
       else if (action === "rename" && selected) {
         const destination = `${current}${name}`;
-        await api.fileMove(selected.path, destination);
+        await api.fileMove(selected.path, destination, fileOptions);
         setSelected({ ...selected, path: destination });
       }
       else if (action === "delete" && selected) {
-        await api.fileDelete(selected.path);
+        await api.fileDelete(selected.path, fileOptions);
         setSelected(null);
       }
       setAction(null);
@@ -184,14 +206,14 @@ export function FilesExplorer() {
       setError(e instanceof Error ? e.message : "Could not update files.");
     } finally { setUploading(false); }
   };
-  const crumbs = path === "." ? [] : path.split("/");
+  const crumbs = path === "." || path === "/" ? [] : path.split(/[\\/]+/).filter(Boolean);
   return (
     <main className="main workspace-surface files-explorer">
       <div className="surface-head">
-        <div>
-          <div className="eyebrow">SHARED COMPUTER</div>
+          <div>
+          <div className="eyebrow">{activeNodeId ? nodes.find(node => node.id === activeNodeId)?.name ?? "Selected computer" : "Cloudflare shared computer"}</div>
           <h1>Files</h1>
-          <p>Browse and download artifacts created by your bots.</p>
+          <p>{scope === "workspace" ? "Browse and download artifacts created by your bots." : "Browse files on the selected computer."}</p>
         </div>
         <div className="files-actions">
           <Button
@@ -222,9 +244,18 @@ export function FilesExplorer() {
           </Button>
         </div>
       </div>
+      <div className="files-scope-switch" role="group" aria-label="File scope">
+        <button className={scope === "workspace" ? "primary-btn" : "soft-btn"} onClick={() => setScope("workspace")}>Workspace files</button>
+        <button className={scope === "computer" ? "primary-btn" : "soft-btn"} onClick={() => setScope("computer")}>Computer files</button>
+        <label htmlFor="files-node">Computer</label>
+        <select id="files-node" value={selectedNodeId} onChange={(event) => setSelectedNodeId(event.target.value)}>
+          <option value="">Cloudflare shared computer</option>
+          {nodes.filter((node) => !node.revokedAt).map((node) => <option key={node.id} value={node.id}>{node.name}{node.online ? "" : " · offline"}</option>)}
+        </select>
+      </div>
       <div className="files-breadcrumbs">
-        <button onClick={() => setPath(".")}>
-          <HardDrive size={14} /> workspace
+        <button onClick={() => setPath(scope === "computer" ? "/" : ".")}>
+          <HardDrive size={14} /> {scope === "computer" ? "computer root" : "workspace"}
         </button>
         {crumbs.map((crumb, index) => (
           <span key={`${crumb}-${index}`}>
@@ -238,6 +269,11 @@ export function FilesExplorer() {
         ))}
       </div>
       <div className="files-toolbar">
+        <form className="files-path" onSubmit={(event) => { event.preventDefault(); const next = pathDraft.trim() || (scope === "computer" ? "/" : "."); setPath(next); }}>
+          <label htmlFor="files-path">Path</label>
+          <input id="files-path" value={pathDraft} onChange={(event) => setPathDraft(event.target.value)} spellCheck={false} />
+          <Button type="submit" variant="outline">Go</Button>
+        </form>
         <div className="files-search">
           <Search size={14} />
           <input
@@ -293,7 +329,7 @@ export function FilesExplorer() {
                 <small>
                   {item.kind === "directory"
                     ? "Folder"
-                    : `${fmtSize(item.size)} · ${new Date(item.modifiedAt).toLocaleDateString()}`}
+                    : `${fmtSize(item.size)}${item.modifiedAt && Number.isFinite(Date.parse(item.modifiedAt)) ? ` · ${new Date(item.modifiedAt).toLocaleDateString()}` : ""}`}
                 </small>
               </span>
               {item.kind === "file" && (

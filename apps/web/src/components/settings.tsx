@@ -1,6 +1,6 @@
 import { computerInstallCommand } from "../computer-install";
 import { DeviceSettings, readClientIdentity, type ClientIdentity } from "./device-connection";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Copy,
   RefreshCw,
@@ -41,6 +41,19 @@ type Node = {
   lastSeenAt?: string;
   capabilities: { runner: boolean; browser: boolean; desktop: boolean };
 };
+
+function NodeTargetPicker({ nodes, value, onChange }: { nodes: Node[]; value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="setting-fact" style={{ alignItems: "center", gap: 10 }}>
+      <label htmlFor="settings-node-target"><strong>Configure computer</strong></label>
+      <select id="settings-node-target" className="settings-input" value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Cloudflare shared computer</option>
+        {nodes.filter((node) => !node.revokedAt).map((node) => <option key={node.id} value={node.id}>{node.name}{node.online ? "" : " · offline"}</option>)}
+      </select>
+    </div>
+  );
+}
+
 export function SettingsModal({
   bots,
   onClose,
@@ -68,6 +81,8 @@ export function SettingsModal({
     null,
   );
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const catalogRequest = useRef(0);
   const [botId, setBotId] = useState(bots[0]?.id ?? "");
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramMode, setTelegramMode] = useState<"polling" | "webhook">(
@@ -103,14 +118,18 @@ export function SettingsModal({
       if (result.config?.transport) setTelegramMode(result.config.transport);
     }
   };
+  const loadCatalog = async () => {
+    const requestId = ++catalogRequest.current;
+    const next = await api.catalog(selectedNodeId || undefined);
+    if (requestId === catalogRequest.current) setCatalog(next);
+  };
   useEffect(() => {
     setError("");
     setNotice("");
-    if (tab === "nodes") void action(loadNodes);
-    if (tab === "runtime")
-      void action(async () => setCatalog(await api.catalog()));
+    if (["nodes", "runtime", "mcp"].includes(tab)) void action(loadNodes);
+    if (tab === "runtime") void action(loadCatalog);
     if (tab === "telegram") void action(loadTelegram);
-  }, [tab, botId]);
+  }, [tab, botId, selectedNodeId]);
   useEffect(() => {
     if (tab !== "nodes") return;
     let disposed = false;
@@ -304,7 +323,7 @@ export function SettingsModal({
                         {n.online ? "Connected" : "Offline"}
                       </p>
                       <small>
-                        {n.capabilities.runner
+                        {n.capabilities?.runner
                           ? "Runner available"
                           : "Agent connected; runner unavailable"}
                       </small>
@@ -614,24 +633,25 @@ export function SettingsModal({
               )}
             </TabsContent>
             <TabsContent value="runtime">
+              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} />
               <div className="settings-section-head">
                 <h3>OpenCode</h3>
                 <button
                   className="icon-btn"
                   aria-label="Refresh runtime catalog"
                   onClick={() =>
-                    void action(async () => setCatalog(await api.catalog()))
+                    void action(loadCatalog)
                   }
                 >
                   <RefreshCw size={15} />
                 </button>
               </div>
               <p>
-                The shared computer supplies its models, agents, commands, and
-                MCP tools. Configure provider connections for this shared
-                OpenCode runtime below.
+                This configures the selected computer’s local OpenCode runtime.
+                Provider credentials and model configuration stay on that
+                computer; they are never copied from another node.
               </p>
-              <OpenCodeProviders onSaved={() => { onSaved(); void action(async () => setCatalog(await api.catalog())); }} />
+              <OpenCodeProviders nodeId={selectedNodeId || undefined} onSaved={() => { onSaved(); void action(loadCatalog); }} />
               {catalog && (
                 <>
                   <div className="setting-fact">
@@ -663,7 +683,8 @@ export function SettingsModal({
               </p>
             </TabsContent>
             <TabsContent value="mcp">
-              <McpSettings onSaved={() => { onSaved(); void action(async () => setCatalog(await api.catalog())); }} onOpenComputer={onOpenComputer} />
+              <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} />
+              <McpSettings nodeId={selectedNodeId || undefined} onSaved={() => { onSaved(); void action(loadCatalog); }} onOpenComputer={onOpenComputer} />
             </TabsContent>
             <TabsContent value="storage">
               <StorageSettings />

@@ -6,6 +6,7 @@ import packageInfo from "../../../package.json";
 import { ComputerStartup } from "./computer-startup";
 import { telegramActivity } from "./telegram-activity";
 import { NodeRegistry } from "../../../packages/nodes/src/index";
+import { createTransferManifest, createTransferProtocol, hmacSigner, issueTransferToken, type TransferManifest, TransferError } from "../../../packages/node-transfer/src/index";
 import {
   TelegramService,
   DurableObjectTelegramStore,
@@ -149,7 +150,7 @@ export class Workspace {
   private nodeRegistry?: NodeRegistry;
   private telegramService?: TelegramService;
   private nodes() {
-    return (this.nodeRegistry ??= new NodeRegistry(this.state.storage.sql));
+    return (this.nodeRegistry ??= new NodeRegistry(this.state.storage.sql, { jobSecret: this.env.APP_TOKEN }));
   }
   private pairing() {
     return (this.pairingService ??= new PairingService(this.state.storage.sql));
@@ -555,6 +556,10 @@ export class Workspace {
     sql.exec(
       `CREATE TABLE IF NOT EXISTS bot_creation_continuations (source_run_id TEXT PRIMARY KEY, continuation_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     );
+    sql.exec(`CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, manifest TEXT NOT NULL, upload_token TEXT NOT NULL, download_token TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS transfer_requests (run_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, transfer_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,request_id))`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS node_file_relays (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, direction TEXT NOT NULL, path TEXT NOT NULL, manifest TEXT NOT NULL, upload_token TEXT NOT NULL, download_token TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    try { sql.exec("ALTER TABLE node_file_relays ADD COLUMN job_id TEXT"); } catch { /* already exists */ }
     sql.exec(
       `CREATE INDEX IF NOT EXISTS events_run_seq ON events(run_id, sequence)`,
     );
@@ -645,7 +650,7 @@ export class Workspace {
     const ownerAuthorized = Boolean(this.env.APP_TOKEN && bearer(request) && safeEqual(bearer(request)!, this.env.APP_TOKEN));
     const internalAuthorized = Boolean(url.pathname.startsWith("/internal/") && this.env.RUNNER_TOKEN && bearer(request) && safeEqual(bearer(request)!, this.env.RUNNER_TOKEN));
     const client = ownerAuthorized ? null : await this.pairing().authenticate(bearer(request));
-    const externallyAuthenticated = url.pathname === "/api/pairing/redeem" || url.pathname === "/api/nodes" || url.pathname.startsWith("/api/nodes/") || /^\/api\/integrations\/telegram\/webhook\/[^/]+$/.test(url.pathname);
+    const externallyAuthenticated = url.pathname === "/api/pairing/redeem" || url.pathname === "/api/nodes" || url.pathname.startsWith("/api/nodes/") || url.pathname.startsWith("/api/transfers/") || url.pathname.startsWith("/api/node-files/") || /^\/api\/integrations\/telegram\/webhook\/[^/]+$/.test(url.pathname);
     if (!ownerAuthorized && !internalAuthorized && !client && !externallyAuthenticated)
       return response({ error: "unauthorized" }, 401, { "www-authenticate": "Bearer" });
     if (client && !clientRouteAllowed(request, url))
@@ -678,7 +683,8 @@ export class Workspace {
         },
       })(request);
     }
-    const computerDependent = /^\/api\/(catalog|files(?:\/.*)?|attachments(?:\/.*)?|mcps(?:\/.*)?|providers(?:\/.*)?|computer\/(?:preview|control)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
+    const nodeScopedFilesystem = (url.pathname.startsWith("/api/files") && url.searchParams.get("scope") === "computer" && Boolean(url.searchParams.get("nodeId"))) || url.pathname.startsWith("/api/node-files");
+    const computerDependent = !nodeScopedFilesystem && /^\/api\/(catalog|files(?:\/.*)?|attachments(?:\/.*)?|mcps(?:\/.*)?|providers(?:\/.*)?|computer\/(?:preview|control)|terminal(?:\/.*)?|extensions\/plugins|extension-repositories\/[^/]+\/install)$/.test(url.pathname);
     try {
       if (url.pathname === "/api/pairing/redeem" && request.method === "POST")
         {
@@ -762,6 +768,17 @@ export class Workspace {
         }, 503, { "retry-after": "3" });
       }
 
+      const runtimeOperation = url.pathname.match(/^\/api\/nodes\/([^/]+)\/runtime\/(.+)$/);
+      const runtimeJob = url.pathname.match(/^\/api\/nodes\/([^/]+)\/runtime\/jobs\/([^/]+)$/);
+      if (runtimeJob && request.method === "GET") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(this.nodeRuntimeJob(runtimeJob[1], runtimeJob[2]));
+      }
+      if (runtimeOperation && request.method === "POST") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        const operation = decodeURIComponent(runtimeOperation[2]);
+        return response(await this.enqueueNodeRuntimeOperation(runtimeOperation[1], operation, request.method, await body(request)), 202);
+      }
       if (
         url.pathname === "/api/nodes" ||
         url.pathname.startsWith("/api/nodes/")
@@ -813,8 +830,23 @@ export class Workspace {
         return await this.mcpServiceProxy(request, url);
       if (url.pathname === "/api/computer/control" && request.method === "POST")
         return await this.desktopControl(request);
+      if (url.pathname === "/api/catalog" && request.method === "GET" && url.searchParams.has("nodeId"))
+        throw new HttpError(409, "node-scoped catalog requests must use /api/nodes/:nodeId/runtime/catalog; refusing cloud fallback");
       if (url.pathname === "/api/catalog" && request.method === "GET")
         return await this.catalog();
+      if (url.pathname === "/api/transfers" && request.method === "POST") {
+        if (!ownerAuthorized && !internalAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(await this.createTransfer(await body(request)), 201);
+      }
+      if (url.pathname === "/api/node-files" && request.method === "POST") {
+        if (!ownerAuthorized) throw new HttpError(401, "owner authorization required");
+        return response(await this.createNodeFileRelay(await body(request)), 202);
+      }
+      const nodeFileRelay = url.pathname.match(/^\/api\/node-files\/([^/]+)\/content$/);
+      if (nodeFileRelay && ["PUT", "GET"].includes(request.method)) return await this.nodeFileRelayContent(request, nodeFileRelay[1]);
+      const transferRoute = url.pathname.match(/^\/api\/transfers\/([^/]+)\/content$/);
+      if (transferRoute && ["PUT", "GET"].includes(request.method))
+        return await this.transferContent(request, transferRoute[1]);
       if (url.pathname === "/api/computer/preview" && request.method === "GET")
         return await this.preview(request);
       if (
@@ -1593,11 +1625,30 @@ export class Workspace {
       threadId,
     ).map((row) => this.delegationView(row));
   }
-  private botDirectory(excludeBotId?: string): Array<{ id: string; name: string }> {
-    return this.rows<any>("SELECT id,name FROM bots ORDER BY created_at").map((bot) => ({
-      id: bot.id,
-      name: bot.name,
-    })).filter((bot) => bot.id !== excludeBotId);
+  private botDirectory(excludeBotId?: string): Array<{ id: string; name: string; nodeId?: string; nodeOnline: boolean }> {
+    let rows: any[];
+    try {
+      rows = this.rows<any>(
+        `SELECT b.id,b.name,b.node_id,n.last_seen_at,n.revoked_at
+         FROM bots b LEFT JOIN nodes n ON n.id=b.node_id ORDER BY b.created_at`,
+      );
+    } catch {
+      // Older workspaces may not have initialized the optional node registry
+      // table yet; messaging must remain available for local bots.
+      rows = this.rows<any>("SELECT id,name,node_id FROM bots ORDER BY created_at");
+    }
+    return rows.map((bot) => {
+      const lastSeen = typeof bot.last_seen_at === "string" ? Date.parse(bot.last_seen_at) : NaN;
+      return {
+        id: bot.id,
+        name: bot.name,
+        ...(bot.node_id ? { nodeId: bot.node_id } : {}),
+        // A bot without an owned node uses the control worker's normal
+        // execution path. Owned bots must have a live registered node; an
+        // offline target remains durable and queued rather than falling back.
+        nodeOnline: !bot.node_id || Boolean(!bot.revoked_at && Number.isFinite(lastSeen) && Date.now() - lastSeen <= 90_000),
+      };
+    }).filter((bot) => bot.id !== excludeBotId);
   }
   private createDelegation(sourceThreadId: string, input: any): any {
     const source = this.one<any>(
@@ -2184,6 +2235,10 @@ export class Workspace {
 
   async alarm(): Promise<void> {
     this.init();
+    this.nodes().sweep();
+    this.scrubCompletedRuntimeInputs();
+    await this.cleanupExpiredNodeRelays();
+    await this.reconcileCloudTransfers();
     if (typeof this.state.storage.get === "function" && await this.updates().active()) {
       this.maintenance = true;
       try { await this.updates().resume(); }
@@ -2210,6 +2265,8 @@ export class Workspace {
     if (asleep) run = this.one<any>("SELECT r.* FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NOT NULL AND r.status IN ('queued','provisioning','running','waiting_approval','cancelling') ORDER BY r.created_at LIMIT 1");
     if (!run) {
       await this.automaticCheckpoint();
+      if (this.one<{ n: number }>("SELECT COUNT(*) AS n FROM transfers WHERE status IN ('queued','uploaded','delivering')")?.n)
+        this.state.storage.setAlarm(Date.now() + 3000);
       this.schedule(asleep);
       return;
     }
@@ -2318,6 +2375,8 @@ export class Workspace {
       polling ? Date.now() + 5000 : Infinity,
       due?.at ? Number(due.at) : Infinity,
       active ? Date.now() + 3000 : Infinity,
+      this.nodes().nextAdminExpiry() ?? Infinity,
+      (() => { const expiry = this.one<{ at: string }>("SELECT MIN(expires_at) AS at FROM node_file_relays")?.at; return expiry ? Math.max(Date.now() + 30_000, Date.parse(expiry)) : Infinity; })(),
     );
     if (Number.isFinite(wake))
       this.state.storage.setAlarm(Math.max(Date.now() + 100, wake));
@@ -2656,6 +2715,26 @@ export class Workspace {
     }
   }
   private async fileProxy(request: Request, url: URL): Promise<Response> {
+    const computerScope = url.searchParams.get("scope") === "computer";
+    if (computerScope) {
+      const owner = Boolean(this.env.APP_TOKEN && bearer(request) && safeEqual(bearer(request)!, this.env.APP_TOKEN));
+      if (!owner) throw new HttpError(403, "whole-computer filesystem access requires owner authorization");
+      const nodeId = url.searchParams.get("nodeId");
+      if (nodeId) {
+        const operation = url.pathname === "/api/files" && request.method === "GET" ? "file_list" : url.pathname === "/api/files/content" && request.method === "GET" ? "file_read" : url.pathname === "/api/files/mkdir" && request.method === "POST" ? "file_mkdir" : url.pathname === "/api/files/move" && request.method === "POST" ? "file_move" : url.pathname === "/api/files" && request.method === "DELETE" ? "file_delete" : "file_write";
+        if (["file_read", "file_write"].includes(operation)) throw new HttpError(409, "owned-node whole-computer content uses a streamed transfer job; retry after node file bridge update");
+        const input = Object.fromEntries(url.searchParams.entries());
+        if (operation === "file_move") Object.assign(input, { from: url.searchParams.get("from"), to: url.searchParams.get("to") });
+        return response(await this.enqueueNodeRuntimeOperation(nodeId, operation, request.method, { ...input, scope: "computer" }), 202);
+      }
+      const transport = await this.transport();
+      const targetPath = url.pathname === "/api/files/content" ? "/files/content" : url.pathname === "/api/files/mkdir" ? "/files/mkdir" : url.pathname === "/api/files/move" ? "/files/move" : "/files";
+      const target = `${targetPath}?${url.searchParams.toString()}`;
+      const headers = new Headers();
+      const contentType = request.headers.get("content-type"); if (contentType) headers.set("content-type", contentType);
+      const result = await transport.fetch(target, { method: request.method, headers, ...(request.method === "POST" ? { body: request.body as any } : {}) });
+      return new Response(result.body, { status: result.status, headers: result.headers });
+    }
     const listingRoot =
       url.pathname === "/api/files" &&
       request.method === "GET" &&
@@ -2741,6 +2820,132 @@ export class Workspace {
     if (!result.ok) throw new HttpError(result.status >= 400 && result.status < 500 ? result.status : 502, "attachment upload failed");
     this.state.storage.sql.exec("INSERT INTO chat_attachments(id,path,name,mime_type,size,created_at) VALUES(?,?,?,?,?,?)", attachmentId, path, name, mimeType, file.bytes.byteLength, isoNow());
     return { id: attachmentId, name, mimeType, size: file.bytes.byteLength };
+  }
+  private transferProtocol() {
+    if (!this.env.ARTIFACTS) throw new HttpError(503, "node transfer storage is unavailable");
+    const signerSecret = this.env.APP_TOKEN || this.env.RUNNER_TOKEN;
+    if (!signerSecret) throw new HttpError(503, "node transfer signing is unavailable");
+    const bucket = this.env.ARTIFACTS;
+    return createTransferProtocol({
+      signer: hmacSigner(signerSecret),
+      store: {
+        async put(key, stream, options) {
+          const metadata = options as any;
+          // Feed hashing and storage together with backpressure. A sequential
+          // tee/hash/read would buffer the entire file in Worker memory.
+          const Digest = (crypto as unknown as { DigestStream?: new (algorithm: string) => WritableStream<Uint8Array> & { digest: Promise<ArrayBuffer> } }).DigestStream;
+          if (!Digest) throw new HttpError(503, "streaming digest support is unavailable");
+          const digest = new Digest("SHA-256");
+          const hashWriter = digest.getWriter();
+          const checked = stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+            async transform(chunk, controller) { await hashWriter.write(chunk); controller.enqueue(chunk); },
+            async flush() { await hashWriter.close(); },
+          }));
+          try {
+            if (typeof FixedLengthStream === "function" && Number.isSafeInteger(metadata.size)) {
+              const fixed = new FixedLengthStream(metadata.size);
+              await Promise.all([bucket.put(key, fixed.readable, metadata), checked.pipeTo(fixed.writable)]);
+            } else await bucket.put(key, checked, metadata);
+            const actual = Array.from(new Uint8Array(await digest.digest), byte => byte.toString(16).padStart(2, "0")).join("");
+            if (actual !== metadata.customMetadata.sha256) throw new TransferError(422, "file digest does not match", "digest_mismatch");
+          } catch (error) {
+            await hashWriter.abort(error).catch(() => undefined);
+            await digest.digest.catch(() => undefined);
+            await bucket.delete(key).catch(() => undefined);
+            throw error;
+          }
+        },
+        async get(key, options) { return bucket.get(key, options as any) as any; },
+        async delete(key) { await bucket.delete(key); },
+      },
+    });
+  }
+  private transferView(row: any): any {
+    const manifest = parseJson<TransferManifest>(row.manifest, {} as TransferManifest);
+    return { ...manifest, status: row.status, uploadToken: row.upload_token, downloadToken: row.download_token, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  private async createTransfer(input: any): Promise<any> {
+    const key = typeof input.idempotencyKey === "string" ? input.idempotencyKey.trim() : "";
+    if (!key || key.length > 160) throw new HttpError(400, "idempotencyKey is required");
+    const existing = this.one<any>("SELECT * FROM transfers WHERE idempotency_key=?", key);
+    if (existing) return this.transferView(existing);
+    let manifest: TransferManifest;
+    try {
+      manifest = createTransferManifest({ sourceNodeId: String(input.sourceNodeId ?? ""), targetNodeId: String(input.targetNodeId ?? ""), sourcePath: input.sourcePath, targetPath: input.targetPath, name: input.name, size: input.size, sha256: input.sha256, ttlMs: input.ttlMs });
+    } catch (error) { if (error instanceof TransferError) throw new HttpError(error.status, error.message); throw error; }
+    const signerSecret = this.env.APP_TOKEN || this.env.RUNNER_TOKEN;
+    if (!signerSecret) throw new HttpError(503, "node transfer signing is unavailable");
+    const signer = hmacSigner(signerSecret);
+    const uploadToken = await issueTransferToken(manifest, "upload", signer);
+    const downloadToken = await issueTransferToken(manifest, "download", signer);
+    const now = isoNow();
+    this.state.storage.sql.exec("INSERT INTO transfers (id,idempotency_key,manifest,upload_token,download_token,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", manifest.id, key, JSON.stringify(manifest), uploadToken, downloadToken, "queued", now, now);
+    return this.transferView(this.one<any>("SELECT * FROM transfers WHERE id=?", manifest.id));
+  }
+  private async transferContent(request: Request, transferId: string): Promise<Response> {
+    const row = this.one<any>("SELECT * FROM transfers WHERE id=?", transferId);
+    if (!row) throw new HttpError(404, "transfer not found");
+    const manifest = parseJson<TransferManifest>(row.manifest, {} as TransferManifest);
+    const protocol = this.transferProtocol();
+    try {
+      if (request.method === "PUT") {
+        if (!request.body) throw new HttpError(400, "transfer content is required");
+        await protocol.put(manifest, bearer(request) ?? "", request.body, request.headers.get("content-type") ?? "application/octet-stream");
+        this.state.storage.sql.exec("UPDATE transfers SET status='uploaded',updated_at=? WHERE id=?", isoNow(), transferId);
+        return response({ id: transferId, status: "uploaded" });
+      }
+      const range = request.headers.get("range")?.match(/^bytes=(\d+)-(\d*)$/);
+      const parsedRange = range ? { offset: Number(range[1]), length: range[2] ? Number(range[2]) - Number(range[1]) + 1 : manifest.size - Number(range[1]) } : undefined;
+      const object = await protocol.get(manifest, bearer(request) ?? "", parsedRange);
+      const headers = new Headers({ "content-type": object.httpMetadata?.contentType ?? "application/octet-stream", "cache-control": "no-store", "content-length": String(parsedRange?.length ?? manifest.size) });
+      if (parsedRange) headers.set("content-range", `bytes ${parsedRange.offset}-${parsedRange.offset + parsedRange.length - 1}/${manifest.size}`);
+      return new Response(object.body, { status: parsedRange ? 206 : 200, headers });
+    } catch (error) { if (error instanceof TransferError) throw new HttpError(error.status, error.message); throw error; }
+  }
+  private async createNodeFileRelay(input: any): Promise<any> {
+    const nodeId = typeof input.nodeId === "string" ? input.nodeId : "";
+    if (input.overwrite === true) throw new HttpError(400, "computer relay overwrite is not supported; choose a new destination");
+    const direction = input.direction === "import" ? "import" : input.direction === "export" ? "export" : "";
+    const absolute = typeof input.path === "string" && (input.path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(input.path));
+    if (!nodeId || !direction || !absolute || input.path.includes("\0") || input.path.length > 4096) throw new HttpError(400, "nodeId, direction, and an absolute path are required");
+    if (!Number.isSafeInteger(Number(input.size)) || Number(input.size) < 0 || Number(input.size) > 50 * 1024 * 1024 || typeof input.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.sha256)) throw new HttpError(400, "size and lowercase sha256 are required");
+    const node = this.nodes().get(nodeId); if (!node || node.revokedAt) throw new HttpError(404, "node not found");
+    const relayId = id("relay");
+    const manifest = createTransferManifest({ sourceNodeId: nodeId, targetNodeId: "cloud", sourcePath: "relay", targetPath: "relay", name: typeof input.name === "string" ? input.name : "transfer", size: Number(input.size), sha256: input.sha256, transferId: relayId, ttlMs: 10 * 60 * 1000 });
+    const signerSecret = this.env.APP_TOKEN || this.env.RUNNER_TOKEN; if (!signerSecret) throw new HttpError(503, "transfer signing unavailable");
+    const signer = hmacSigner(signerSecret);
+    const uploadToken = await issueTransferToken(manifest, "upload", signer); const downloadToken = await issueTransferToken(manifest, "download", signer);
+    const now = isoNow();
+    this.state.storage.sql.exec("INSERT INTO node_file_relays (id,node_id,direction,path,manifest,upload_token,download_token,status,expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", relayId, nodeId, direction, input.path, JSON.stringify(manifest), uploadToken, downloadToken, "awaiting_upload", manifest.expiresAt, now, now);
+    const operation = direction === "export" ? "file_export" : "file_import";
+    const job = direction === "export" ? await this.nodes().enqueue(nodeId, { kind: "runtime.operation", nodeId, operation, input: { scope: "computer", path: input.path, relayId, relayToken: uploadToken, size: manifest.size } }, 90) : null;
+    this.state.storage.setAlarm(Math.min(Date.now() + 1000, Date.parse(manifest.expiresAt)));
+    if (job) this.state.storage.sql.exec("UPDATE node_file_relays SET job_id=? WHERE id=?", job.id, relayId);
+    return { relayId, nodeId, direction, ...(job ? { jobId: job.id } : {}), relayToken: direction === "export" ? downloadToken : uploadToken, status: job?.status ?? "awaiting_upload" };
+  }
+  private async nodeFileRelayContent(request: Request, relayId: string): Promise<Response> {
+    const row = this.one<any>("SELECT * FROM node_file_relays WHERE id=?", relayId);
+    if (!row || Date.parse(row.expires_at) <= Date.now()) throw new HttpError(404, "relay not found or expired");
+    const manifest = parseJson<TransferManifest>(row.manifest, {} as TransferManifest);
+    const protocol = this.transferProtocol();
+    try {
+      if (request.method === "PUT") {
+        if (!(await protocol.authorize(manifest, bearer(request) ?? "", "upload"))) throw new HttpError(401, "invalid or expired relay token");
+        if (row.status === "uploaded") return response({ relayId, status: row.status, ...(row.job_id ? { jobId: row.job_id } : {}) });
+        if (row.status === "uploading") throw new HttpError(409, "relay upload is already in progress");
+        if (!request.body || Number(request.headers.get("content-length") ?? manifest.size) !== manifest.size) throw new HttpError(400, "relay content length must match manifest");
+        const claimed = this.state.storage.sql.exec("UPDATE node_file_relays SET status='uploading',updated_at=? WHERE id=? AND status='awaiting_upload'", isoNow(), relayId);
+        if (!claimed.rowsWritten) throw new HttpError(409, "relay upload is already in progress");
+        try { await protocol.put(manifest, bearer(request) ?? "", request.body); } catch (error) { this.state.storage.sql.exec("UPDATE node_file_relays SET status='awaiting_upload',updated_at=? WHERE id=? AND status='uploading'", isoNow(), relayId); throw error; }
+        this.state.storage.sql.exec("UPDATE node_file_relays SET status='uploaded',updated_at=? WHERE id=?", isoNow(), relayId);
+        const job = row.direction === "import" ? await this.nodes().enqueue(row.node_id, { kind: "runtime.operation", nodeId: row.node_id, operation: "file_import", input: { scope: "computer", path: row.path, relayId, relayToken: row.download_token, size: manifest.size } }, 90) : null;
+        if (job) this.state.storage.sql.exec("UPDATE node_file_relays SET job_id=? WHERE id=?", job.id, relayId);
+        this.state.storage.setAlarm(Math.min(Date.now() + 1000, Date.parse(row.expires_at)));
+        return response({ relayId, status: "uploaded", ...(job ? { jobId: job.id } : {}) });
+      }
+      const object = await protocol.get(manifest, bearer(request) ?? "");
+      return new Response(object.body, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": String(manifest.size), "cache-control": "no-store" } });
+    } catch (error) { if (error instanceof TransferError) throw new HttpError(error.status, error.message); throw error; }
   }
   private async uploadRequest(request: Request): Promise<any> {
     const length = Number(request.headers.get("content-length") ?? 0);
@@ -2843,7 +3048,7 @@ export class Workspace {
       "When creating or modifying a website or web app, include a favicon that suits that project and a descriptive document title. Preserve an existing project favicon unless asked to replace it. For a single-file HTML deliverable, an inline SVG data-URL favicon keeps it self-contained; for multi-file projects, add a local favicon.svg and link it in the HTML head. Avoid generic sparkle icons. Verify the icon link resolves when you open the finished page.",
       "For a multi-step task, send a brief plain-language progress message before starting tool work, then short updates when you make a meaningful finding, switch approach, or begin a longer operation. Describe concrete actions and findings for the user; keep private reasoning private. Do not narrate every trivial step or repeat tool output. Keep working after each progress message until the requested task is complete or genuinely blocked.",
       !thread.node_id ? "Your computer has its own headed Chromium browser, visible in the app’s Computer preview. Use the computer_browser MCP tools (including computer_browser_browser_navigate, browser_snapshot, browser_click, browser_type and browser_tabs) to control that exact browser. These tools attach to the same browser shown in the live stream. The unrelated built-in tools.browser namespace expects an OpenCode desktop-app connection; do not use it for this computer. No desktop app, extension, or experimental browser setting is required. When asked to open or interact with a page, navigate with computer_browser and verify its page snapshot; fetching page text alone does not operate the live browser." : "",
-      `Bot communication and creation are available through the runner MCP server named \`bots\`. Use \`list_bots\` to inspect peers, \`send_message\` to queue work for a peer, \`get_replies\` to inspect requests and completed results, and \`create_bot\` when the user asks you to define a new persistent workspace bot. New bots are created after this turn ends with their own persisted settings and conversations; they are independent persistent bots, not OpenCode subagents. Creation accepts a unique name, instructions, and optional model/agent. Never include owner credentials or tokens in bot definitions. For requests involving another named workspace bot, use these tools rather than subagent mode. After sending or creating, end your turn with a short natural acknowledgment. The recipient or newly created bot is available after the turn; never ask the user to send another message to retrieve it. Do not poll in a loop, display internal bot/request IDs, or claim a reply before it arrives. Available peers: ${peers || "none"}.`,
+      `Bot communication, file transfer, and creation are available through the runner MCP server named \`bots\`. Use \`list_bots\` to inspect peers, \`send_message\` to queue work for a peer, \`send_file\` to queue a verified workspace file transfer to a peer, \`get_replies\` to inspect requests and completed results, and \`create_bot\` when the user asks you to define a new persistent workspace bot. New bots are created after this turn ends with their own persisted settings and conversations; they are independent persistent bots, not OpenCode subagents. Creation accepts a unique name, instructions, and optional model/agent. Never include owner credentials or tokens in bot definitions. For requests involving another named workspace bot, use these tools rather than subagent mode. After sending or creating, end your turn with a short natural acknowledgment. The recipient or newly created bot is available after the turn; never ask the user to send another message to retrieve it. Do not poll in a loop, display internal bot/request IDs, or claim a reply before it arrives. Available peers: ${peers || "none"}.`,
       memories ? `Relevant bot memory:\n${memories}` : "",
       selectedSkills
         ? `Assigned skills (workspace instruction bundles):\n${selectedSkills}`
@@ -2963,6 +3168,7 @@ export class Workspace {
     await this.state.storage.put("computer:oauthPending", pending);
   }
   private async providerProxy(request: Request, url: URL): Promise<Response> {
+    if (url.searchParams.has("nodeId")) throw new HttpError(409, "node-scoped provider operations must use /api/nodes/:nodeId/runtime/:operation; refusing cloud fallback");
     if (this.maintenance)
       throw new HttpError(409, "computer maintenance is in progress");
     const path = url.pathname.slice(4);
@@ -3009,6 +3215,7 @@ export class Workspace {
     });
   }
   private async mcpServiceProxy(request: Request, url: URL): Promise<Response> {
+    if (url.searchParams.has("nodeId")) throw new HttpError(409, "node-scoped MCP operations must use /api/nodes/:nodeId/runtime/:operation; refusing cloud fallback");
     if (this.maintenance) throw new HttpError(409, "Computer maintenance is in progress.");
     const path = url.pathname.slice(4);
     const allowed = (request.method === "GET" && ["/mcps", "/mcps/resources"].includes(path)) ||
@@ -3098,6 +3305,8 @@ export class Workspace {
   }
   private ownedRunnerInput(run: any, thread: any): Record<string, unknown> {
     return {
+      executionNodeId: thread.node_id,
+      executionBotId: thread.bot_id,
       runId: run.id,
       threadId: run.thread_id,
       prompt: run.prompt,
@@ -3148,7 +3357,7 @@ export class Workspace {
     try {
       const job = await this.nodes().enqueue(
         nodeId,
-        { kind: "runner.run", run: this.ownedRunnerInput(run, thread) },
+        { kind: "runner.run", nodeId, run: this.ownedRunnerInput(run, thread) },
         50,
       );
       this.state.storage.sql.exec(
@@ -3191,6 +3400,50 @@ export class Workspace {
       nodeCommandJobId: command.id,
       kind: payload.kind,
     });
+  }
+  private async enqueueNodeRuntimeOperation(nodeId: string, operation: string, method: string, input: any): Promise<any> {
+    const node = this.nodes().get(nodeId);
+    if (!node) throw new HttpError(404, "node not found");
+    if (node.revokedAt || !node.online) throw new HttpError(409, "target node is offline; operation was not sent");
+    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
+    if (!allowed.has(operation)) throw new HttpError(400, "unsupported node runtime operation");
+    const job = await this.nodes().enqueue(nodeId, { kind: "runtime.operation", nodeId, operation, method, input: input && typeof input === "object" ? input : {} }, 90);
+    this.state.storage.setAlarm(Date.now() + 100);
+    return { jobId: job.id, nodeId, operation, status: job.status };
+  }
+  private nodeRuntimeJob(nodeId: string, jobId: string): any {
+    if (!this.nodes().get(nodeId)) throw new HttpError(404, "node not found");
+    const job = this.nodes().getJob(jobId);
+    if (!job || job.nodeId !== nodeId || job.payload.kind !== "runtime.operation") throw new HttpError(404, "runtime operation not found");
+    if (["succeeded", "failed", "needs_review"].includes(job.status)) {
+      // Credential-bearing operation inputs are needed only until the node
+      // accepts the job. Keep the durable receipt, but remove the secret body
+      // before the next storage read/backup.
+      this.state.storage.sql.exec("UPDATE node_jobs SET payload=? WHERE id=?", JSON.stringify({ kind: "runtime.operation", nodeId, operation: job.payload.operation }), jobId);
+    }
+    const redact = (value: any): any => {
+      if (Array.isArray(value)) return value.map(redact);
+      if (!value || typeof value !== "object") return value;
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [/token|secret|password|authorization|api.?key/i.test(key) ? [key, "[redacted]"] : [key, redact(item)] ]));
+    };
+    return { id: job.id, nodeId, operation: job.payload.operation, status: job.status, ...(job.result !== undefined ? { result: redact(job.result) } : {}), ...(job.error ? { error: job.error } : {}) };
+  }
+  private scrubCompletedRuntimeInputs(): void {
+    if (!this.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_jobs'")) return;
+    for (const job of this.rows<any>("SELECT id,node_id,payload,status FROM node_jobs WHERE status IN ('succeeded','failed','needs_review')")) {
+      const payload = parseJson<any>(job.payload, {});
+      if (payload.kind !== "runtime.operation" || !payload.input) continue;
+      this.state.storage.sql.exec("UPDATE node_jobs SET payload=? WHERE id=?", JSON.stringify({ kind: payload.kind, nodeId: job.node_id, operation: payload.operation }), job.id);
+    }
+  }
+  private async cleanupExpiredNodeRelays(): Promise<void> {
+    const rows = this.rows<any>("SELECT id FROM node_file_relays WHERE expires_at<=?", isoNow());
+    if (!rows.length) return;
+    for (const row of rows) {
+      try { if (this.env.ARTIFACTS) await this.env.ARTIFACTS.delete(`transfers/v1/${row.id}`); }
+      catch { continue; } // Retain the receipt so a later alarm retries storage cleanup.
+      this.state.storage.sql.exec("DELETE FROM node_file_relays WHERE id=?", row.id);
+    }
   }
   private async reconcileOwnedNode(run: any, nodeId: string): Promise<void> {
     if (run.status === "queued") {
@@ -3355,6 +3608,83 @@ export class Workspace {
     await this.maybeContinueAfterDelegations(run.id);
     this.state.storage.setAlarm(Date.now() + 1000);
   }
+  private async reconcileTransferRequests(run: any, remote: any): Promise<void> {
+    if (Number(run.bot_messaging ?? 1) === 0 || remote.status !== "succeeded") return;
+    const requests = Array.isArray(remote.fileTransferRequests) ? remote.fileTransferRequests.slice(0, 4) : [];
+    const source = this.one<any>("SELECT t.node_id FROM threads t WHERE t.id=?", run.thread_id);
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index] && typeof requests[index] === "object" ? requests[index] : {};
+      const requestId = typeof request.id === "string" && request.id.trim() ? request.id.trim().slice(0, 160) : `invalid-${index}`;
+      if (this.one("SELECT request_id FROM transfer_requests WHERE run_id=? AND request_id=?", run.id, requestId)) continue;
+      const now = isoNow();
+      this.state.storage.sql.exec("INSERT INTO transfer_requests (run_id,request_id,status,created_at,updated_at) VALUES (?,?,?,?,?)", run.id, requestId, "pending", now, now);
+      try {
+        const target = this.one<any>("SELECT node_id FROM bots WHERE id=?", request.targetBotId);
+        if (requestId.startsWith("invalid-") || !target) throw new HttpError(400, "file transfer target bot was not found");
+        const transfer = await this.createTransfer({ ...request, sourceNodeId: source?.node_id || "cloud", targetNodeId: target.node_id || "cloud", idempotencyKey: `file:${run.id}:${requestId}` });
+        this.state.storage.sql.exec("UPDATE transfer_requests SET status='accepted',transfer_id=?,updated_at=? WHERE run_id=? AND request_id=?", transfer.id, isoNow(), run.id, requestId);
+        if (!source?.node_id) {
+          const sourceResponse = await (await this.transport()).fetch(`/files/content?path=${encodeURIComponent(request.sourcePath)}`);
+          if (!sourceResponse.ok || !sourceResponse.body) throw new HttpError(502, "cloud source file could not be read");
+          await this.transferProtocol().put(parseJson<TransferManifest>(JSON.stringify(transfer), {} as TransferManifest), transfer.uploadToken, sourceResponse.body);
+          this.state.storage.sql.exec("UPDATE transfers SET status='uploaded',updated_at=? WHERE id=?", isoNow(), transfer.id);
+        }
+        // A remote source must finish its upload before the target receives a
+        // download job. The alarm reconciler observes the durable source job
+        // receipt and queues the target only after R2 contains the object.
+        for (const [nodeId, direction] of [[source?.node_id, "upload"]] as const) if (nodeId) {
+          await this.nodes().enqueue(nodeId, { kind: "node.transfer", nodeId, direction, transfer: { ...transfer, uploadToken: undefined, downloadToken: undefined }, transferToken: direction === "upload" ? transfer.uploadToken : transfer.downloadToken }, 50);
+        }
+      } catch (error) {
+        this.state.storage.sql.exec("UPDATE transfer_requests SET status='rejected',error=?,updated_at=? WHERE run_id=? AND request_id=?", error instanceof Error ? error.message : String(error), isoNow(), run.id, requestId);
+      }
+    }
+  }
+  private async reconcileCloudTransfers(): Promise<void> {
+    const nowMs = Date.now();
+    for (const row of this.rows<any>("SELECT * FROM transfers WHERE status IN ('queued','uploaded','delivering') ORDER BY updated_at LIMIT 8")) {
+      const manifest = parseJson<TransferManifest>(row.manifest, {} as TransferManifest);
+      if (Date.parse(manifest.expiresAt) <= nowMs) {
+        await this.transferProtocol().delete(manifest).catch(() => undefined);
+        this.state.storage.sql.exec("UPDATE transfers SET status='expired',updated_at=? WHERE id=? AND status NOT IN ('completed','expired')", isoNow(), manifest.id);
+        continue;
+      }
+      if (row.status === "queued" && manifest.sourceNodeId !== "cloud") {
+        const sourceJob = this.one<any>("SELECT status FROM node_jobs WHERE json_extract(payload,'$.kind')='node.transfer' AND json_extract(payload,'$.transfer.id')=? ORDER BY created_at DESC LIMIT 1", manifest.id);
+        if (sourceJob?.status === "succeeded") {
+          this.state.storage.sql.exec("UPDATE transfers SET status='uploaded',updated_at=? WHERE id=? AND status='queued'", isoNow(), manifest.id);
+          row.status = "uploaded";
+        } else if (sourceJob?.status === "failed" || sourceJob?.status === "needs_review") {
+          this.state.storage.sql.exec("UPDATE transfers SET status='failed',updated_at=? WHERE id=? AND status='queued'", isoNow(), manifest.id);
+          await this.transferProtocol().delete(manifest).catch(() => undefined);
+          continue;
+        } else continue;
+      }
+      if (manifest.targetNodeId !== "cloud") {
+        if (row.status === "delivering") {
+          const targetJob = this.one<any>("SELECT status FROM node_jobs WHERE json_extract(payload,'$.kind')='node.transfer' AND json_extract(payload,'$.transfer.id')=? AND json_extract(payload,'$.direction')='download' ORDER BY created_at DESC LIMIT 1", manifest.id);
+          if (targetJob?.status === "succeeded") {
+            this.state.storage.sql.exec("UPDATE transfers SET status='completed',updated_at=? WHERE id=? AND status='delivering'", isoNow(), manifest.id);
+            await this.transferProtocol().delete(manifest).catch(() => undefined);
+          }
+          continue;
+        }
+        if (row.status !== "uploaded") continue;
+        await this.nodes().enqueue(manifest.targetNodeId, { kind: "node.transfer", nodeId: manifest.targetNodeId, direction: "download", transfer: manifest, transferToken: row.download_token }, 50);
+        this.state.storage.sql.exec("UPDATE transfers SET status='delivering',updated_at=? WHERE id=? AND status='uploaded'", isoNow(), manifest.id);
+        continue;
+      }
+      if (row.status !== "uploaded") continue;
+      try {
+        const object = await this.transferProtocol().get(manifest, row.download_token);
+        if (!object.body) continue;
+        const result = await (await this.transport()).fetch(`/files/transfer?path=${encodeURIComponent(manifest.targetPath)}`, { method: "POST", headers: { "content-type": object.httpMetadata?.contentType ?? "application/octet-stream", "x-transfer-sha256": manifest.sha256, "x-transfer-size": String(manifest.size) }, body: object.body });
+        if (!result.ok) throw new Error(`cloud destination write HTTP ${result.status}`);
+        this.state.storage.sql.exec("UPDATE transfers SET status='completed',updated_at=? WHERE id=?", isoNow(), manifest.id);
+        await this.transferProtocol().delete(manifest).catch(() => undefined);
+      } catch { this.state.storage.setAlarm(Date.now() + 3000); }
+    }
+  }
   private async reconcileBotCreationRequests(run: any, remote: any): Promise<void> {
     if (Number(run.bot_messaging ?? 1) === 0 || remote.status !== "succeeded") return;
     const requests = Array.isArray(remote.botCreationRequests)
@@ -3502,6 +3832,8 @@ export class Workspace {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        executionNodeId: thread.node_id ?? undefined,
+        executionBotId: thread.bot_id,
         runId: run.id,
         threadId: run.thread_id,
         prompt: run.prompt,
@@ -3656,6 +3988,7 @@ export class Workspace {
       }
     }
     await this.reconcileDelegationRequests(run, remote);
+    await this.reconcileTransferRequests(run, remote);
     await this.reconcileBotCreationRequests(run, remote);
   }
 }
@@ -3711,6 +4044,7 @@ const worker = {
     const alternateAuth =
       url.pathname === "/api/nodes" ||
       url.pathname.startsWith("/api/nodes/") ||
+      /^\/api\/(?:transfers|node-files)\/[^/]+\/content$/.test(url.pathname) ||
       /^\/api\/integrations\/telegram\/webhook\/[^/]+$/.test(url.pathname);
     if (!ownerAuthorized && !alternateAuth && !pairingPublic && !pairingClient)
       return response({ error: "unauthorized" }, 401, {

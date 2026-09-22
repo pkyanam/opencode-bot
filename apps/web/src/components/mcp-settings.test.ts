@@ -13,6 +13,16 @@ describe("MCP OAuth attempt helpers", () => {
     vi.stubGlobal("window", { location: { origin: "https://another.example" } });
     expect(readAttempts()).toEqual([]);
   });
+  it("keeps pending attempts isolated per execution node", () => {
+    const data = new Map<string, string>();
+    vi.stubGlobal("window", { location: { origin: "https://test.example" } });
+    vi.stubGlobal("sessionStorage", { getItem: (key: string) => data.get(key), setItem: (key: string, value: string) => data.set(key, value) });
+    const attempt = { server: "node-service", integrationID: "svc", methodID: "oauth", attemptID: "node-a", expiresAt: Date.now() + 60000 };
+    writeAttempts([attempt], "node-a");
+    expect(readAttempts("node-a")).toEqual([attempt]);
+    expect(readAttempts("node-b")).toEqual([]);
+    expect(readAttempts()).toEqual([]);
+  });
   it("keeps callback URLs intact for native state validation", () => {
     const value = "https://localhost/callback?code=one-time&state=opaque";
     expect(callbackValue(value)).toEqual({ callbackUrl: value });

@@ -332,6 +332,28 @@ it('keeps node pairing owner-only while admitting a single-use node credential',
   expect(JSON.stringify(listing.body)).not.toContain(registered.body.nodeSecret);
 });
 
+it('queues node runtime management only for a live owned node and exposes a bounded receipt', async () => {
+  const f = fixture(true);
+  const pair = await f.request('/api/nodes/pairing', 'POST', {});
+  const registered = await f.request('/api/nodes/register', 'POST', { pairingToken: pair.body.token, name: 'Runtime node', platform: 'linux', arch: 'x64', capabilities: { runner: true } }, null);
+  const nodeId = registered.body.node.id;
+  await f.request(`/api/nodes/${nodeId}/heartbeat`, 'POST', {}, registered.body.nodeSecret);
+  const queued = await f.request(`/api/nodes/${nodeId}/runtime/providers`, 'POST', { action: 'list' });
+  expect(queued.status).toBe(202);
+  expect(queued.body).toMatchObject({ nodeId, operation: 'providers', status: 'queued' });
+  const receipt = await f.request(`/api/nodes/${nodeId}/runtime/jobs/${queued.body.jobId}`);
+  expect(receipt.body).toMatchObject({ nodeId, operation: 'providers', status: 'queued' });
+  expect((await f.request(`/api/nodes/${nodeId}/runtime/providers`, 'POST', { secret: 'must-not-be-returned' }, null)).status).toBe(401);
+});
+
+it('refuses node-scoped legacy catalog/provider/MCP URLs instead of mutating Cloudflare', async () => {
+  const f = fixture();
+  expect([409, 503]).toContain((await f.request('/api/catalog?nodeId=node_owned')).status);
+  expect([409, 503]).toContain((await f.request('/api/providers?nodeId=node_owned')).status);
+  expect([409, 503]).toContain((await f.request('/api/mcps?nodeId=node_owned')).status);
+  expect(remote.calls.filter((call) => /\/(catalog|providers|mcps)/.test(call))).toEqual([]);
+});
+
 it('keeps first-party client pairing scoped, revocable, and separate from owner auth', async () => {
   const f = fixture();
   expect((await f.request('/api/pairing/invites', 'POST', {}, null)).status).toBe(401);
@@ -365,6 +387,47 @@ it('stores uploads under generated attachment ids and resolves only canonical ru
   await f.alarm();
   expect(remote.submitted[0].attachments).toEqual([{ id: uploaded.attachment.id, path: expect.stringContaining('uploads/'), name: 'report.pdf', mimeType: 'application/pdf', size: 3 }]);
   expect((await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'bad', idempotencyKey: 'bad-attachment', attachments: [{ id: 'att_00000000-0000-0000-0000-000000000000' }] })).status).toBe(404);
+});
+
+it('requires owner authorization for explicit whole-computer filesystem scope and forwards cloud streams', async () => {
+  const f = fixture(true);
+  expect((await f.request('/api/files?scope=computer&path=%2Ftmp', 'GET', undefined, null)).status).toBe(401);
+  const listed = await f.request('/api/files?scope=computer&path=%2Ftmp');
+  expect(listed.status).toBe(503);
+});
+
+it('creates owner-only computer import relays and queues the node job only after streamed upload', async () => {
+  const f = fixture();
+  f.env.ARTIFACTS = { put: async (_key: string, stream: ReadableStream<Uint8Array>) => { await new Response(stream).arrayBuffer(); }, get: async () => ({ body: new ReadableStream({ start(c) { c.close(); } }), customMetadata: { transferId: 'x', sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', size: '3' } }), delete: async () => {} };
+  const pair = await f.request('/api/nodes/pairing', 'POST', {});
+  const registered = await f.request('/api/nodes/register', 'POST', { pairingToken: pair.body.token, name: 'Relay node', platform: 'linux', arch: 'x64', capabilities: { runner: true } }, null);
+  const nodeId = registered.body.node.id;
+  await f.request(`/api/nodes/${nodeId}/heartbeat`, 'POST', {}, registered.body.nodeSecret);
+  const bytes = new TextEncoder().encode('abc');
+  const previousDigestStream = (globalThis.crypto as any).DigestStream;
+  (globalThis.crypto as any).DigestStream = class {
+    readable = new TransformStream<Uint8Array, Uint8Array>().readable;
+    writable: WritableStream<Uint8Array>;
+    digest: Promise<ArrayBuffer>;
+    constructor() {
+      const chunks: Uint8Array[] = [];
+      let resolve!: (value: ArrayBuffer) => void; let reject!: (reason: unknown) => void;
+      this.digest = new Promise<ArrayBuffer>((done, fail) => { resolve = done; reject = fail; });
+      this.writable = new WritableStream<Uint8Array>({ write: (chunk) => { chunks.push(new Uint8Array(chunk)); }, close: async () => { const all = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0)); let offset = 0; for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; } resolve(await crypto.subtle.digest("SHA-256", all)); }, abort: reject });
+    }
+    getWriter() { return this.writable.getWriter(); }
+  };
+  const sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+  expect((await f.request('/api/node-files', 'POST', { nodeId, direction: 'import', path: '/tmp/import.txt', size: 3, sha256 }, null)).status).toBe(401);
+  const relay = await f.request('/api/node-files', 'POST', { nodeId, direction: 'import', path: '/tmp/import.txt', size: 3, sha256 });
+  expect(relay.status).toBe(202);
+  expect(relay.body).not.toHaveProperty('jobId');
+  const upload = await worker.fetch(new Request(`https://bot.test/api/node-files/${relay.body.relayId}/content`, { method: 'PUT', headers: { authorization: `Bearer ${relay.body.relayToken}`, 'content-length': '3' }, body: bytes }), f.env);
+  expect(upload.status).toBe(200);
+  expect(((await upload.json()) as any).jobId).toMatch(/^job_/);
+  const replay = await worker.fetch(new Request(`https://bot.test/api/node-files/${relay.body.relayId}/content`, { method: 'PUT', headers: { authorization: `Bearer ${relay.body.relayToken}`, 'content-length': '3' }, body: bytes }), f.env);
+  expect(((await replay.json()) as any).jobId).toMatch(/^job_/);
+  (globalThis.crypto as any).DigestStream = previousDigestStream;
 });
 
 it('admits Telegram webhooks only through their own secret validation',async()=>{

@@ -10,14 +10,14 @@ const statusLabel = (server: McpServer) => {
 };
 export type AuthAttempt = { server: string; integrationID: string; methodID: string; attemptID: string; url?: string; instructions?: string; mode?: string; expiresAt: number };
 const deploymentScope = () => `${window.location.origin}${import.meta.env.VITE_API_BASE ?? ""}`;
-const authStorageKey = () => `opencode-bot-mcp-auth-attempts:${deploymentScope()}`;
-export const readAttempts = (): AuthAttempt[] => {
+const authStorageKey = (nodeId?: string) => `${nodeId ? `node:${nodeId}` : "cloudflare"}:${deploymentScope()}`;
+export const readAttempts = (nodeId?: string): AuthAttempt[] => {
   try {
-    const value = JSON.parse(sessionStorage.getItem(authStorageKey()) ?? "[]");
+    const value = JSON.parse(sessionStorage.getItem(`opencode-bot-mcp-auth-attempts:${authStorageKey(nodeId)}`) ?? "[]");
     return Array.isArray(value) ? value.filter((item): item is AuthAttempt => item && typeof item.server === "string" && typeof item.attemptID === "string" && Number(item.expiresAt) > Date.now()) : [];
   } catch { return []; }
 };
-export const writeAttempts = (attempts: AuthAttempt[]) => { try { sessionStorage.setItem(authStorageKey(), JSON.stringify(attempts)); } catch { /* Private browsing or quota limits should not block sign-in. */ } };
+export const writeAttempts = (attempts: AuthAttempt[], nodeId?: string) => { try { sessionStorage.setItem(`opencode-bot-mcp-auth-attempts:${authStorageKey(nodeId)}`, JSON.stringify(attempts)); } catch { /* Private browsing or quota limits should not block sign-in. */ } };
 
 export function callbackValue(value: string): { code?: string; callbackUrl?: string } {
   const input = value.trim();
@@ -33,7 +33,7 @@ export function callbackValue(value: string): { code?: string; callbackUrl?: str
   return { callbackUrl: input };
 }
 
-export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void; onOpenComputer?: (url: string) => void }) {
+export function McpSettings({ onSaved, onOpenComputer, nodeId }: { onSaved?: () => void; onOpenComputer?: (url: string) => void; nodeId?: string }) {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -45,29 +45,41 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
   const [methodPicker, setMethodPicker] = useState<{ server: string; integrationID: string; methods: McpAuthMethod[] }>();
   const [code, setCode] = useState("");
   const statusPoll = useRef(false);
+  const loadRequest = useRef(0);
+  const activeNode = useRef(nodeId);
 
   const load = useCallback(async () => {
+    const requestID = ++loadRequest.current;
     setLoading(true);
     try {
-      const result = await api.mcp.list();
+      const result = await api.mcp.list(nodeId);
+      if (loadRequest.current !== requestID) return;
       setServers(result.servers ?? []);
       setIntegrations(result.integrations ?? []);
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load MCP services");
+      if (loadRequest.current === requestID) setError(e instanceof Error ? e.message : "Could not load MCP services");
     } finally {
-      setLoading(false);
+      if (loadRequest.current === requestID) setLoading(false);
     }
-  }, []);
+  }, [nodeId]);
+  const scoped = <T extends Record<string, unknown>>(value: T) => nodeId ? { ...value, nodeId } : value;
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    activeNode.current = nodeId;
+    setAuth(undefined); setCode(""); setMethodPicker(undefined); setBusy("");
+    setNotice(""); setError(""); setPendingAttempts(readAttempts(nodeId));
+  }, [nodeId]);
   const rememberAttempt = (attempt: AuthAttempt) => {
-    setPendingAttempts((current) => { const next = [...current.filter((item) => item.attemptID !== attempt.attemptID), attempt]; writeAttempts(next); return next; });
+    setPendingAttempts((current) => { const next = [...current.filter((item) => item.attemptID !== attempt.attemptID), attempt]; writeAttempts(next, nodeId); return next; });
   };
   const forgetAttempt = (attemptID: string) => {
-    setPendingAttempts((current) => { const next = current.filter((item) => item.attemptID !== attemptID); writeAttempts(next); return next; });
+    setPendingAttempts((current) => { const next = current.filter((item) => item.attemptID !== attemptID); writeAttempts(next, nodeId); return next; });
   };
   const cancelPending = async (attempt: AuthAttempt) => {
-    try { await api.mcp.authCancel({ integrationID: attempt.integrationID, attemptID: attempt.attemptID }); } catch (e) { setError(e instanceof Error ? e.message : "Could not cancel sign-in. Try again."); return; }
+    const targetNode = nodeId;
+    try { await api.mcp.authCancel(scoped({ integrationID: attempt.integrationID, attemptID: attempt.attemptID })); } catch (e) { if (activeNode.current === targetNode) setError(e instanceof Error ? e.message : "Could not cancel sign-in. Try again."); return; }
+    if (activeNode.current !== targetNode) return;
     forgetAttempt(attempt.attemptID);
   };
 
@@ -102,7 +114,8 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
     const methodID = selectedMethodID ?? methods[0].id;
     setBusy(server.name); setError(""); setNotice("");
     try {
-      const result = await api.mcp.authStart({ integrationID, methodID });
+      const result = await api.mcp.authStart(scoped({ integrationID, methodID }));
+      if (activeNode.current !== nodeId) return;
       const attempt = result.attempt;
       if (!attempt?.attemptID) throw new Error("The service did not return a login attempt.");
       const record: AuthAttempt = { server: server.name, integrationID, methodID, attemptID: attempt.attemptID, url: attempt.url, instructions: attempt.instructions, mode: attempt.mode, expiresAt: Date.now() + 15 * 60_000 };
@@ -118,7 +131,8 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
     try { value = callbackValue(code); } catch (e) { setError(e instanceof Error ? e.message : "Enter the callback URL or one-time code."); return; }
     setBusy(auth.server); setError(""); setNotice("");
     try {
-      const result = await api.mcp.authComplete({ integrationID: auth.integrationID, attemptID: auth.attemptID!, ...value });
+      const result = await api.mcp.authComplete(scoped({ integrationID: auth.integrationID, attemptID: auth.attemptID!, ...value }));
+      if (activeNode.current !== nodeId) return;
       if (result.pending) {
         setNotice("Finishing sign-in… you can return to this attempt from Pending sign-ins.");
       } else {
@@ -136,7 +150,8 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
     if (statusPoll.current) return;
     statusPoll.current = true;
     try {
-      const result = await api.mcp.authStatus({ integrationID: auth.integrationID, attemptID: auth.attemptID });
+      const result = await api.mcp.authStatus(scoped({ integrationID: auth.integrationID, attemptID: auth.attemptID }));
+      if (activeNode.current !== nodeId) return;
       const statusValue = result.status;
       const status = typeof statusValue === "object" && statusValue !== null ? String((statusValue as Record<string, unknown>).status ?? "pending") : String(statusValue ?? result.state ?? "pending");
       if (/failed|expired|cancelled|canceled/i.test(status)) { forgetAttempt(auth.attemptID); setAuth(undefined); setCode(""); setNotice(`Sign-in ${status.toLowerCase()}. Start sign-in again if you still want to connect.`); return; }
@@ -148,7 +163,8 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
   const cancelAuth = async () => {
     if (!auth?.attemptID) { setAuth(undefined); return; }
     try {
-      await api.mcp.authCancel({ integrationID: auth.integrationID, attemptID: auth.attemptID });
+      await api.mcp.authCancel(scoped({ integrationID: auth.integrationID, attemptID: auth.attemptID }));
+      if (activeNode.current !== nodeId) return;
       forgetAttempt(auth.attemptID); setAuth(undefined); setCode(""); setNotice("Service login canceled.");
     } catch (e) { setError(e instanceof Error ? e.message : "Could not cancel service login"); }
   };
@@ -159,7 +175,7 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
       if (cancelled || statusPoll.current) return;
       statusPoll.current = true;
       try {
-        const result = await api.mcp.authStatus({ integrationID: auth.integrationID, attemptID: auth.attemptID! });
+        const result = await api.mcp.authStatus(scoped({ integrationID: auth.integrationID, attemptID: auth.attemptID! }));
         if (cancelled) return;
         const statusValue = result.status;
         const status = typeof statusValue === "object" && statusValue !== null ? String((statusValue as Record<string, unknown>).status ?? "pending") : String(statusValue ?? result.state ?? "pending");
@@ -182,7 +198,7 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
     const expire = () => {
       const current = pendingAttempts.filter((attempt) => attempt.expiresAt > Date.now());
       if (current.length !== pendingAttempts.length) {
-        setPendingAttempts(current); writeAttempts(current);
+        setPendingAttempts(current); writeAttempts(current, nodeId);
       }
       if (auth && !current.some((item) => item.attemptID === auth.attemptID)) {
         setAuth(undefined); setCode(""); setNotice("The sign-in attempt expired. Start sign-in again to get a fresh authorization link.");
@@ -208,7 +224,7 @@ export function McpSettings({ onSaved, onOpenComputer }: { onSaved?: () => void;
           return <div className="mcp-row" key={server.name}>
             <div><strong>{server.name}</strong><span className={`mcp-status mcp-status-${state}`}>{statusLabel(server)}</span>{server.status && "error" in server.status && <small>{server.status.error}</small>}</div>
             <div className="settings-actions">
-              {state === "connected" ? <button className="soft-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.disconnect(server.name), "MCP service disconnected.")}><Unplug size={13} />Disconnect</button> : state === "needs_auth" ? <button className="primary-btn" disabled={isBusy} onClick={() => void startAuth(server)}>{isBusy && <LoaderCircle size={13} className="spin" />}Sign in</button> : <button className="primary-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.connect(server.name), "MCP service connection started.")}>{isBusy && <LoaderCircle size={13} className="spin" />}Connect</button>}
+              {state === "connected" ? <button className="soft-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.disconnect(server.name, nodeId), "MCP service disconnected.")}><Unplug size={13} />Disconnect</button> : state === "needs_auth" ? <button className="primary-btn" disabled={isBusy} onClick={() => void startAuth(server)}>{isBusy && <LoaderCircle size={13} className="spin" />}Sign in</button> : <button className="primary-btn" disabled={isBusy} onClick={() => void run(server.name, () => api.mcp.connect(server.name, nodeId), "MCP service connection started.")}>{isBusy && <LoaderCircle size={13} className="spin" />}Connect</button>}
             </div>
             {methodPicker?.server === server.name && <div className="mcp-method-picker"><label className="field-label" htmlFor={`mcp-method-${server.name}`}>Login method</label><select id={`mcp-method-${server.name}`} className="settings-input" value={methodPicker.methods[0]?.id ?? ""} onChange={(event) => setMethodPicker({ ...methodPicker, methods: [methodPicker.methods.find((method) => method.id === event.target.value)!, ...methodPicker.methods.filter((method) => method.id !== event.target.value)] })}>{methodPicker.methods.map((method) => <option key={method.id} value={method.id}>{method.label ?? method.id}</option>)}</select><button className="primary-btn" onClick={() => void startAuth(server, methodPicker.methods[0]?.id)}>Continue</button></div>}
           </div>;

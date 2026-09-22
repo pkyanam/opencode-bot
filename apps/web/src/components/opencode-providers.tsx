@@ -13,7 +13,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { isComputerWarmingUpError, request } from "../api";
+import { api, isComputerWarmingUpError, request } from "../api";
 
 type FormField = {
   key: string;
@@ -115,7 +115,7 @@ const answerValue = (field: FormField, value: ProviderValue) => {
   return String(value);
 };
 
-export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
+export function OpenCodeProviders({ onSaved, nodeId }: { onSaved?: () => void; nodeId?: string }) {
   const [data, setData] = useState<ProviderData>();
   const [selected, setSelected] = useState("");
   const [search, setSearch] = useState("");
@@ -134,8 +134,15 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const [editingConnection, setEditingConnection] = useState("");
   const [connectionLabel, setConnectionLabel] = useState("");
   const [customOpen, setCustomOpen] = useState(false);
-  const providerLoadInFlight = useRef(false);
+  const providerLoadRequest = useRef(0);
   const computerWarming = isComputerWarmingUpError(error);
+  const scopedBody = (value: Record<string, unknown>) => nodeId ? { ...value, nodeId } : value;
+  const scopedRequest = async <T,>(path: string, init: RequestInit = {}) => {
+    if (!nodeId) return request<T>(path, init);
+    let input: unknown = {};
+    if (typeof init.body === "string") { try { input = JSON.parse(init.body); } catch { input = {}; } }
+    return api.nodeRuntime<T>(nodeId, path.replace(/^\/api\//, "").split("?")[0], init.method ?? "GET", input);
+  };
   const integrations = data?.integrations ?? [];
   const providers = data?.providers ?? [];
   const providerChoices = useMemo(
@@ -174,12 +181,12 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     items[0];
 
   const load = async () => {
-    if (providerLoadInFlight.current) return;
-    providerLoadInFlight.current = true;
+    const requestID = ++providerLoadRequest.current;
     setBusy(true);
     setError("");
     try {
-      const next = await request<ProviderData>("/api/providers");
+      const next = await scopedRequest<ProviderData>("/api/providers");
+      if (providerLoadRequest.current !== requestID) return;
       setData(next);
       setSelected(
         (current) =>
@@ -190,17 +197,22 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
           "",
       );
     } catch (e) {
-      setError(
+      if (providerLoadRequest.current === requestID) setError(
         e instanceof Error ? e.message : "Could not load OpenCode providers",
       );
     } finally {
-      providerLoadInFlight.current = false;
-      setBusy(false);
+      if (providerLoadRequest.current === requestID) setBusy(false);
     }
   };
   useEffect(() => {
+    // Drop credentials, forms, and in-flight OAuth state when changing the
+    // execution node. A provider connection belongs to exactly one node.
+    providerLoadRequest.current += 1;
+    setData(undefined); setSelected(""); setValues({}); setLabel("");
+    setAttempt(undefined); setOauthCode(""); setOauthStatus("");
+    setEditingConnection(""); setConnectionLabel(""); setNotice(""); setError("");
     void load();
-  }, []);
+  }, [nodeId]);
   useEffect(() => {
     if (!computerWarming) return;
     let stopped = false;
@@ -235,14 +247,14 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     const poll = async () => {
       if (stopped || finished) return;
       try {
-        const result = await request<{
+        const result = await scopedRequest<{
           status?: { status?: string; message?: string };
         }>("/api/providers/oauth/status", {
           method: "POST",
-          body: JSON.stringify({
+          body: JSON.stringify(scopedBody({
             integrationID: attempt.integrationID,
             attemptID: attempt.value.attemptID,
-          }),
+          })),
         });
         if (stopped) return;
         const status = result.status?.status ?? "";
@@ -275,7 +287,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [attempt?.value.attemptID]);
+  }, [attempt?.value.attemptID, nodeId]);
   const run = async (fn: () => Promise<void>, success: string) => {
     setBusy(true);
     setError("");
@@ -295,14 +307,14 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     const answer = collectAnswer(method, values, true);
     await run(
       async () => {
-        await request("/api/providers/key", {
+        await scopedRequest("/api/providers/key", {
           method: "POST",
-          body: JSON.stringify({
+          body: JSON.stringify(scopedBody({
             integrationID: integration.id,
             key,
             answer,
             label: label.trim() || undefined,
-          }),
+          })),
         });
         setValues({});
         setLabel("");
@@ -316,16 +328,16 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     if (!integration) return;
     const answer = collectAnswer(method, values);
     await run(async () => {
-      const result = await request<{ attempt?: Attempt }>(
+      const result = await scopedRequest<{ attempt?: Attempt }>(
         "/api/providers/oauth/start",
         {
           method: "POST",
-          body: JSON.stringify({
+          body: JSON.stringify(scopedBody({
             integrationID: integration.id,
             methodID: method.id,
             ...(Object.keys(answer).length ? { answer } : {}),
             label: label.trim() || undefined,
-          }),
+          })),
         },
       );
       setOauthStatus("Starting native sign-in…");
@@ -339,13 +351,13 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const completeOAuth = async () => {
     if (!attempt?.value.attemptID) return;
     await run(async () => {
-      await request("/api/providers/oauth/complete", {
+      await scopedRequest("/api/providers/oauth/complete", {
         method: "POST",
-        body: JSON.stringify({
+        body: JSON.stringify(scopedBody({
           integrationID: attempt.integrationID,
           attemptID: attempt.value.attemptID,
           code: oauthCode || undefined,
-        }),
+        })),
       });
       setAttempt(undefined);
       setOauthCode("");
@@ -358,12 +370,12 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const cancelOAuth = async () => {
     if (!attempt?.value.attemptID) return;
     await run(async () => {
-      await request("/api/providers/oauth/cancel", {
+      await scopedRequest("/api/providers/oauth/cancel", {
         method: "POST",
-        body: JSON.stringify({
+        body: JSON.stringify(scopedBody({
           integrationID: attempt.integrationID,
           attemptID: attempt.value.attemptID,
-        }),
+        })),
       });
       setAttempt(undefined);
       setOauthCode("");
@@ -375,9 +387,9 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
     if (!id) return;
     await run(
       async () => {
-        await request(`/api/providers/credentials/${path}`, {
+        await scopedRequest(`/api/providers/credentials/${path}`, {
           method: "POST",
-          body: JSON.stringify({ credentialID: id }),
+          body: JSON.stringify(scopedBody({ credentialID: id })),
         });
         await load();
         onSaved?.();
@@ -388,12 +400,12 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   const relabel = async (id?: string) => {
     if (!id || !connectionLabel.trim()) return;
     await run(async () => {
-      await request("/api/providers/credentials/label", {
+      await scopedRequest("/api/providers/credentials/label", {
         method: "POST",
-        body: JSON.stringify({
+        body: JSON.stringify(scopedBody({
           credentialID: id,
           label: connectionLabel.trim(),
-        }),
+        })),
       });
       setEditingConnection("");
       setConnectionLabel("");
@@ -466,6 +478,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
       </div>
       {customOpen && (
         <CustomProviderForm
+          nodeId={nodeId}
           onSaved={() => {
             setCustomOpen(false);
             void load();
@@ -780,7 +793,7 @@ export function OpenCodeProviders({ onSaved }: { onSaved?: () => void }) {
   );
 }
 
-function CustomProviderForm({ onSaved }: { onSaved: () => void }) {
+function CustomProviderForm({ onSaved, nodeId }: { onSaved: () => void; nodeId?: string }) {
   const [providerID, setProviderID] = useState("");
   const [name, setName] = useState("");
   const [baseURL, setBaseURL] = useState("");
@@ -810,10 +823,8 @@ function CustomProviderForm({ onSaved }: { onSaved: () => void }) {
         modelIDs: ids,
       };
       if (apiKey.trim()) body.apiKey = apiKey.trim();
-      await request("/api/providers/custom", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+      if (nodeId) await api.nodeRuntime(nodeId, "providers/custom", "POST", body);
+      else await request("/api/providers/custom", { method: "POST", body: JSON.stringify(body) });
       setApiKey("");
       onSaved();
     } catch (e) {

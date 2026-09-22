@@ -8,6 +8,8 @@ test('node installer help works when piped to bash', () => {
  assert.equal(result.status,0,result.stderr);
  assert.match(result.stdout,/--pairing-token TOKEN/);
  assert.match(result.stdout,/defaults to this computer/);
+ assert.match(result.stdout,/--update/);
+ assert.match(installer,/bootstrap/);
 });
 test('node installer rejects incomplete flags before downloading', () => {
  for (const flag of ['--control-url','--pairing-token','--name','--version']) {

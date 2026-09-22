@@ -212,6 +212,18 @@ per-user config file with private permissions and starts at login. To remove a
 node, rerun the Unix command with `--uninstall`, or use
 `-Uninstall` with the PowerShell command; then revoke it in Settings → Computers.
 
+To update an already paired computer, rerun the installer with `--update`; it
+reuses the saved node credentials and preserves the workspace, config, and
+browser profile. The updater verifies the release manifest, stages dependencies
+before stopping the service, and rolls back if the replacement does not become
+healthy.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/scripts/node-install.sh | bash -s -- --update
+```
+
+On Windows, use `-Update` with the same PowerShell installer command.
+
 Registration creates a private node secret and local runner token in the
 platform config directory. Remote terminal/desktop access is not currently
 available for owned nodes; completed runs reconcile through durable receipts.

@@ -421,14 +421,77 @@ export async function requestText(
 // Readiness and the settings surfaces can ask for the catalog at the same
 // time (for example when a warming computer becomes ready). Share the active
 // request so one readiness transition produces one native catalog fetch.
-let catalogInFlight: Promise<Catalog> | undefined;
-const catalog = () => {
-  if (catalogInFlight) return catalogInFlight;
-  catalogInFlight = request<Catalog>("/api/catalog").finally(() => {
-    catalogInFlight = undefined;
+const catalogInFlight = new Map<string, Promise<Catalog>>();
+const catalog = (nodeId?: string) => {
+  const key = nodeId ?? "cloudflare";
+  const active = catalogInFlight.get(key);
+  if (active) return active;
+  const next = (nodeId ? nodeRuntime<Catalog>(nodeId, "catalog") : request<Catalog>("/api/catalog")).finally(() => {
+    catalogInFlight.delete(key);
   });
-  return catalogInFlight;
+  catalogInFlight.set(key, next);
+  return next;
 };
+
+async function nodeRuntime<T = unknown>(nodeId: string, operation: string, method = "GET", input?: unknown): Promise<T> {
+  const base = `/api/nodes/${encodeURIComponent(nodeId)}/runtime/${encodeURIComponent(operation)}`;
+  const receipt = await request<{ jobId: string }>(base, {
+    method: "POST",
+    body: JSON.stringify(input && typeof input === "object" ? input : {}),
+  });
+  return waitNodeJob<T>(nodeId, receipt.jobId, operation);
+}
+
+async function waitNodeJob<T>(nodeId: string, jobId: string, operation = "file operation"): Promise<T> {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const job = await request<{ status: string; result?: T; error?: string }>(`/api/nodes/${encodeURIComponent(nodeId)}/runtime/jobs/${encodeURIComponent(jobId)}`);
+    if (job.status === "succeeded") return job.result as T;
+    if (["failed", "needs_review"].includes(job.status)) throw new Error(job.error || `Node runtime operation ${operation} failed.`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Node runtime operation ${operation} timed out.`);
+}
+
+async function relayFetch(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  const token = getToken();
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${base}${path}`, { ...init, headers });
+  if (!response.ok) throw new Error((await response.text().catch(() => "")) || `File relay failed (${response.status})`);
+  return response;
+}
+
+async function nodeFileDownload(path: string, nodeId: string) {
+  const stat = await nodeRuntime<{ size: number; name?: string; sha256: string }>(nodeId, "file_stat", "POST", { scope: "computer", path });
+  const relay = await request<{ relayId: string; relayToken: string; jobId: string }>("/api/node-files", { method: "POST", body: JSON.stringify({ nodeId, direction: "export", path, size: stat.size, sha256: stat.sha256, name: stat.name ?? path.split(/[\\/]/).pop() ?? "download" }) });
+  await waitNodeJob(nodeId, relay.jobId, "file export");
+  const blob = await (await relayFetch(`/api/node-files/${encodeURIComponent(relay.relayId)}/content`, { headers: { Authorization: `Bearer ${relay.relayToken}` } })).blob();
+  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (sha256 !== stat.sha256) throw new Error("Computer file changed while it was being downloaded. Try again.");
+  return blob;
+}
+
+async function nodeFileUpload(path: string, body: ArrayBuffer, mimeType: string | undefined, nodeId: string, overwrite: boolean) {
+  if (body.byteLength > 50 * 1024 * 1024) throw new Error("Computer files must be 50 MiB or smaller.");
+  const digest = await crypto.subtle.digest("SHA-256", body);
+  const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const relay = await request<{ relayId: string; relayToken: string; jobId?: string }>("/api/node-files", { method: "POST", body: JSON.stringify({ nodeId, direction: "import", path, size: body.byteLength, sha256, name: path.split(/[\\/]/).pop() ?? "upload", overwrite }) });
+  const uploaded = await relayFetch(`/api/node-files/${encodeURIComponent(relay.relayId)}/content`, { method: "PUT", headers: { Authorization: `Bearer ${relay.relayToken}`, "Content-Type": mimeType || "application/octet-stream" }, body });
+  const uploadReceipt = await uploaded.json().catch(() => ({})) as { jobId?: string };
+  if (uploadReceipt.jobId || relay.jobId) await waitNodeJob(nodeId, uploadReceipt.jobId ?? relay.jobId!, "file import");
+  return { path, bytes: body.byteLength };
+}
+
+async function ownedWorkspacePath(nodeId: string, value: string) {
+  const roots = await nodeRuntime<{ workspace?: string; root?: string }>(nodeId, "file_roots", "POST", {});
+  const root = roots.workspace ?? roots.root;
+  if (!root) throw new Error("The selected computer did not provide a workspace root.");
+  const relative = value === "." ? "" : value.replace(/^\.\//, "").replace(/^[/\\]+/, "");
+  if (relative.split(/[\\/]/).some((part) => part === "..")) throw new Error("Workspace paths cannot leave the selected workspace.");
+  return relative ? `${root.replace(/[\\/]$/, "")}/${relative}` : root;
+}
 
 export const api = {
   state: () => request<State>("/api/state"),
@@ -626,60 +689,83 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ skillIds }),
     }),
-  files: (path = ".", signal?: AbortSignal) =>
-    request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
-      `/api/files?path=${encodeURIComponent(path)}`,
+  files: (path = ".", signal?: AbortSignal, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (async () => {
+          const absolute = options.scope === "workspace" ? await ownedWorkspacePath(options.nodeId!, path) : path;
+          const result = await nodeRuntime<{ artifacts?: FileArtifact[] } | FileArtifact[]>(options.nodeId!, "file_list", "POST", { scope: "computer", path: absolute, limit: 500 });
+          if (options.scope !== "workspace") return result;
+          const relativeFolder = path === "." ? "" : path.replaceAll("\\", "/").replace(/\/$/, "") + "/";
+          const parent = absolute.replaceAll("\\", "/").replace(/\/$/, "") + "/";
+          const map = (item: FileArtifact) => ({ ...item, path: relativeFolder + item.path.replaceAll("\\", "/").slice(parent.length) });
+          return Array.isArray(result) ? result.map(map) : { ...result, artifacts: (result.artifacts ?? []).map(map) };
+        })()
+      : request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
+      `/api/files?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`,
       { signal },
     ),
-  fileContent: (path: string, signal?: AbortSignal) =>
-    requestText(`/api/files/content?path=${encodeURIComponent(path)}`, signal),
-  fileDownload: (path: string, signal?: AbortSignal) =>
-    requestBlob(`/api/files/content?path=${encodeURIComponent(path)}`, signal),
-  fileUpload: (path: string, body: ArrayBuffer, mimeType?: string) =>
-    request<{ path: string; bytes: number }>(
-      `/api/files?path=${encodeURIComponent(path)}`,
+  fileContent: (path: string, signal?: AbortSignal, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, path) : Promise.resolve(path)).then((absolute) => nodeRuntime<{ contentBase64?: string }>(options.nodeId!, "file_read", "POST", { scope: "computer", path: absolute })).then((result) => result.contentBase64 ? new TextDecoder().decode(Uint8Array.from(atob(result.contentBase64), (char) => char.charCodeAt(0))) : "")
+      : requestText(`/api/files/content?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`, signal),
+  fileDownload: (path: string, signal?: AbortSignal, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, path) : Promise.resolve(path)).then((absolute) => nodeFileDownload(absolute, options.nodeId!))
+      : requestBlob(`/api/files/content?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`, signal),
+  fileUpload: (path: string, body: ArrayBuffer, mimeType?: string, options: { scope?: "workspace" | "computer"; nodeId?: string; overwrite?: boolean } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, path) : Promise.resolve(path)).then((absolute) => nodeFileUpload(absolute, body, mimeType, options.nodeId!, options.overwrite === true))
+      : request<{ path: string; bytes: number }>(
+      `/api/files?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}${options.overwrite ? "&overwrite=true" : ""}`,
       {
         method: "POST",
         headers: { "content-type": mimeType || "application/octet-stream" },
         body,
       },
     ),
-  fileMkdir: (path: string) =>
-    request<{ path: string; kind: "directory" }>(
-      `/api/files/mkdir?path=${encodeURIComponent(path)}`,
+  fileMkdir: (path: string, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, path) : Promise.resolve(path)).then((absolute) => nodeRuntime<{ path: string; kind: "directory" }>(options.nodeId!, "file_mkdir", "POST", { scope: "computer", path: absolute }))
+      : request<{ path: string; kind: "directory" }>(
+      `/api/files/mkdir?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`,
       { method: "POST" },
     ),
-  fileMove: (from: string, to: string) =>
-    request<{ from: string; to: string }>(
-      `/api/files/move?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+  fileMove: (from: string, to: string, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? Promise.all([options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, from) : Promise.resolve(from), options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, to) : Promise.resolve(to)]).then(([source, destination]) => nodeRuntime<{ from: string; to: string }>(options.nodeId!, "file_move", "POST", { scope: "computer", from: source, to: destination }))
+      : request<{ from: string; to: string }>(
+      `/api/files/move?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`,
       { method: "POST" },
     ),
-  fileDelete: (path: string) =>
-    request<{ deleted: boolean }>(
-      `/api/files?path=${encodeURIComponent(path)}`,
+  fileDelete: (path: string, options: { scope?: "workspace" | "computer"; nodeId?: string } = {}) =>
+    options.nodeId && (options.scope === "computer" || options.scope === "workspace")
+      ? (options.scope === "workspace" ? ownedWorkspacePath(options.nodeId, path) : Promise.resolve(path)).then((absolute) => nodeRuntime<{ deleted: boolean }>(options.nodeId!, "file_delete", "POST", { scope: "computer", path: absolute }))
+      : request<{ deleted: boolean }>(
+      `/api/files?path=${encodeURIComponent(path)}${options.scope ? `&scope=${options.scope}` : ""}${options.nodeId ? `&nodeId=${encodeURIComponent(options.nodeId)}` : ""}`,
       { method: "DELETE" },
     ),
   catalog,
+  nodeRuntime,
   storage: {
     get: () => request<StorageSummary>("/api/storage"),
     updatePolicy: (policy: StoragePolicy) => request<StorageSummary>("/api/storage/policy", { method: "POST", body: JSON.stringify(policy) }),
     cleanup: (keys: string[]) => request<StorageSummary>("/api/storage/cleanup", { method: "POST", body: JSON.stringify({ keys }) }),
   },
   mcp: {
-    list: () => request<McpServerList>("/api/mcps"),
+    list: (nodeId?: string) => nodeId ? nodeRuntime<McpServerList>(nodeId, "mcps") : request<McpServerList>("/api/mcps"),
     resources: () => request<{ location?: string; resources: unknown[]; templates: unknown[] }>("/api/mcps/resources"),
-    connect: (server: string) =>
-      request<{ ok: boolean; server: string }>("/api/mcps/connect", { method: "POST", body: JSON.stringify({ server }) }),
-    disconnect: (server: string) =>
-      request<{ ok: boolean; server: string }>("/api/mcps/disconnect", { method: "POST", body: JSON.stringify({ server }) }),
-    authStart: (payload: { integrationID: string; methodID: string; answer?: Record<string, unknown> }) =>
-      request<{ attempt?: { attemptID?: string; url?: string; instructions?: string; mode?: string } }>("/api/mcps/oauth/start", { method: "POST", body: JSON.stringify(payload) }),
-    authStatus: (payload: { integrationID: string; attemptID: string }) =>
-      request<Record<string, unknown>>("/api/mcps/oauth/status", { method: "POST", body: JSON.stringify(payload) }),
-    authComplete: (payload: { integrationID: string; attemptID: string; code?: string; callbackUrl?: string }) =>
-      request<{ ok: boolean; pending?: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
-    authCancel: (payload: { integrationID: string; attemptID: string }) =>
-      request<{ ok: boolean }>("/api/mcps/oauth/cancel", { method: "POST", body: JSON.stringify(payload) }),
+    connect: (server: string, nodeId?: string) =>
+      nodeId ? nodeRuntime<{ ok: boolean; server: string }>(nodeId, "mcps/connect", "POST", { server }) : request<{ ok: boolean; server: string }>("/api/mcps/connect", { method: "POST", body: JSON.stringify({ server }) }),
+    disconnect: (server: string, nodeId?: string) =>
+      nodeId ? nodeRuntime<{ ok: boolean; server: string }>(nodeId, "mcps/disconnect", "POST", { server }) : request<{ ok: boolean; server: string }>("/api/mcps/disconnect", { method: "POST", body: JSON.stringify({ server }) }),
+    authStart: (payload: { integrationID: string; methodID: string; answer?: Record<string, unknown>; nodeId?: string }) =>
+      payload.nodeId ? nodeRuntime<{ attempt?: { attemptID?: string; url?: string; instructions?: string; mode?: string } }>(payload.nodeId, "mcps/oauth/start", "POST", payload) : request<{ attempt?: { attemptID?: string; url?: string; instructions?: string; mode?: string } }>("/api/mcps/oauth/start", { method: "POST", body: JSON.stringify(payload) }),
+    authStatus: (payload: { integrationID: string; attemptID: string; nodeId?: string }) =>
+      payload.nodeId ? nodeRuntime<Record<string, unknown>>(payload.nodeId, "mcps/oauth/status", "POST", payload) : request<Record<string, unknown>>("/api/mcps/oauth/status", { method: "POST", body: JSON.stringify(payload) }),
+    authComplete: (payload: { integrationID: string; attemptID: string; code?: string; callbackUrl?: string; nodeId?: string }) =>
+      payload.nodeId ? nodeRuntime<{ ok: boolean; pending?: boolean }>(payload.nodeId, "mcps/oauth/complete", "POST", payload) : request<{ ok: boolean; pending?: boolean }>("/api/mcps/oauth/complete", { method: "POST", body: JSON.stringify(payload) }),
+    authCancel: (payload: { integrationID: string; attemptID: string; nodeId?: string }) =>
+      payload.nodeId ? nodeRuntime<{ ok: boolean }>(payload.nodeId, "mcps/oauth/cancel", "POST", payload) : request<{ ok: boolean }>("/api/mcps/oauth/cancel", { method: "POST", body: JSON.stringify(payload) }),
   },
   preview: async (signal?: AbortSignal) => {
     const token = getToken();

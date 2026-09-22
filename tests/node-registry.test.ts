@@ -16,8 +16,8 @@ function fixture() {
     },
   };
   let now = new Date("2026-09-20T12:00:00.000Z");
-  const registry = new NodeRegistry(sql, { now: () => now, randomId: (prefix) => `${prefix}_fixed_${Math.random()}` });
-  return { db, registry, advance: (ms: number) => { now = new Date(now.getTime() + ms); } };
+  const registry = new NodeRegistry(sql, { now: () => now, randomId: (prefix) => `${prefix}_fixed_${Math.random()}`, jobSecret: "workspace-secret" });
+  return { db, sql, registry, now: () => now, advance: (ms: number) => { now = new Date(now.getTime() + ms); } };
 }
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
@@ -78,6 +78,40 @@ describe("durable node registry", () => {
     expect(f.registry.getJob(job.id)).toMatchObject({ id: job.id, status: "needs_review" });
     expect(await f.registry.poll(enrolled.node.id, enrolled.nodeSecret)).toBeNull();
     await expect(f.registry.submitResult(enrolled.node.id, enrolled.nodeSecret, job.id, { ok: true })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("encrypts runtime operation inputs and decrypts only for the authenticated target lease", async () => {
+    const f = fixture();
+    const pairing = await f.registry.createPairing();
+    const enrolled = await f.registry.register(registration(pairing.token));
+    const job = await f.registry.enqueue(enrolled.node.id, { kind: "runtime.operation", nodeId: enrolled.node.id, operation: "providers/key", input: { integrationID: "x", key: "plain-api-key" } });
+    const stored = f.db.prepare("SELECT payload FROM node_jobs WHERE id=?").get(job.id) as any;
+    expect(stored.payload).not.toContain("plain-api-key");
+    const leased = await f.registry.poll(enrolled.node.id, enrolled.nodeSecret);
+    expect(leased?.payload).toMatchObject({ operation: "providers/key", input: { integrationID: "x", key: "plain-api-key" } });
+  });
+
+  it("fails closed on a wrong encryption key or tampered admin payload", async () => {
+    const f = fixture();
+    const pairing = await f.registry.createPairing();
+    const enrolled = await f.registry.register(registration(pairing.token));
+    const job = await f.registry.enqueue(enrolled.node.id, { kind: "runtime.operation", nodeId: enrolled.node.id, operation: "providers/key", input: { key: "secret" } });
+    const wrong = new NodeRegistry(f.sql, { now: f.now, jobSecret: "wrong-key" });
+    expect(await wrong.poll(enrolled.node.id, enrolled.nodeSecret)).toBeNull();
+    expect(f.registry.getJob(job.id)).toMatchObject({ status: "needs_review" });
+  });
+
+  it("expires queued admin jobs after ten minutes and purges terminal ciphertext", async () => {
+    const f = fixture();
+    const pairing = await f.registry.createPairing();
+    const enrolled = await f.registry.register(registration(pairing.token));
+    const job = await f.registry.enqueue(enrolled.node.id, { kind: "runtime.operation", nodeId: enrolled.node.id, operation: "providers/key", input: { key: "secret" } });
+    expect(f.registry.nextAdminExpiry()).toBe(Date.parse("2026-09-20T12:00:00.000Z") + 10 * 60_000);
+    f.advance(10 * 60_001);
+    f.registry.sweep();
+    expect(f.registry.getJob(job.id)).toMatchObject({ status: "needs_review" });
+    const stored = f.db.prepare("SELECT payload FROM node_jobs WHERE id=?").get(job.id) as any;
+    expect(stored.payload).not.toContain("inputEncrypted");
   });
 });
 

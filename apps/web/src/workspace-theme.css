@@ -49,11 +49,20 @@
 .extension-sources a > svg:last-child { margin-left: auto; }
 .extension-repository, .extension-skill { background: transparent; border-color: var(--line); }
 .files-explorer .files-actions { display:flex; gap:8px; align-items:center; }
+.files-scope-switch { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:16px clamp(20px, 4vw, 52px) 10px; padding:8px 10px; border:1px solid #32312b; border-radius:9px; background:#191916; }
+.files-scope-switch button { min-height:32px; padding:7px 11px; }
+.files-scope-switch label { margin-left:auto; color:#8d8c84; font-size:11px; }
+.files-scope-switch select { min-width:190px; border:1px solid #3b3e32; border-radius:7px; padding:8px 10px; background:#151610; color:#e9e7df; font:inherit; font-size:12px; }
 .file-upload-btn { display:inline-flex; align-items:center; gap:7px; border:1px solid #4b3f33; background:#2c231e; color:#f1d6c7; border-radius:8px; padding:8px 11px; font-size:12px; font-weight:700; cursor:pointer; }
 .files-breadcrumbs { display:flex; align-items:center; gap:5px; color:#8d8c84; font-size:12px; margin:18px 0 12px; }
 .files-breadcrumbs span { display:flex; align-items:center; gap:5px; }
 .files-breadcrumbs button { border:0; background:none; color:#b9b5aa; padding:3px; cursor:pointer; }
 .files-toolbar { display:flex; gap:10px; margin-bottom:12px; }
+.files-path { display:flex; align-items:center; gap:7px; color:#8d8c84; font-size:11px; }
+.files-path label { white-space:nowrap; }
+.files-path input { width:min(28vw,260px); min-width:120px; border:1px solid #32312b; border-radius:8px; padding:9px 10px; background:#191916; color:#e9e7df; font:inherit; font-size:12px; outline:none; }
+.files-path input:focus { border-color:#858b70; }
+.files-path button { white-space:nowrap; }
 .files-search { flex:1; display:flex; align-items:center; gap:8px; background:#191916; border:1px solid #32312b; border-radius:8px; padding:0 10px; color:#8d8c84; }
 .files-search input, .files-toolbar select { border:0; background:transparent; color:#e9e7df; padding:10px 0; outline:none; font:inherit; font-size:12px; }
 .files-toolbar select { border:1px solid #32312b; padding:0 10px; border-radius:8px; }
@@ -101,6 +110,7 @@
 .files-explorer .file-preview-head .file-preview-actions { flex-direction: row; align-items: center; }
 .files-explorer .files-search input { width: 100%; min-width: 0; }
 .files-explorer .files-actions { flex-wrap: wrap; justify-content: flex-end; }
+@media(max-width:640px) { .files-scope-switch { align-items:stretch; } .files-scope-switch label { margin-left:0; width:100%; } .files-scope-switch select { flex:1; min-width:0; } .files-toolbar { flex-wrap:wrap; } .files-path { order:2; width:100%; } .files-path input { flex:1; width:auto; } }
 
 /* File documents use the same safe Markdown renderer as conversations. */
 .file-preview-head > div:first-child { min-width:0; }

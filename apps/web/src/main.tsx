@@ -364,6 +364,19 @@ function App() {
   const bot =
     state.bots.find((b) => b.id === (selectedBot ?? thread?.botId)) ??
     state.bots[0];
+  useEffect(() => {
+    if (!bot?.nodeId) return;
+    let cancelled = false;
+    setCatalog({});
+    setCatalogError("");
+    setCatalogWarming(false);
+    void api.catalog(bot.nodeId).then((value) => {
+      if (!cancelled) setCatalog(value);
+    }).catch((error) => {
+      if (!cancelled) setCatalogError(error instanceof Error ? error.message : "The selected computer catalog is unavailable");
+    });
+    return () => { cancelled = true; };
+  }, [bot?.nodeId]);
   const composerKey = `${bot?.id ?? "none"}:${thread?.id ?? "new"}`;
   const activeComposerKey = useRef(composerKey);
   activeComposerKey.current = composerKey;
@@ -1012,7 +1025,7 @@ function App() {
             }}
           />
         ) : surface === "files" ? (
-          <FilesWorkspace />
+          <FilesWorkspace bot={bot} />
         ) : (
           <main className="main">
             {(computerWarming || catalogWarming) && !computerOpen && (
@@ -1244,8 +1257,11 @@ function App() {
         )}
         {surface === "chat" && (
             <ComputerPreview
-              key={`${connectionRevision}:${thread?.nodeId ?? "cloudflare"}`}
-              nodeId={thread?.nodeId}
+              key={`${connectionRevision}:${thread?.nodeId ?? bot?.nodeId ?? "cloudflare"}`}
+              // A thread's affinity is authoritative once it exists. Before
+              // the first message, use the bot's configured execution node
+              // so the preview cannot silently fall back to Cloudflare.
+              nodeId={thread?.nodeId ?? bot?.nodeId}
               open={computerOpen}
               loginUrl={requestedLoginUrl}
               onToggle={() => setComputerOpen((value) => !value)}
@@ -2154,8 +2170,14 @@ function SkillsWorkspace({
   );
 }
 
-function FilesWorkspace() {
-  return <FilesExplorer />;
+function FilesWorkspace({ bot }: { bot?: Bot }) {
+  const [nodes, setNodes] = useState<Array<{ id: string; name: string; online: boolean; revokedAt?: string }>>([]);
+  useEffect(() => {
+    void request<{ nodes: Array<{ id: string; name: string; online: boolean; revokedAt?: string }> }>("/api/nodes")
+      .then((result) => setNodes(result.nodes.filter((node) => !node.revokedAt)))
+      .catch(() => setNodes([]));
+  }, []);
+  return <FilesExplorer nodeId={bot?.nodeId} nodes={nodes} />;
 }
 
 function MessageBubble({ message, bot }: { message: Message; bot?: Bot }) {
@@ -2767,10 +2789,21 @@ function ModelPicker({
         ? `${model.providerID}/${model.id}`
         : String(model.id ?? model.name ?? ""),
       provider: String(model.providerID ?? model.provider ?? ""),
+      variants: (Array.isArray(model.variants) ? model.variants : [])
+        .map((variant) => {
+          if (typeof variant === "string") return { id: variant, name: variant };
+          if (!variant || typeof variant !== "object") return null;
+          const id = String((variant as { id?: unknown }).id ?? "");
+          return id ? { id, name: String((variant as { name?: unknown }).name ?? id) } : null;
+        })
+        .filter((variant): variant is { id: string; name: string } => Boolean(variant)),
     }))
     .filter((item) => item.id);
+  const selectedHash = value.indexOf("#");
+  const selectedModel = selectedHash < 0 ? value : value.slice(0, selectedHash);
+  const selectedVariant = selectedHash < 0 ? "" : value.slice(selectedHash + 1);
   const filtered = normalized.filter((item) =>
-    `${item.id} ${item.provider}`.toLowerCase().includes(query.toLowerCase()),
+    `${item.id} ${item.provider} ${item.variants.map((variant) => `${variant.id} ${variant.name}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()),
   );
   const priceTier = (model: CatalogModel) => {
     const raw = JSON.stringify(model.cost ?? model.pricing ?? "").toLowerCase();
@@ -2847,22 +2880,47 @@ function ModelPicker({
                       : "Pricing unavailable"}
                 </div>
                 {group.map((item) => (
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={value === item.id}
-                    className="model-option"
-                    key={item.id}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      onChange(item.id);
-                      setQuery(item.id);
-                      setOpen(false);
-                    }}
-                  >
-                    <span>{item.id}</span>
-                    <small>{item.provider || "catalog"}</small>
-                  </button>
+                  <div key={item.id}>
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={selectedModel === item.id && !selectedVariant}
+                      className="model-option"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        onChange(item.id);
+                        setQuery(item.id);
+                        setOpen(false);
+                      }}
+                    >
+                      <span>{item.id}</span>
+                      <small>{item.provider || "catalog"}</small>
+                    </button>
+                    {item.variants.length > 0 && (
+                      <div className="model-variants" aria-label={`Variants for ${item.id}`}>
+                        <span>Variant</span>
+                        {item.variants.map((variant) => {
+                          const variantValue = `${item.id}#${variant.id}`;
+                          return (
+                            <button
+                              type="button"
+                              key={variant.id}
+                              className="model-variant"
+                              aria-pressed={value === variantValue}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                onChange(variantValue);
+                                setQuery(variantValue);
+                                setOpen(false);
+                              }}
+                            >
+                              {variant.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             ) : null;
@@ -2928,6 +2986,10 @@ function BotModal({
   const [nodes, setNodes] = useState<
     Array<{ id: string; name: string; online: boolean; revokedAt?: string }>
   >([]);
+  const [nodeCatalog, setNodeCatalog] = useState<Catalog | null>(null);
+  const [nodeCatalogLoading, setNodeCatalogLoading] = useState(false);
+  const [nodeCatalogError, setNodeCatalogError] = useState("");
+  const catalogRequest = useRef(0);
   useEffect(() => {
     void request<{
       nodes: Array<{
@@ -2940,6 +3002,36 @@ function BotModal({
       .then((r) => setNodes(r.nodes.filter((n) => !n.revokedAt)))
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    const requestID = ++catalogRequest.current;
+    setNodeCatalogError("");
+    setNodeCatalog(null);
+    setNodeCatalogLoading(true);
+    // Always load the target's catalog. The parent catalog may describe the
+    // currently selected bot's node, which is unrelated when creating or
+    // editing a bot for another target (including the shared Cloudflare node).
+    void api.catalog(nodeId || undefined).then((next) => {
+      if (catalogRequest.current === requestID) setNodeCatalog(next);
+    }).catch((e) => {
+      if (catalogRequest.current === requestID) setNodeCatalogError(e instanceof Error ? e.message : "The selected computer catalog is unavailable");
+    }).finally(() => {
+      if (catalogRequest.current === requestID) setNodeCatalogLoading(false);
+    });
+  }, [nodeId]);
+  const availableModels = nodeCatalog?.models ?? [];
+  const availableAgents = nodeCatalog?.agents ?? [];
+  const modelReference = model.split("#", 1)[0];
+  const modelAvailable = !model || nodeCatalogLoading || Boolean(nodeCatalogError) || availableModels.some((candidate) => {
+    const candidateID = candidate.providerID ? `${candidate.providerID}/${candidate.id}` : String(candidate.id ?? candidate.name ?? "");
+    return candidateID === modelReference;
+  });
+  const changeNode = (nextNodeID: string) => {
+    if (nextNodeID !== nodeId) {
+      setModel("");
+      setAgent("");
+    }
+    setNodeId(nextNodeID);
+  };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const save = async () => {
@@ -2992,10 +3084,36 @@ function BotModal({
           placeholder="e.g. Researcher"
           autoFocus
         />
+        <label className="field-label" htmlFor="bot-computer">
+          Run this bot on
+        </label>
+        <select
+          className="text-input"
+          id="bot-computer"
+          value={nodeId}
+          onChange={(e) => changeNode(e.target.value)}
+        >
+          <option value="">Cloudflare shared computer</option>
+          {nodes.map((n) => (
+            <option key={n.id} value={n.id}>
+              {n.name}
+              {n.online ? "" : " · offline"}
+            </option>
+          ))}
+        </select>
+        <p className="settings-muted">
+          This chooses where the bot runs: its workspace, browser, tools, and
+          local OS permissions. Model providers remain remote. New
+          conversations use this choice; existing conversations keep their
+          original computer.
+        </p>
+        {nodeCatalogLoading && <p className="settings-muted">Loading models and agents for this computer…</p>}
+        {nodeCatalogError && <div className="inline-error"><AlertCircle size={15} />{nodeCatalogError}</div>}
         <label className="field-label" htmlFor="model-picker">
           Model <span>optional</span>
         </label>
-        <ModelPicker models={models} value={model} onChange={setModel} />
+        <ModelPicker models={availableModels} value={model} onChange={setModel} />
+        {!modelAvailable && <p className="settings-muted">The saved model is unavailable on this computer. Choose an available model before saving.</p>}
         <label className="field-label" htmlFor="bot-agent">
           Agent <span>live catalog</span>
         </label>
@@ -3006,7 +3124,7 @@ function BotModal({
           onChange={(event) => setAgent(event.target.value)}
         >
           <option value="">Default agent</option>
-          {agents.map((item) => (
+          {availableAgents.map((item) => (
             <option
               key={String(item.id ?? item.name)}
               value={String(item.id ?? item.name)}
@@ -3016,27 +3134,6 @@ function BotModal({
             </option>
           ))}
         </select>
-        <label className="field-label" htmlFor="bot-computer">
-          Computer
-        </label>
-        <select
-          className="text-input"
-          id="bot-computer"
-          value={nodeId}
-          onChange={(e) => setNodeId(e.target.value)}
-        >
-          <option value="">Cloudflare · default</option>
-          {nodes.map((n) => (
-            <option key={n.id} value={n.id}>
-              {n.name}
-              {n.online ? "" : " · offline"}
-            </option>
-          ))}
-        </select>
-        <p className="settings-muted">
-          Used for new conversations. Existing conversations stay on their
-          original computer.
-        </p>
         <label className="field-label" htmlFor="bot-instructions">
           Instructions <span>optional</span>
         </label>

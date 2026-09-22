@@ -1,10 +1,13 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenCode2Runtime, eventText, eventType } from "../packages/runtime-opencode2/src/client.mjs";
 import { dispatchArtifactRequest } from './artifacts.mjs';
+import { computerFileOperation, dispatchComputerFileRequest } from './computer-files.mjs';
+import { ingestTransfer } from './transfer-ingest.mjs';
 import { DesktopController } from './desktop.mjs';
 import { createTerminalRoutes } from './terminal-routes.mjs';
 import { createPluginRoutes } from "./plugin-routes.mjs";
@@ -27,6 +30,23 @@ function errorMessage(error, seen = new Set()) {
     if (nested && nested !== '[object Object]') return nested;
   }
   try { return JSON.stringify(error); } catch { return '[object Object]'; }
+}
+function redactAdminResult(value, depth = 0) {
+  if (depth > 8) return "[truncated]";
+  if (Array.isArray(value)) return value.slice(0, 256).map((item) => redactAdminResult(item, depth + 1));
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, 256)) {
+    if (/^(?:key|api.?key|authorization|cookie|credential|password|secret|token|headers|body)$/i.test(key) || /api.?key|authorization|cookie|credential|password|secret|token/i.test(key)) result[key] = "[redacted]";
+    else result[key] = redactAdminResult(item, depth + 1);
+  }
+  return result;
+}
+function boundedAdminResult(value) {
+  const result = redactAdminResult(value);
+  const encoded = JSON.stringify(result);
+  if (encoded.length > 200_000) throw httpError(413, "runtime operation response is too large");
+  return result;
 }
 const isTransientTransportError = (error) => /transport|connection|socket|network|fetch|econnreset|eof/i.test(errorMessage(error));
 
@@ -129,7 +149,7 @@ export class RunStore {
       return this.public(existing);
     }
     if ([...this.runs.values()].some(run => !isTerminal(run.status))) throw httpError(409, 'computer already has an active run');
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -195,6 +215,17 @@ export class RunStore {
     if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
     if (name === 'list_bots') return { bots: run.botDirectory ?? [] };
     if (name === 'get_replies') return { replies: run.delegationHistory ?? [], pending: run.delegationRequests ?? [] };
+    if (name === 'send_file') {
+      if (!run.allowBotMessaging) throw httpError(409, 'This turn is receiving replies.');
+      const fields = ['targetBotId','sourcePath','targetPath','name','sha256'];
+      if (fields.some(field => typeof args[field] !== 'string' || !args[field].trim()) || !Number.isSafeInteger(args.size) || args.size < 0) throw httpError(400, 'send_file requires targetBotId, paths, name, size, and sha256');
+      run.fileTransferRequests ??= [];
+      if (run.fileTransferRequests.length >= 4) throw httpError(429, 'Maximum four file transfers per turn');
+      const existing = run.fileTransferRequests.find(item => item.targetBotId === args.targetBotId && item.sourcePath === args.sourcePath && item.targetPath === args.targetPath);
+      if (existing) return { ...existing, status: 'queued' };
+      const request = { id: randomUUID(), targetBotId: args.targetBotId, sourcePath: args.sourcePath.trim(), targetPath: args.targetPath.trim(), name: args.name.trim(), size: args.size, sha256: args.sha256.trim() };
+      run.fileTransferRequests.push(request); this.emit(run, 'bot.file.queued', request); this.persist(run); return { ...request, status: 'queued' };
+    }
     if (name === 'create_bot') {
       if (!run.allowBotMessaging) throw httpError(409, 'This turn cannot create bots while receiving replies.');
       const nameValue = typeof args.name === 'string' ? args.name.trim() : '';
@@ -553,9 +584,13 @@ export function createServer({ store, authToken = token, botToolToken, workspace
   store.terminalRegistry = terminals.registry;
   const plugins = createPluginRoutes({workspace,runtimeRoot:store.runtime.root,updateConfiguration:fn=>store.updateConfiguration(fn),reloadRuntime:async()=>{store.runtime.catalogCache?.clear();}});
   const extensions = createExtensionRoutes({ workspace, updateConfiguration: (fn) => store.updateConfiguration(fn) });
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
-      if (req.url === "/health" && req.method === "GET") return json(res, 200, { ok: true, service: "opencode2-runner", instanceId: store.instanceId });
+      if (req.url === "/health" && req.method === "GET") {
+        const startupNonce = process.env.NODE_RUNNER_STARTUP_NONCE;
+        if (startupNonce && req.headers["x-opencode-startup-nonce"] !== startupNonce) return json(res, 401, { error: "unauthorized" });
+        return json(res, 200, { ok: true, service: "opencode2-runner", instanceId: store.instanceId, ...(startupNonce ? { startupNonce } : {}) });
+      }
       if (req.url === '/bot-tools' && req.method === 'POST') {
         if (!botToolToken || req.headers.authorization !== `Bearer ${botToolToken}`) return json(res,401,{error:'unauthorized'});
         const input = await readJson(req);
@@ -564,6 +599,8 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       if (authToken && req.headers.authorization !== `Bearer ${authToken}`) return json(res, 401, { error: "unauthorized" });
       if (new URL(req.url, 'http://runner').pathname.startsWith('/files')) {
         if (store.paused && req.method !== 'GET') return json(res, 409, { error: 'runner is quiesced' });
+        if (await ingestTransfer(req, res, workspace)) return;
+        if (await dispatchComputerFileRequest(req, res)) return;
         if (await dispatchArtifactRequest(req, res, workspace)) return;
       }
       if (desktop?.controlStatus?.().active && /^\/(?:terminal|terminals)(?:\/|$)/.test(new URL(req.url, 'http://runner').pathname) && req.method === 'POST' && /\/(?:attach)?$/.test(new URL(req.url, 'http://runner').pathname)) return json(res, 409, { error: 'Computer is under manual control', code: 'human_control_active', notAdmitted: true });
@@ -621,6 +658,31 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         return;
       }
       const mcpPath = new URL(req.url, 'http://runner').pathname;
+      if (mcpPath === "/runtime/operation" && req.method === "POST") {
+        const input = await readJson(req);
+        const operation = input.operation;
+        if (operation === "file_roots") return json(res, 200, { result: { workspace: path.resolve(workspace), home: os.homedir(), root: path.parse(path.resolve(workspace)).root } });
+        if (typeof operation === "string" && operation.startsWith("file_")) return json(res, 200, { result: boundedAdminResult(await computerFileOperation(operation, input.input)) });
+        const methods = {
+          catalog: ["catalog", true], providers: ["providers", true],
+          "providers/key": ["configureProvider", false], "providers/custom": ["configureCustomProvider", false],
+          "providers/credentials/activate": ["activateProviderCredential", false], "providers/credentials/label": ["updateProviderCredential", false], "providers/credentials/remove": ["removeProviderCredential", false],
+          "providers/oauth/start": ["providerOAuthStart", false], "providers/oauth/status": ["providerOAuthStatus", true], "providers/oauth/complete": ["providerOAuthComplete", false], "providers/oauth/cancel": ["providerOAuthCancel", false],
+          "providers/command/start": ["providerCommandStart", false], "providers/command/status": ["providerCommandStatus", true], "providers/command/cancel": ["providerCommandCancel", false],
+          mcps: ["mcpList", true], "mcps/add": ["mcpAdd", false], "mcps/remove": ["mcpRemove", false], "mcps/connect": ["mcpConnect", false], "mcps/disconnect": ["mcpDisconnect", false],
+          "mcps/oauth/start": ["providerOAuthStart", false], "mcps/oauth/status": ["providerOAuthStatus", true], "mcps/oauth/complete": ["providerOAuthComplete", false], "mcps/oauth/cancel": ["providerOAuthCancel", false],
+        };
+        const selected = methods[operation];
+        if (!selected || typeof input.input !== "object" || Array.isArray(input.input)) return json(res, 400, { error: "unsupported node runtime operation" });
+        const [method, readOnly] = selected;
+        if (typeof store.runtime[method] !== "function") return json(res, 501, { error: "runtime operation is unavailable" });
+        const args = { ...input.input, directory: workspace };
+        const invoke = () => readOnly && ["catalog", "providers", "mcps"].includes(operation)
+          ? store.runtime[method](workspace)
+          : store.runtime[method](args);
+        const result = await (readOnly ? store.withRuntime(invoke) : store.updateConfiguration(invoke));
+        return json(res, 200, { result: boundedAdminResult(result) });
+      }
       if (mcpPath === '/mcp' || mcpPath === '/mcps' || mcpPath.startsWith('/mcp/') || mcpPath.startsWith('/mcps/')) {
         const suffix = mcpPath.replace(/^\/mcps?\/?/, '');
         const runtime = store.runtime;
@@ -743,6 +805,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
       return json(res, 405, { error: "method not allowed" });
     } catch (error) { const status = error?.statusCode ?? 500; json(res, status, { error: errorMessage(error), ...(error?.notAdmitted === true ? { notAdmitted: true } : {}) }); }
   });
+  return server;
 }
 
 function isTerminal(status) { return ["succeeded", "failed", "cancelled", "needs_review"].includes(status); }
@@ -771,5 +834,18 @@ if (isEntrypoint && process.env.NODE_ENV !== "test") {
   const desktop = process.env.OPENCODE_BOT_DESKTOP === "0" ? undefined : new DesktopController();
   const botToolToken = randomUUID();
   const runtime = new OpenCode2Runtime({ botTools: { command: [process.execPath, fileURLToPath(new URL("./bot-mcp.mjs", import.meta.url))], env: { BOT_TOOLS_URL: `http://127.0.0.1:${port}/bot-tools`, BOT_TOOLS_TOKEN: botToolToken } }, root, directory: process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared", desktop });
-  createServer({ store: new RunStore(runtime, { stateDir: path.join(root, "runs") }), desktop, botToolToken }).listen(port, process.env.RUNNER_HOST ?? "127.0.0.1", () => console.log(`runner listening on ${port}`));
+  const store = new RunStore(runtime, { stateDir: path.join(root, "runs") });
+  const server = createServer({ store, desktop, botToolToken });
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const close = new Promise((resolve) => server.close(() => resolve()));
+    const stop = Promise.resolve().then(() => runtime.stop?.()).catch(() => undefined);
+    await Promise.race([Promise.all([close, stop]), new Promise((resolve) => setTimeout(resolve, 15_000))]);
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.listen(port, process.env.RUNNER_HOST ?? "127.0.0.1", () => console.log(`runner listening on ${port}`));
 }

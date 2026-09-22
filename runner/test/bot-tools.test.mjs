@@ -43,7 +43,7 @@ test('native MCP stdio handshake and tool call reach only bot capabilities', asy
   const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../bot-mcp.mjs',import.meta.url))],env:{BOT_TOOLS_URL:`http://127.0.0.1:${server.address().port}/bot-tools`,BOT_TOOLS_TOKEN:'limited'}});
   try {
     await client.connect(transport);
-    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','get_replies','create_bot']);
+    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot']);
     const result=await client.callTool({name:'send_message',arguments:{targetBotId:'scout',prompt:'Say hello'}});
     assert.equal(result.isError,undefined);
     assert.equal(JSON.parse(result.content[0].text).status,'queued');

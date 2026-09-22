@@ -1,4 +1,5 @@
 import { OpenCode, isSessionNotFoundError } from "@opencode/client";
+import { createRequire } from "node:module";
 import * as ServiceModule from "@opencode/client/service";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createPlaywrightMcpServer } from "../../browser/src/index.ts";
@@ -57,15 +58,20 @@ export class OpenCode2Runtime {
       let config = await readConfig(configPath);
       config.mcp ??= {}; config.mcp.servers ??= {};
       config.mcp.servers.computer_browser = { ...createPlaywrightMcpServer({
-        command: process.env.PLAYWRIGHT_MCP_BIN ?? '/opt/opencode-bot/runner/node_modules/.bin/playwright-mcp',
-        executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? '/opt/ms-playwright/chromium-1246/chrome-linux64/chrome',
-        noSandbox: true,
+        profileDir: process.env.PLAYWRIGHT_PROFILE_DIR,
+        outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR,
+        command: process.env.PLAYWRIGHT_MCP_JS ?? process.env.PLAYWRIGHT_MCP_BIN ?? '/opt/opencode-bot/runner/node_modules/.bin/playwright-mcp',
+        executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? (process.env.PLAYWRIGHT_MCP_JS ? createRequire(process.env.PLAYWRIGHT_MCP_JS)("playwright").chromium.executablePath() : '/opt/ms-playwright/chromium-1246/chrome-linux64/chrome'),
+        noSandbox: process.env.PLAYWRIGHT_NO_SANDBOX !== "0",
         headless: !this.desktop,
         ...(this.desktop ? {
           cdpEndpoint: process.env.OPENCODE_BOT_CDP_ENDPOINT ?? "http://127.0.0.1:9222",
           cdpTimeoutMs: 30_000,
         } : {}),
       }), codemode: false };
+      // Execute the JS entrypoint directly on owned nodes, including Windows
+      // where a .cmd shim cannot be spawned like a Unix executable.
+      if (process.env.PLAYWRIGHT_MCP_JS) config.mcp.servers.computer_browser.command.unshift(process.execPath);
       if (config.mcp.servers.browser?.command?.some(part => String(part).includes("playwright-mcp"))) delete config.mcp.servers.browser;
       await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
       // Project configuration is location-scoped. Writing it beside the
@@ -782,10 +788,21 @@ async function readConfig(filename) {
 }
 
 function normalizeModel(value) {
-  if (typeof value === "object") return value;
-  const [reference,variant] = String(value).split('#');
-  const [providerID, ...rest] = reference.split("/");
-  return { providerID, id: rest.join("/") || providerID, ...(variant?{variant}:{}) };
+  if (value && typeof value === "object") {
+    const providerID = String(value.providerID ?? value.providerId ?? value.provider ?? "");
+    const rawID = String(value.id ?? value.modelID ?? value.modelId ?? "");
+    const parsed = normalizeModel(`${providerID}/${rawID}`);
+    const variant = value.variant ?? parsed.variant;
+    return { providerID: parsed.providerID, id: parsed.id, ...(variant ? { variant: String(variant) } : {}) };
+  }
+  const text = String(value ?? "").trim();
+  const hash = text.indexOf("#");
+  const reference = hash < 0 ? text : text.slice(0, hash);
+  const variant = hash < 0 ? "" : text.slice(hash + 1);
+  const separator = reference.indexOf("/");
+  const providerID = separator < 0 ? reference : reference.slice(0, separator);
+  const id = separator < 0 ? providerID : reference.slice(separator + 1);
+  return { providerID, id, ...(variant ? { variant } : {}) };
 }
 
 function nativeLocation(directory) {
