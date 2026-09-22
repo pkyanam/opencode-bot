@@ -1,6 +1,10 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import { MemoryError } from "./memory-registry";
 
+const SANDBOX_RESET_MESSAGE = "Durable Object reset because its code was updated";
+const isSandboxReset = (error: unknown) =>
+  error instanceof Error && error.message.includes(SANDBOX_RESET_MESSAGE);
+
 /** Dedicated memory compute, never the bot's Computer. Its PG database is a
  * rebuildable projection of committed registry records, not the durable source. */
 export class CloudflareHindsight {
@@ -75,7 +79,16 @@ export class CloudflareHindsight {
           "Hindsight is starting its database and models.",
         );
       this.checkedAt = Date.now();
-    })().finally(() => {
+    })().catch((error) => {
+      // Sandbox handles become poisoned when a Durable Object is reset during
+      // a deployment. Only discard the handle for that exact platform signal;
+      // ordinary provider/transport errors should reuse the same sandbox.
+      if (isSandboxReset(error)) {
+        this.sandbox = undefined;
+        this.checkedAt = 0;
+      }
+      throw error;
+    }).finally(() => {
       this.starting = undefined;
     });
     return this.starting;
@@ -109,7 +122,12 @@ export class CloudflareHindsight {
     try {
       return await this.raw(path, init);
     } catch (error) {
-      this.checkedAt = 0;
+      if (isSandboxReset(error)) {
+        this.sandbox = undefined;
+        this.checkedAt = 0;
+      } else {
+        this.checkedAt = 0;
+      }
       throw error;
     }
   }
