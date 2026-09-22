@@ -1,0 +1,6 @@
+{
+  "name": "@opencode-bot/computer-local",
+  "private": true,
+  "type": "module",
+  "version": "0.1.27"
+}

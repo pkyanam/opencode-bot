@@ -43,6 +43,7 @@ function proxyResponseHeaders(headers) {
 export function createHindsightSupervisor(options = {}) {
   const token = options.token ?? process.env.RUNNER_TOKEN;
   const port = Number(options.port ?? process.env.HINDSIGHT_SERVICE_PORT ?? DEFAULT_PORT);
+  const host = options.host ?? process.env.HINDSIGHT_SERVICE_HOST ?? "0.0.0.0";
   const target = options.target ?? process.env.HINDSIGHT_API_URL ?? DEFAULT_TARGET;
   const configuredInstanceId = options.instanceId ?? process.env.HINDSIGHT_INSTANCE_ID;
   let instanceId = configuredInstanceId ?? randomUUID();
@@ -131,7 +132,7 @@ export function createHindsightSupervisor(options = {}) {
     res.writeHead(upstream.status, proxyResponseHeaders(upstream.headers));
     res.end(Buffer.from(await upstream.arrayBuffer()));
   }
-  return { async listen() { await loadConfig(); await start(); return new Promise(resolve => { const server = http.createServer((req, res) => handler(req, res).catch(error => json(res, 502, { error: error.message }))); server.listen(port, "0.0.0.0", resolve); }); }, handler, start, stop, state: publicState };
+  return { async listen() { await loadConfig(); await start(); return new Promise(resolve => { const server = http.createServer((req, res) => handler(req, res).catch(error => json(res, 502, { error: error.message }))); server.listen(port, host, resolve); }); }, handler, start, stop, state: publicState };
 }
 
 if (process.argv[1]?.endsWith("hindsight-service.mjs")) {

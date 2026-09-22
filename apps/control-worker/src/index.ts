@@ -27,7 +27,7 @@ import {
   type Decision,
   type RunStatus,
 } from "../../../packages/domain/src/index";
-import { CloudflareComputerProvider } from "../../../packages/computer-cloudflare/src/index";
+import { CloudflareComputerProvider, type ComputerProvider } from "../../../packages/computer-cloudflare/src/index";
 import { advanceDue } from "../../../packages/domain/src/routines";
 import {
   EXTENSION_REPOSITORY_SCHEMA,
@@ -58,11 +58,16 @@ export { Sandbox } from "@cloudflare/sandbox";
 type Env = {
   WORKSPACE: DurableObjectNamespace;
   SANDBOX?: DurableObjectNamespace;
+  /** Injected by standalone hosts; Cloudflare continues to use SANDBOX. */
+  COMPUTER_PROVIDER?: ComputerProvider;
+  HINDSIGHT_FACTORY?: (instance: (id: string) => void) => { fetch(path: string, init?: RequestInit): Promise<Response> };
   ASSETS?: Fetcher;
   APP_TOKEN?: string;
   APP_ACCOUNT_ID?: string;
   APP_WORKER_NAME?: string;
   RUNNER_TOKEN?: string;
+  HOSTING_PROVIDER?: string;
+  RELEASE_COMMIT?: string;
   AI?: Ai;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -142,7 +147,7 @@ export class Workspace {
   private maintenance = false;
   private readonly startup = new ComputerStartup();
   private updateController?: UpdateController;
-  private computerProvider?: CloudflareComputerProvider;
+  private computerProvider?: ComputerProvider;
   private computerCoordinator?: ComputerManager;
   private autoSleep?: AutoSleepController;
   private pairingService?: PairingService;
@@ -165,10 +170,11 @@ export class Workspace {
   }
   private hindsightWakeAt?: number;
   private hindsightEngine?: HindsightEngine;
-  private nativeHindsight?: CloudflareHindsight;
+  private nativeHindsight?: { fetch(path: string, init?: RequestInit): Promise<Response> };
   private hindsight() {
-    return this.hindsightEngine ??= new HindsightEngine({sql:this.state.storage.sql,registry:this.memories(),schedule:()=>{this.hindsightWakeAt=Date.now()+3000;this.state.storage.setAlarm(this.hindsightWakeAt);},nativeReady:()=>Boolean(this.env.SANDBOX&&this.env.AI),client:settings=>new HindsightClient(async(path,init)=>{
+    return this.hindsightEngine ??= new HindsightEngine({sql:this.state.storage.sql,registry:this.memories(),schedule:()=>{this.hindsightWakeAt=Date.now()+3000;this.state.storage.setAlarm(this.hindsightWakeAt);},nativeReady:()=>Boolean(this.env.HINDSIGHT_FACTORY||(this.env.SANDBOX&&this.env.AI)),client:settings=>new HindsightClient(async(path,init)=>{
       if(settings.url){const headers=new Headers(init?.headers);if(settings.apiKey)headers.set("Authorization",`Bearer ${settings.apiKey}`);return fetch(settings.url+path,{...init,headers,redirect:"manual",signal:AbortSignal.timeout(90000)});}
+      if(this.env.HINDSIGHT_FACTORY){this.nativeHindsight ??= this.env.HINDSIGHT_FACTORY(id=>this.hindsight().engineInstanceChanged(id));return this.nativeHindsight.fetch(path,init);}
       if(!this.env.SANDBOX||!this.env.AI||!this.env.RUNNER_TOKEN)throw new MemoryError(503,"This deployment does not have the built-in Hindsight service. Update it or configure an external Hindsight URL.");
       this.nativeHindsight ??= new CloudflareHindsight({namespace:this.env.SANDBOX,token:await this.memoryCapability("hindsight-service-v1"),origin:async()=>this.memoryControlOrigin??await this.state.storage.get<string>("memory:control-origin")??"",modelToken:()=>this.memoryCapability("hindsight-ai-v1"),instance:id=>this.hindsight().engineInstanceChanged(id)});
       return this.nativeHindsight.fetch(path,init);
@@ -2405,7 +2411,7 @@ export class Workspace {
       this.schedule(asleep);
       return;
     }
-    if (!this.env.SANDBOX || !this.env.RUNNER_TOKEN) {
+    if ((!this.env.SANDBOX && !this.env.COMPUTER_PROVIDER) || !this.env.RUNNER_TOKEN) {
       if (run.status === "queued")
         this.transition(run.id, run.status, "waiting_dependency", {
           dependency: "SANDBOX/RUNNER_TOKEN",
@@ -2521,7 +2527,8 @@ export class Workspace {
     }
   }
 
-  private provider(): CloudflareComputerProvider {
+  private provider(): ComputerProvider {
+    if (this.env.COMPUTER_PROVIDER) return this.env.COMPUTER_PROVIDER;
     if (!this.env.SANDBOX || !this.env.RUNNER_TOKEN)
       throw new Error("SANDBOX and RUNNER_TOKEN are required");
     // Sandbox reserves port 3000 for its container server; the application
@@ -2652,6 +2659,10 @@ export class Workspace {
   }
 
   private async updateRoute(request: Request, url: URL): Promise<Response> {
+    if (this.env.COMPUTER_PROVIDER && !this.env.SANDBOX) {
+      if (request.method === "GET" && url.pathname === "/api/updates") return response({ currentVersion: `v${packageInfo.version}`, configured: false, available: false, host: "boat", managedExternally: true, instructions: "Update this Boat installation by running the Boat installer again." });
+      return response({ error: "This host uses the Boat installer for updates. Cloudflare deployment credentials are not needed." }, 400);
+    }
     const updater = this.updates(url);
     try {
       if (url.pathname === "/api/updates" && request.method === "GET") return response(await updater.status(url.searchParams.has("refresh")));
@@ -2731,7 +2742,7 @@ export class Workspace {
   private async automaticCheckpoint(): Promise<void> {
     if (!this.env.ARTIFACTS || this.maintenance || typeof this.state.storage.get !== "function" || this.startup.peek()?.state !== "ready") return;
     const policy = await this.backupPolicy();
-    if (!policy.automatic || await this.plannedSleep() || !await this.provider().isRunning("shared")) return;
+    if (!policy.automatic || await this.plannedSleep() || !await this.provider().isRunning?.("shared")) return;
     const pointer = await this.state.storage.get<any>("computer-checkpoint:shared");
     const last = Date.parse(pointer?.committedAt ?? "") || 0;
     const changed = this.one<any>("SELECT MAX(r.updated_at) AS at FROM runs r JOIN threads t ON t.id=r.thread_id WHERE t.node_id IS NULL");
@@ -3424,7 +3435,7 @@ export class Workspace {
       );
     return readiness.handle.transport;
   }
-  private async selfContext(thread:any) {const job=typeof this.state.storage.get==="function"?await this.state.storage.get<any>("app-update:job"):undefined;const config=typeof this.state.storage.get==="function"?await this.state.storage.get<any>("app-update:configuration"):undefined;return {version:packageInfo.version,commit:job?.bundle?.commit,deploymentId:this.env.APP_WORKER_NAME??config?.workerName??"opencode-bot",executionNodeId:thread.node_id??"cloudflare",botName:this.one<any>("SELECT name FROM bots WHERE id=?",thread.bot_id)?.name,model:thread.model,capabilities:["memory","bot_messaging","files","browser","skills"]};}
+  private async selfContext(thread:any) {const job=typeof this.state.storage.get==="function"?await this.state.storage.get<any>("app-update:job"):undefined;const config=typeof this.state.storage.get==="function"?await this.state.storage.get<any>("app-update:configuration"):undefined;return {version:packageInfo.version,commit:job?.bundle?.commit??this.env.RELEASE_COMMIT,hostingProvider:thread.node_id?"owned-node":(this.env.HOSTING_PROVIDER??"cloudflare"),deploymentId:this.env.APP_WORKER_NAME??config?.workerName??"opencode-bot",executionNodeId:thread.node_id??(this.env.HOSTING_PROVIDER??"cloudflare"),botName:this.one<any>("SELECT name FROM bots WHERE id=?",thread.bot_id)?.name,model:thread.model,capabilities:["memory","bot_messaging","files","browser","skills"]};}
   private async ownedRunnerInput(run: any, thread: any): Promise<Record<string, unknown>> {
     return {
       memoryTools: await this.memoryToolsForRun(run.id),

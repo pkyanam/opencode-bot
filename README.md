@@ -44,6 +44,17 @@ it boots. The default checkout is `~/.local/share/opencode-bot`. Rerun the comma
 to resume installation. Hosting and models are billed by their providers.
 [Setup details and troubleshooting →](docs/getting-started.md)
 
+### Optional Boat hosting (preview)
+
+Cloudflare is the preferred target. Boat provides an optional all-Boat,
+no-Cloudflare deployment in a persistent Linux VM. The checkout-free installer
+uses the Boat CLI, keeps the app bearer token separate from Boat route auth,
+and supports durable systemd lifecycle across VM stop/resume. The release
+manifest and checksum-verified bundle are published with releases. This hosting
+target is in preview.
+
+[Boat setup, authentication, memory provider, and browser transport →](docs/boat-setup.md)
+
 ### Uninstall
 
 From your installation checkout:

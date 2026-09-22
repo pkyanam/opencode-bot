@@ -36,25 +36,27 @@ const WELCOME_HTML = `<!doctype html><meta charset="utf-8"><title>OpenCode Bot D
 export class DesktopController {
   constructor(options = {}) {
     this.display = options.display ?? process.env.DISPLAY ?? ":99";
+    this.externalDisplay = options.externalDisplay ?? process.env.OPENCODE_BOT_EXTERNAL_DISPLAY === "1";
     this.width = options.width ?? 1440;
     this.height = options.height ?? 900;
     this.fps = Math.min(60, Math.max(1, options.fps ?? 3));
     this.captureStream = options.captureStream ?? (!options.captureFrame ? ((options) => createFfmpegMjpegStream({ display: this.display, width: this.width, height: this.height, ...options })) : undefined);
     this.maxViewers = options.maxViewers ?? 4;
     this.captureFrame = options.captureFrame ?? (() => captureX11Frame(this.display));
-    this.startDisplay = options.startDisplay ?? (() => startX11Display(this.display, this.width, this.height));
-    this.stopDisplay = options.stopDisplay ?? stopX11Display;
+    this.startDisplay = options.startDisplay ?? (() => this.externalDisplay ? requireExternalDisplay(this.display) : startX11Display(this.display, this.width, this.height));
+    this.stopDisplay = options.stopDisplay ?? (this.externalDisplay ? async () => undefined : stopX11Display);
     this.browserProfile = options.browserProfile ?? DEFAULT_BROWSER_PROFILE;
     this.cdpEndpoint = options.cdpEndpoint ?? DEFAULT_CDP_ENDPOINT;
     this.browserStartupTimeoutMs = Math.min(60_000, Math.max(5_000, options.browserStartupTimeoutMs ?? 30_000));
     this.browserCloseTimeoutMs = Math.min(15_000, Math.max(1_000, options.browserCloseTimeoutMs ?? 5_000));
+    this.runCommand = options.runCommand ?? runCommand;
+    this._customDisplayStarter = Boolean(options.startDisplay);
     this.startBrowser = options.startBrowser ?? (() => startHeadedBrowser({
       display: this.display, width: this.width, height: this.height,
       profile: this.browserProfile, cdpEndpoint: this.cdpEndpoint,
       timeoutMs: this.browserStartupTimeoutMs,
     }));
     this.stopBrowser = options.stopBrowser ?? ((handle) => stopHeadedBrowser(handle, this.browserCloseTimeoutMs));
-    this.runCommand = options.runCommand ?? runCommand;
     this.clients = new Map();
     this.nextClientId = 1;
     this.captureTask = undefined;
@@ -77,6 +79,11 @@ export class DesktopController {
     this.state = "starting";
     this.starting = Promise.resolve().then(() => this.startDisplay()).then(async (handle) => {
       this.displayHandle = handle;
+      if (this.externalDisplay && !this._customDisplayStarter) {
+        const geometry = await detectDisplayGeometry(this.display, this.runCommand);
+        this.width = geometry.width;
+        this.height = geometry.height;
+      }
       process.env.DISPLAY = this.display;
       this.browserHandle = await this.startBrowser();
       this.state = "paused";
@@ -519,6 +526,32 @@ async function startX11Display(display, width, height) {
   const windowManager = spawn("fluxbox", ["-display", display, "-no-slit", "-no-toolbar"], { stdio: "ignore", env: { ...process.env, DISPLAY: display } });
   windowManager.once("error", () => undefined);
   return { xvfb, windowManager };
+}
+
+export function parseDisplayGeometry(output) {
+  const match = String(output).match(/(?:dimensions:\s*)?(\d+)x(\d+)\s+pixels/i) ?? String(output).match(/current\s+(\d+)\s*x\s*(\d+)/i);
+  if (!match) throw new Error("Native display geometry is unavailable");
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) throw new Error("Native display geometry is invalid");
+  return { width, height };
+}
+
+async function detectDisplayGeometry(display, command) {
+  let output;
+  try {
+    output = await command("xdpyinfo", ["-display", display], undefined, display);
+  } catch {
+    output = await command("xrandr", ["--current", "--display", display], undefined, display);
+  }
+  return parseDisplayGeometry(output);
+}
+
+function requireExternalDisplay(display) {
+  const displayNumber = display.replace(/^:/, "").split(".")[0];
+  const socket = `/tmp/.X11-unix/X${displayNumber}`;
+  if (!fs.existsSync(socket)) throw new Error(`External display ${display} is unavailable; Boat must start its native display before the runner`);
+  return { external: true, display };
 }
 
 async function captureX11Frame(display) {

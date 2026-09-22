@@ -184,6 +184,9 @@ export type UpdateJob = {
   updatedAt?: string;
 };
 export type UpdateStatus = {
+  host?: string;
+  managedExternally?: boolean;
+  instructions?: string;
   currentVersion: string;
   latestVersion?: string;
   available: boolean;

@@ -1,6 +1,6 @@
 {
   "name": "opencode-bot",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,7 +11,7 @@
     "dev:worker": "wrangler dev --port 8789",
     "build": "vite build --config apps/web/vite.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run && node --test runner/test/*.test.mjs packages/runtime-opencode2/test/*.test.mjs scripts/*.test.mjs",
+    "test": "vitest run && node --test runner/test/*.test.mjs packages/runtime-opencode2/test/*.test.mjs scripts/*.test.mjs && bash boat/workspace-setup.test.sh",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --doctor",
     "deploy": "npm run build && wrangler deploy",

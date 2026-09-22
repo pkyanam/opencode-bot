@@ -211,7 +211,9 @@ jobs:
             --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --digest "$BUILD_DIGEST" --reference "$IMAGE_REFERENCE" --image-fingerprint "$IMAGE_FINGERPRINT" --bundle .tmp/update-bundle/app-bundle.json
           cp .tmp/update-bundle/app-bundle.json app-bundle.json
-          sha256sum release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz > SHA256SUMS
+          node scripts/release/build-boat-bundle.mjs --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          cp .tmp/boat-release/boat-bundle.tar.gz .tmp/boat-release/boat-bundle-manifest.json .
+          sha256sum release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz boat-bundle.tar.gz boat-bundle-manifest.json > SHA256SUMS
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: release-bundle
@@ -221,6 +223,8 @@ jobs:
             app-bundle.json
             node-bundle-manifest.json
             node-bundle.tar.gz
+            boat-bundle.tar.gz
+            boat-bundle-manifest.json
             SHA256SUMS
           if-no-files-found: error
   publish:
@@ -243,11 +247,11 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
             test "$draft" = true || { echo "release $RELEASE_TAG already exists and is published" >&2; exit 1; }
-            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz SHA256SUMS
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz boat-bundle.tar.gz boat-bundle-manifest.json SHA256SUMS
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
-              --generate-notes --draft release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz SHA256SUMS
+              --generate-notes --draft release-manifest.json app-bundle.json node-bundle-manifest.json node-bundle.tar.gz boat-bundle.tar.gz boat-bundle-manifest.json SHA256SUMS
           fi
       - name: Publish release atomically
         env:

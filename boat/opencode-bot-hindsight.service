@@ -1,0 +1,36 @@
+[Unit]
+Description=OpenCode Bot local Hindsight memory service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode-bot
+Group=opencode-bot
+WorkingDirectory=/opt/opencode-bot/releases/current
+Environment=PATH=/opt/opencode-bot/node/bin:/opt/opencode-bot/hindsight-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/var/lib/opencode-bot/hindsight
+Environment=HINDSIGHT_PG0_LAUNCHER=/opt/opencode-bot/releases/current/runner/hindsight-launcher.py
+Environment=HINDSIGHT_TOKEN_FILE=/etc/opencode-bot/hindsight-token
+Environment=HINDSIGHT_CONFIG_PATH=/var/lib/opencode-bot/hindsight/config.json
+Environment=HINDSIGHT_SERVICE_PORT=8790
+Environment=HINDSIGHT_API_BIN=/opt/opencode-bot/hindsight-venv/bin/hindsight-api
+Environment=HINDSIGHT_API_DATABASE_URL=pg0
+Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER=onnx
+Environment=HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_PATH=/opt/huggingface/intfloat-multilingual-e5-small/onnx/model.onnx
+Environment=HINDSIGHT_API_EMBEDDINGS_ONNX_TOKENIZER_NAME_OR_PATH=/opt/huggingface/intfloat-multilingual-e5-small
+Environment=HINDSIGHT_API_RERANKER_PROVIDER=flashrank
+Environment=HINDSIGHT_API_RERANKER_FLASHRANK_CACHE_DIR=/opt/flashrank
+Environment=HINDSIGHT_API_HOST=127.0.0.1
+Environment=HINDSIGHT_API_PORT=8888
+ExecStart=/opt/opencode-bot/node/bin/node /opt/opencode-bot/releases/current/boat/hindsight-start.mjs
+Restart=always
+RestartSec=5
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opencode-bot/hindsight
+
+[Install]
+WantedBy=multi-user.target

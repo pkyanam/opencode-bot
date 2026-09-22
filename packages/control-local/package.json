@@ -1,0 +1,8 @@
+{
+  "name": "@opencode-bot/control-local",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "start": "tsx src/index.ts", "build": "node src/build.mjs" }
+}

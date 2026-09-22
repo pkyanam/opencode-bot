@@ -63,6 +63,7 @@ export function createSelfContext(options = {}) {
   const version = boundedText(options.version, 100) ?? manifest?.version ?? boundedText(process.env.RELEASE_VERSION, 100);
   const commit = manifest?.commit ?? boundedText(options.commit, 100) ?? boundedText(process.env.RELEASE_COMMIT, 100);
   const deploymentId = boundedText(context.deploymentId, 160) ?? boundedText(options.deploymentId, 160) ?? boundedText(process.env.OPENCODE_BOT_DEPLOYMENT_ID, 160);
+  const hostingProvider = boundedText(context.hostingProvider, 40) ?? boundedText(options.hostingProvider, 40) ?? boundedText(process.env.OPENCODE_BOT_HOSTING_PROVIDER, 40) ?? "unknown";
   const nodeId = boundedText(context.executionNodeId, 160) ?? boundedText(context.nodeId, 160);
   const botName = boundedText(context.botName, 160);
   const model = boundedText(context.model, 240);
@@ -77,13 +78,14 @@ export function createSelfContext(options = {}) {
       source: { repository: SOURCE_REPOSITORY, ...(commit ? { commit } : {}) },
       ...(version ? { version } : {}),
       ...(deploymentId ? { deploymentId } : {}),
+      hostingProvider,
       ...(nodeId ? { nodeId } : {}),
       ...(botName ? { botName } : {}),
       ...(model ? { model } : {}),
       ...(requested === "all" || requested === "capabilities" ? { capabilities, capabilityDocs: CAPABILITY_LINKS } : {}),
     };
     if (requested === "identity") return { trust: result.trust, ...(botName ? { botName } : {}), ...(model ? { model } : {}), ...(nodeId ? { nodeId } : {}) };
-    if (requested === "deployment") return { trust: result.trust, ...(version ? { version } : {}), ...(deploymentId ? { deploymentId } : {}), ...(manifest ? { manifest } : {}), ...(buildpack ? { buildpack } : {}) };
+    if (requested === "deployment") return { trust: result.trust, hostingProvider, ...(version ? { version } : {}), ...(deploymentId ? { deploymentId } : {}), ...(manifest ? { manifest } : {}), ...(buildpack ? { buildpack } : {}) };
     if (requested === "source") return { trust: result.trust, source: result.source };
     return result;
   }
@@ -91,7 +93,8 @@ export function createSelfContext(options = {}) {
   async function docs(topic) {
     const filename = DOCS[String(topic ?? "")];
     if (!filename) throw error(400, "unsupported self-documentation topic");
-    const root = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
+    const configuredRoot = options.docsRoot ?? process.env.OPENCODE_BOT_DOCS_ROOT;
+    const root = path.resolve(typeof configuredRoot === "string" && path.isAbsolute(configuredRoot) ? configuredRoot : fileURLToPath(new URL("../", import.meta.url)));
     const target = path.resolve(root, filename);
     if (!target.startsWith(`${root}${path.sep}`)) throw error(400, "invalid documentation topic");
     try {

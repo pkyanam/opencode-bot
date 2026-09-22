@@ -40,3 +40,10 @@ test("release manifest loading accepts only the explicit release filename", asyn
   assert.deepEqual(result, { version: "v2.0.0", commit: "c".repeat(40), image: { reference: "docker.io/example/app@sha256:" + "d".repeat(64) } });
   assert.equal(await readManifest(path.join(root, "node-bundle-manifest.json")), undefined);
 });
+
+test("reports explicit hosting without inferring Cloudflare", async () => {
+  const boat = createSelfContext({ context: { hostingProvider: "boat", deploymentId: "boat-local" } });
+  assert.equal((await boat.inspect("deployment")).hostingProvider, "boat");
+  const unknown = createSelfContext({ context: { deploymentId: "local" } });
+  assert.equal((await unknown.inspect("deployment")).hostingProvider, "unknown");
+});

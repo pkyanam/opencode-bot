@@ -1,0 +1,42 @@
+[Unit]
+Description=OpenCode Bot local control server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode-bot
+Group=opencode-bot
+WorkingDirectory=/opt/opencode-bot/releases/current
+Environment=NODE_PATH=/opt/opencode-bot/releases/current/node_modules
+Environment=PATH=/opt/opencode-bot/node/bin:/opt/opencode-bot/releases/current/runner/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=OPENCODE2_BIN=/opt/opencode-bot/releases/current/runner/node_modules/.bin/opencode2
+Environment=PLAYWRIGHT_MCP_JS=/opt/opencode-bot/releases/current/runner/node_modules/@playwright/mcp/cli.js
+Environment=DISPLAY=:0
+Environment=OPENCODE_BOT_EXTERNAL_DISPLAY=1
+Environment=OPENCODE_BOT_BROWSER=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/opencode-bot/browsers
+Environment=OPENCODE_HOST=0.0.0.0
+Environment=OPENCODE_PORT=8789
+Environment=OPENCODE_STATE=/var/lib/opencode-bot/workspace.sqlite
+Environment=OPENCODE_OBJECTS=/var/lib/opencode-bot/objects
+Environment=OPENCODE_COMPUTERS=/var/lib/opencode-bot/computers
+Environment=OPENCODE_ASSETS=/opt/opencode-bot/releases/current/web
+Environment=OPENCODE_RUNNER_SCRIPT=/opt/opencode-bot/releases/current/runner/server.mjs
+Environment=OPENCODE_APP_TOKEN_FILE=/etc/opencode-bot/app-token
+Environment=OPENCODE_RUNNER_TOKEN_FILE=/etc/opencode-bot/runner-token
+Environment=HINDSIGHT_LLM_CONFIG_FILE=/etc/opencode-bot/hindsight-provider.json
+Environment=HINDSIGHT_TOKEN_FILE=/etc/opencode-bot/hindsight-token
+Environment=HINDSIGHT_LLM_API_KEY_FILE=/etc/opencode-bot/hindsight-llm-api-key
+Environment=HINDSIGHT_BASE_URL=http://127.0.0.1:8790
+ExecStartPre=+/bin/bash /opt/opencode-bot/releases/current/boat/display-access.sh
+ExecStartPre=+/bin/bash /opt/opencode-bot/releases/current/boat/workspace-setup.sh
+ExecStart=/opt/opencode-bot/node/bin/node /opt/opencode-bot/releases/current/boat/control-start.mjs
+Restart=always
+RestartSec=3
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

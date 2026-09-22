@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { DesktopController, JpegFrameParser, parseMjpegStream, createFfmpegMjpegStream } from "../desktop.mjs";
+import { DesktopController, JpegFrameParser, parseMjpegStream, createFfmpegMjpegStream, parseDisplayGeometry } from "../desktop.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const hasFfmpeg = await promisify(execFile)("ffmpeg", ["-version"]).then(() => true).catch(() => false);
@@ -11,6 +11,18 @@ test("persistent MJPEG parser handles split frames with a bounded frame size", a
   assert.equal(parser.push(Uint8Array.from([0xff, 0xd8, 1])).length, 0);
   assert.deepEqual(parser.push(Uint8Array.from([2, 0xff, 0xd9, 0xff, 0xd8, 3, 0xff, 0xd9])), [Uint8Array.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]), Uint8Array.from([0xff, 0xd8, 3, 0xff, 0xd9])]);
   await assert.rejects(async () => { const p = new JpegFrameParser(4); p.push(Uint8Array.from([0xff, 0xd8, 1, 2, 3])); }, /size limit/);
+});
+
+test("external display mode requires Boat's native display and owns no X11 processes", async () => {
+  const desktop = new DesktopController({ display: ":65432", externalDisplay: true, startBrowser: async () => ({}), stopBrowser: async () => undefined });
+  await assert.rejects(() => desktop.start(), /External display :65432 is unavailable/);
+  assert.equal(desktop.status().state, "error");
+});
+
+test("native display geometry parser preserves full Boat frame dimensions", () => {
+  assert.deepEqual(parseDisplayGeometry("screen #0:\\n  dimensions:    1920x1080 pixels (508x285 millimeters)"), { width: 1920, height: 1080 });
+  assert.deepEqual(parseDisplayGeometry("Screen 0: minimum 320 x 200, current 2560 x 1440, maximum"), { width: 2560, height: 1440 });
+  assert.throws(() => parseDisplayGeometry("display unavailable"), /geometry is unavailable/);
 });
 
 test("persistent capture stream stops consumption when the last viewer leaves", async () => {

@@ -15,6 +15,7 @@ import { createGunzip } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { validateManifest, verifyArchive, downloadReleaseArchive, assertSourceCommit, craneAsset } from "./release.mjs";
 import { readOwnership, uninstallPlan, uninstallResources } from "./uninstall.mjs";
+import { createInstallerUI, installCleanup } from "./installer-ui.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const argv = process.argv.slice(2);
@@ -196,7 +197,9 @@ async function publishImage(manifest, config) {
   }
 }
 
-async function applyDaemonless(config) {
+function installerStage(ui, stage) { if (!ui) return; if (ui.interactive) ui.panel({ provider: "Cloudflare", stage }); else ui.progress(stage); }
+
+async function applyDaemonless(config, ui) {
   const manifest = readManifest();
   assertSourceCommit(manifest, root);
   const account = cloudflareAccount(config);
@@ -213,6 +216,7 @@ async function applyDaemonless(config) {
   }
   validateDeploymentConfig(config);
   const list = checks(); printChecks(list);
+  installerStage(ui, "Checking prerequisites");
   if (list.some((item) => !item.ok && item.name !== "Wrangler")) throw new Error("required prerequisite failed; fix doctor output before applying");
   if (!existsSync(resolve(root, "package.json"))) throw new Error("package.json is missing");
   if (list.some((item) => item.name === "Wrangler" && !item.ok)) {
@@ -228,8 +232,11 @@ async function applyDaemonless(config) {
   state.workerName = config.name ?? "ocbot-personal";
   state.secretDigests = { APP_TOKEN: digest(material.APP_TOKEN), RUNNER_TOKEN: digest(material.RUNNER_TOKEN) };
   journal(state, "prepare", "started");
+  installerStage(ui, "Installing locked dependencies");
   runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
+  installerStage(ui, "Building web assets");
   runRequired("web build", "npm", ["run", "build"], { inherit: true }); journal(state, "build", "complete");
+  installerStage(ui, "Preparing artifact storage");
   ensureBucket(config, state); journal(state, "r2", "complete");
   let published;
   if (manifest.schemaVersion === 2) {
@@ -241,12 +248,15 @@ async function applyDaemonless(config) {
   }
   const deploymentConfig = writeDeploymentConfig(config, published.image);
   console.log("Deploying the application to Cloudflare.");
+  installerStage(ui, "Deploying Worker");
   const deployed = runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", deploymentConfig]);
   const workerName = config.name ?? "ocbot-personal";
   const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
   if (!appUrl || !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL");
   state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.workerName = workerName; state.resources.accountId = account; state.resources.containerApplication = { worker: workerName, className: "Sandbox", managedBy: workerName }; state.resources.image = published.image; journal(state, "deploy", "complete", appUrl);
+  installerStage(ui, "Uploading secrets");
   runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", deploymentConfig], { inherit: true }); journal(state, "secrets", "complete");
+  installerStage(ui, "Verifying deployment");
   state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
   journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 }); chmodSync(statePath, 0o600);
@@ -329,10 +339,11 @@ async function verifyDeployment(url, tokenValue) {
   }
 }
 
-async function applyDeployment(config) {
+async function applyDeployment(config, ui) {
   validateDeploymentConfig(config);
   let list = checks();
   printChecks(list);
+  installerStage(ui, "Checking prerequisites");
   const wranglerMissing = list.some((item) => item.name === "Wrangler" && !item.ok);
   const installable = new Set(["Wrangler"]);
   if (wranglerMissing) installable.add("Cloudflare auth");
@@ -359,17 +370,23 @@ async function applyDeployment(config) {
   if (install) writeDevVars();
   // Reconcile dependencies on every apply: the lockfile may have changed
   // since the previous journal entry, and npm ci is deterministic/idempotent.
+  installerStage(ui, "Installing locked dependencies");
   runRequired("npm ci", "npm", ["ci"], { inherit: true }); journal(state, "dependencies", "complete");
+  installerStage(ui, "Building web assets");
   runRequired("web build", "npm", ["run", "build"], { inherit: true }); journal(state, "build", "complete");
+  installerStage(ui, "Preparing artifact storage");
   ensureBucket(config, state); journal(state, "r2", "complete");
   console.log("Building and publishing the Sandbox image and Worker. The first deployment can take several minutes.");
+  installerStage(ui, "Deploying Worker");
   const deployed = runRequired("Worker deploy", "npx", ["--no-install", "wrangler", "deploy", "--config", "wrangler.jsonc"]);
   const workerName = config.name ?? "ocbot-personal";
   const appUrl = `${deployed.stdout || ""}\n${deployed.stderr || ""}`.match(/https:\/\/[A-Za-z0-9.-]+\.(?:workers\.dev|pages\.dev)(?:\/[^\s]*)?/i)?.[0]?.replace(/[).,]+$/, "");
   if (appUrl && !new URL(appUrl).hostname.toLowerCase().startsWith(workerName.toLowerCase() + ".")) throw new Error("Worker deploy returned an unexpected public URL; refusing to hand off credentials");
   if (!appUrl) throw new Error("Worker deploy completed without a discoverable public URL; inspect Wrangler output and rerun setup");
   state.accountId = cloudflareAccount(config); state.workerName = workerName; state.deploymentUrl = appUrl; state.resources.worker = appUrl; state.resources.workerName = workerName; state.resources.accountId = state.accountId; state.resources.containerApplication = { worker: workerName, className: "Sandbox", managedBy: workerName }; journal(state, "deploy", "complete", appUrl);
+  installerStage(ui, "Uploading secrets");
   runRequired("secret upload", "npx", ["--no-install", "wrangler", "secret", "bulk", secretsPath, "--config", "wrangler.jsonc"], { inherit: true }); journal(state, "secrets", "complete");
+  installerStage(ui, "Verifying deployment");
   state.health = process.env.OCBOT_SKIP_HEALTH === "1" ? { skipped: true } : await verifyDeployment(appUrl, material.APP_TOKEN);
   journal(state, "health", state.health.skipped ? "skipped" : "complete", state.health.skipped ? "test override" : `HTTP ${state.health.status}`);
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 }); chmodSync(statePath, 0o600);
@@ -392,8 +409,17 @@ async function main() {
   }
   if (command === "apply") {
     if (!apply) throw new Error("apply requires explicit --apply");
-    if (args.has("--build-local")) await applyDeployment(config);
-    else await applyDaemonless(config);
+    const ui = createInstallerUI({ input: process.stdin, output: process.stderr, tty: process.stdin.isTTY ? process.stdin : undefined });
+    const removeCleanup = installCleanup(ui);
+    try {
+      installerStage(ui, "Starting installation");
+      if (args.has("--build-local")) await applyDeployment(config, ui);
+      else await applyDaemonless(config, ui);
+      ui.success("Installation complete");
+    } catch (error) {
+      ui.error(`Installation failed: ${error.message}`);
+      throw error;
+    } finally { removeCleanup(); }
     return;
   }
   throw new Error(`unknown command ${command}`);
