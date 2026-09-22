@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { api, type Bot, type MemoryItem } from "../api";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import { HindsightPanel } from "./hindsight-panel";
+import { MarkdownContent } from "./markdown-content";
 
 type Props = { bots: Bot[]; bot?: Bot; onClose: () => void };
 type Visibility = "private" | "shared" | "workspace";
@@ -168,6 +170,7 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
         <p className="modal-copy" id="memory-description">
           Durable context owned by bots, available wherever it is shared.
         </p>
+        <HindsightPanel bots={bots} />
         <div className="memory-toolbar">
           <label className="memory-search">
             <Search size={14} />
@@ -245,7 +248,7 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
                     )}
                   </div>
                   <h3>{item.title || "Untitled memory"}</h3>
-                  <p>{item.content}</p>
+                  <MarkdownContent className="memory-content-markdown">{item.content}</MarkdownContent>
                   <div className="registry-foot">
                     <span>{date(item.updatedAt ?? item.createdAt)}</span>
                     {item.sourceThreadId && (
@@ -358,7 +361,7 @@ export function MemoryRegistry({ bots, bot, onClose }: Props) {
                       Revision {version.revision ?? history.length - index}
                     </strong>
                     <span>{date(version.updatedAt ?? version.createdAt)}</span>
-                    <p>{version.content}</p>
+                    <MarkdownContent className="memory-history-content">{version.content}</MarkdownContent>
                   </div>
                 ))
               ) : (

@@ -69,9 +69,16 @@ Clone https://github.com/pkyanam/opencode-bot.git and set it up on my Cloudflare
 
 - **Memory across computers.** Bots remember decisions and lessons, share selected
   knowledge with any other bot, and recall it in new conversations. Browse, correct,
-  export, or forget it in the [workspace memory registry](docs/memory.md).
+  export, or forget it in the [workspace memory registry](docs/memory.md). Optional
+  Hindsight adds semantic and temporal recall, reflection, observations, and mental
+  models, adjustable automatic capture, and optional external-provider configuration.
 - **Bots with their own identity.** Instructions, models, memory, and assigned
   skills carry into every new conversation. Rename or delete threads and bots.
+- **Self-development with reviewable provenance.** Ask the bot to identify its
+  running deployment, inspect its source, or improve the repository; it reports
+  bounded release context, uses an isolated change workflow, and verifies tests
+  before handing back a reviewable commit or pull request. See
+  [self-development](docs/self-development.md).
 - **See the work.** Markdown replies, live tool activity, approvals, and an
   expandable view of the browser your bots control. Take over the shared desktop
   to sign in directly, then return control. [Computer controls](docs/computer-control.md).

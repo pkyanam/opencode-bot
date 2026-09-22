@@ -14,6 +14,7 @@ const stringArray = (description) => ({ type: 'array', items: { type: 'string' }
 const memoryId = text('Memory item ID returned by a memory tool');
 const revision = { type: 'integer', minimum: 0, description: 'Revision returned by the last read or write' };
 const memoryVisibility = text('Who can read this memory (server-defined visibility)');
+const memoryBudget = { type: 'string', enum: ['low', 'mid', 'high'], description: 'Provider work budget' };
 
 // Memory actions are deliberately sent through the authenticated runner
 // capability endpoint. The coordinator uses the run ID carried by that
@@ -25,6 +26,14 @@ const memoryTools = [
   { name: 'memory_update', description: 'Update a shared workspace memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, content: text('Replacement memory content'), title: text('Replacement title'), kind: text('Replacement memory kind'), tags: stringArray('Replacement search tags'), revision }, required: ['id', 'revision'], additionalProperties: false } },
   { name: 'memory_forget', description: 'Forget a shared workspace memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, revision }, required: ['id', 'revision'], additionalProperties: false } },
   { name: 'memory_share', description: 'Change which workspace bots can read a memory item using optimistic concurrency.', inputSchema: { type: 'object', properties: { id: memoryId, botIds: stringArray('Bot IDs allowed to read this memory'), visibility: memoryVisibility, revision }, required: ['id', 'revision'], additionalProperties: false } },
+  { name: 'memory_retain', description: 'Retain durable information through the configured memory provider. This is an alias for remembering a workspace memory.', inputSchema: { type: 'object', properties: { content: text('Memory content'), title: text('Optional short title'), kind: text('Optional memory kind'), tags: stringArray('Optional search tags'), visibility: memoryVisibility, sharedBotIds: stringArray('Optional bot IDs to share with') }, required: ['content'], additionalProperties: false } },
+  { name: 'memory_recall', description: 'Recall provider memories relevant to the current task.', inputSchema: { type: 'object', properties: { query: text('Recall query'), budget: memoryBudget }, required: ['query'], additionalProperties: false } },
+  { name: 'memory_reflect', description: 'Reflect on provider memories and return a bounded synthesis for the current task.', inputSchema: { type: 'object', properties: { query: text('Reflection question'), budget: memoryBudget }, required: ['query'], additionalProperties: false } },
+  { name: 'memory_observations', description: 'Inspect provider observations for the current task.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'memory_mental_models', description: 'List provider mental models for the current task.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'memory_mental_model_create', description: 'Create a provider mental model from a name and description.', inputSchema: { type: 'object', properties: { name: text('Mental model name'), query: text('Description or source query') }, required: ['name', 'query'], additionalProperties: false } },
+  { name: 'memory_mental_model_delete', description: 'Delete a provider mental model by ID.', inputSchema: { type: 'object', properties: { id: text('Mental model ID') }, required: ['id'], additionalProperties: false } },
+  { name: 'memory_mental_model_refresh', description: 'Refresh a provider mental model by ID.', inputSchema: { type: 'object', properties: { id: text('Mental model ID') }, required: ['id'], additionalProperties: false } },
 ];
 const memoryNames = new Set(memoryTools.map(tool => tool.name));
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
@@ -33,12 +42,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
   { name: 'send_file', description: 'Queue a verified workspace file transfer to another persistent bot on its assigned node.', inputSchema: { type: 'object', properties: { targetBotId: { type: 'string' }, sourcePath: { type: 'string' }, targetPath: { type: 'string' }, name: { type: 'string' }, size: { type: 'integer' }, sha256: { type: 'string' } }, required: ['targetBotId','sourcePath','targetPath','name','size','sha256'], additionalProperties: false } },
   { name: 'get_replies', description: 'Read bot message receipts and replies already available to this conversation. Pending work only starts after this turn ends.', inputSchema: empty },
   { name: 'create_bot', description: 'Create a new persistent workspace bot. The bot is created after this turn ends and becomes available with its own settings and conversations; this is not an OpenCode subagent.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Unique display name for the new bot (1–160 characters)' }, instructions: { type: 'string', description: 'The new bot role and operating instructions' }, model: { type: 'string', description: 'Optional provider/model identifier available to this workspace' }, agent: { type: 'string', description: 'Optional OpenCode agent name' } }, required: ['name'], additionalProperties: false } },
+  {name:'inspect_self',description:'Inspect this bot’s actual identity, node, deployment version, and source repository. Load only when asked about this app or its own environment.',inputSchema:{type:'object',properties:{topic:{type:'string',enum:['all','identity','deployment','source','capabilities']}},additionalProperties:false}},
+  {name:'self_docs',description:'Read a bounded opencode-bot reference on demand before configuring or modifying this app. Topics: overview, setup, memory, nodes, security, development.',inputSchema:{type:'object',properties:{topic:{type:'string',enum:['overview','setup','memory','nodes','security','development']}},required:['topic'],additionalProperties:false}},
   ...memoryTools
 ] }));
 server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
-  if (!['list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name) && !memoryNames.has(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
+  if (!['inspect_self','self_docs','list_bots','send_message','send_file','get_replies','create_bot'].includes(params.name) && !memoryNames.has(params.name)) return { isError: true, content: [{ type:'text', text:'Unknown bot tool' }] };
   try {
-    const response = await fetch(endpoint, { method:'POST', headers:{ authorization:`Bearer ${token}`, 'content-type':'application/json' }, body:JSON.stringify({ name:params.name, arguments:params.arguments ?? {} }), signal:AbortSignal.timeout(10_000) });
+    const response = await fetch(endpoint, { method:'POST', headers:{ authorization:`Bearer ${token}`, 'content-type':'application/json' }, body:JSON.stringify({ name:params.name, arguments:params.arguments ?? {} }), signal:AbortSignal.timeout(["memory_reflect","memory_recall","memory_mental_model_create","memory_mental_model_refresh"].includes(params.name)?120_000:15_000) });
     const value = await response.json();
     return { ...(response.ok ? {} : {isError:true}), content:[{type:'text',text:JSON.stringify(value)}] };
   } catch { return { isError:true, content:[{type:'text',text:'Bot messaging is temporarily unavailable. No delivery was confirmed.'}] }; }

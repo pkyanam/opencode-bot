@@ -1,3 +1,5 @@
+import { createSelfContext } from "./self-context.mjs";
+import { installBuiltinSkill } from "./builtin-skills.mjs";
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -152,7 +154,7 @@ export class RunStore {
     const memoryTools = input.memoryTools && typeof input.memoryTools === 'object' && typeof input.memoryTools.url === 'string' && typeof input.memoryTools.token === 'string'
       ? { url: input.memoryTools.url, token: input.memoryTools.token }
       : undefined;
-    const run = { id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, ...(memoryTools ? { memoryTools } : {}), events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
+    const run = { selfContext: input.selfContext, id: input.runId, prompt: input.prompt ?? commandPrompt, command: input.command, sessionAction: input.sessionAction, attachments: Array.isArray(input.attachments) ? input.attachments : [], status: "provisioning", sessionId: input.sessionId, executionNodeId: input.executionNodeId, executionBotId: input.executionBotId, ...(memoryTools ? { memoryTools } : {}), events: [], botDirectory: Array.isArray(input.botDirectory) ? input.botDirectory.map(bot=>({id:bot.id,name:bot.name,...(typeof bot.nodeId === 'string' ? {nodeId:bot.nodeId} : {}),nodeOnline:bot.nodeOnline === true})) : [], delegationHistory: input.delegationHistory ?? [], allowBotMessaging: input.allowBotMessaging !== false, delegationRequests: [], botCreationRequests: [], final: "", cancelRequested: false, startedAt: new Date().toISOString() };
     this.runs.set(run.id, run); this.persist(run);
     // Runs use the native runtime outside HTTP request handlers. Keep them in
     // the same idle barrier so checkpoint cannot stop the service mid-turn.
@@ -216,7 +218,11 @@ export class RunStore {
   async botTool(name, args = {}) {
     const run = [...this.runs.values()].find(item => !isTerminal(item.status));
     if (!run || this.paused || this.configuring || run.cancelRequested) throw httpError(409, "Bot messaging requires an active application conversation");
-    if (['memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share'].includes(name)) {
+    if(name==='inspect_self'||name==='self_docs') {
+      const self=createSelfContext({context:run.selfContext??{},version:run.selfContext?.version,commit:run.selfContext?.commit});
+      return name==='inspect_self'?self.inspect(args.topic):self.docs(args.topic);
+    }
+    if (['memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share','memory_retain','memory_recall','memory_reflect','memory_observations','memory_mental_models','memory_mental_model_create','memory_mental_model_delete','memory_mental_model_refresh'].includes(name)) {
       const capability = run.memoryTools;
       if (!capability) throw httpError(503, 'Shared memory is unavailable');
       let url;
@@ -228,7 +234,7 @@ export class RunStore {
         headers: { authorization: `Bearer ${capability.token}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name, arguments: args, runId: run.id }),
         redirect: 'error',
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(["memory_reflect","memory_recall","memory_mental_model_create","memory_mental_model_refresh"].includes(name)?120_000:15_000),
       });
       let value;
       try { value = await response.json(); } catch { value = { error: 'shared memory returned invalid JSON' }; }
@@ -858,6 +864,8 @@ if (isEntrypoint && process.env.NODE_ENV !== "test") {
   const root = process.env.RUNTIME_ROOT ?? "/workspace/state";
   const desktop = process.env.OPENCODE_BOT_DESKTOP === "0" ? undefined : new DesktopController();
   const botToolToken = randomUUID();
+  const builtinInstaller=createExtensionRoutes({workspace:process.env.WORKSPACE_DIRECTORY??"/workspace/shared"});
+  await installBuiltinSkill(builtinInstaller, "opencode-bot-self-development");
   const runtime = new OpenCode2Runtime({ botTools: { command: [process.execPath, fileURLToPath(new URL("./bot-mcp.mjs", import.meta.url))], env: { BOT_TOOLS_URL: `http://127.0.0.1:${port}/bot-tools`, BOT_TOOLS_TOKEN: botToolToken } }, root, directory: process.env.WORKSPACE_DIRECTORY ?? "/workspace/shared", desktop });
   const store = new RunStore(runtime, { stateDir: path.join(root, "runs") });
   const server = createServer({ store, desktop, botToolToken });

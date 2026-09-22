@@ -109,6 +109,32 @@ export type MemoryItem = {
   createdAt?: string;
   updatedAt?: string;
 };
+export type HindsightStatus = "ready" | "starting" | "unavailable" | "disabled";
+export type HindsightEngine = {
+  provider: "hindsight";
+  configured: boolean;
+  enabled: boolean;
+  status: HindsightStatus;
+  error?: string;
+  pending?: number;
+  failed?: number;
+  settings: { url?: string; model?: string; autoCapture: boolean };
+  capabilities: Array<"retain" | "recall" | "reflect" | "observations" | "mental_models">;
+};
+export type HindsightResponse = {
+  provider: "hindsight";
+  text?: string;
+  results?: Array<{ content?: string; text?: string; score?: number; [key: string]: unknown }>;
+  sources?: Array<{ title?: string; url?: string; [key: string]: unknown }>;
+  based_on?: {
+    memories?: Array<{ id?: string; text?: string; type?: string; [key: string]: unknown }>;
+    mental_models?: Array<{ id?: string; text?: string; [key: string]: unknown }>;
+    directives?: unknown[];
+  };
+};
+export type HindsightObservation = { id?: string; text?: string; content?: string; createdAt?: string; [key: string]: unknown };
+export type HindsightMentalModel = { id: string; name: string; source_query?: string; sourceQuery?: string; content?: string; updatedAt?: string; last_refreshed_at?: string; local_status?: "pending" | "ready" | "failed" | string; local_error?: string; [key: string]: unknown };
+export type HindsightOperation = { operation_id?: string; operationId?: string; queued?: boolean };
 export type Routine = {
   id: string;
   botId: string;
@@ -343,7 +369,7 @@ export async function request<T>(
       AbortSignal.timeout(
         /\/api\/computer\/(?:sleep|wake|checkpoint|restore)/.test(path)
           ? 300_000
-          : path.includes("/computer/")
+          : path.includes("/computer/") || /^\/api\/memory\/(recall|reflect|mental-models)/.test(path)
             ? 120_000
             : 30_000,
       ),
@@ -645,6 +671,31 @@ export const api = {
     request<void>(`/api/memory/${encodeURIComponent(id)}${revision != null ? `?revision=${revision}` : ""}`, { method: "DELETE" }),
   memoryHistory: (id: string) =>
     request<MemoryItem[]>(`/api/memory/${encodeURIComponent(id)}/history`),
+  hindsightEngine: () => request<HindsightEngine>("/api/memory/engine"),
+  configureHindsight: (payload: { url?: string; apiKey?: string; enabled?: boolean; autoCapture?: boolean }) =>
+    request<HindsightEngine>("/api/memory/engine", { method: "PATCH", body: JSON.stringify(payload) }),
+  syncHindsight: async () => {
+    await request<{ queued?: boolean }>("/api/memory/engine/sync", { method: "POST" });
+    return request<HindsightEngine>("/api/memory/engine");
+  },
+  recallHindsight: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>
+    request<HindsightResponse>("/api/memory/recall", { method: "POST", body: JSON.stringify(payload) }),
+  reflectHindsight: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>
+    request<HindsightResponse>("/api/memory/reflect", { method: "POST", body: JSON.stringify(payload) }),
+  hindsightObservations: async (botId: string) => {
+    const response = await request<{ items?: HindsightObservation[] } | HindsightObservation[]>(`/api/memory/observations?botId=${encodeURIComponent(botId)}`);
+    return Array.isArray(response) ? response : (response.items ?? []);
+  },
+  hindsightMentalModels: async (botId: string) => {
+    const response = await request<{ items?: HindsightMentalModel[]; mental_models?: HindsightMentalModel[] } | HindsightMentalModel[]>(`/api/memory/mental-models?botId=${encodeURIComponent(botId)}`);
+    return Array.isArray(response) ? response : (response.items ?? response.mental_models ?? []);
+  },
+  createHindsightMentalModel: (payload: { botId: string; name: string; query: string }) =>
+    request<HindsightMentalModel>("/api/memory/mental-models", { method: "POST", body: JSON.stringify(payload) }),
+  refreshHindsightMentalModel: (id: string, botId: string) =>
+    request<HindsightOperation>(`/api/memory/mental-models/${encodeURIComponent(id)}/refresh`, { method: "POST", body: JSON.stringify({ botId }) }),
+  deleteHindsightMentalModel: (id: string, botId: string) =>
+    request<void>(`/api/memory/mental-models/${encodeURIComponent(id)}?botId=${encodeURIComponent(botId)}`, { method: "DELETE" }),
   routines: () => request<Routine[]>("/api/routines"),
   createRoutine: (payload: {
     botId: string;

@@ -123,6 +123,9 @@ jobs:
       - name: Smoke test image
         if: steps.reuse.outputs.reuse != 'true'
         run: scripts/release/smoke-image.sh opencode-bot:release "$OPENCODE_VERSION" "$SANDBOX_VERSION"
+      - name: Smoke test Hindsight database and models
+        if: steps.reuse.outputs.reuse != 'true'
+        run: scripts/release/smoke-hindsight.sh opencode-bot:release
       - name: Smoke test runner health
         if: steps.reuse.outputs.reuse != 'true'
         run: |
@@ -180,6 +183,8 @@ jobs:
           cp runner/*.mjs runner/package.json runner/package-lock.json .tmp/node-bundle/runner/
           cp packages/runtime-opencode2/src/client.mjs .tmp/node-bundle/packages/runtime-opencode2/src/client.mjs
           cp packages/browser/src/index.ts .tmp/node-bundle/packages/browser/src/index.ts
+          cp -R skills docs .tmp/node-bundle/
+          cp README.md SECURITY.md package.json .tmp/node-bundle/
           tar -czf node-bundle.tar.gz -C .tmp/node-bundle .
           rm -rf .tmp/node-smoke
           mkdir -p .tmp/node-smoke

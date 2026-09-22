@@ -112,6 +112,31 @@ describe("control MCP handler", () => {
     expect(failed.body.result.isError).toBe(true);
   });
 
+  it("keeps external provider memory calls explicitly scoped to a bot", async () => {
+    const invoke = vi.fn().mockResolvedValue({ status: 200, body: { ok: true } });
+    const handler = createMcpHandler({ authorize: async () => true, invoke });
+    const call = async (name: string, arguments_: Record<string, unknown>) => handler(request({
+      jsonrpc: "2.0", id: name, method: "tools/call",
+      params: { name, arguments: arguments_, _meta: { "io.modelcontextprotocol/protocolVersion": MCP_LEGACY_VERSION } },
+    }));
+    await call("memory_retain", { botId: "bot_1", content: "durable", title: "T" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory", method: "POST", body: { botId: "bot_1", content: "durable", title: "T" } });
+    await call("memory_recall", { botId: "bot_1", query: "deploy", budget: "mid" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/recall", method: "POST", body: { botId: "bot_1", query: "deploy", budget: "mid" } });
+    await call("memory_observations", { botId: "bot_1" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/observations?botId=bot_1", method: "GET" });
+    await call("memory_mental_models", { botId: "bot_1" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/mental-models?botId=bot_1", method: "GET" });
+    await call("memory_mental_model_create", { botId: "bot_1", name: "Deployments", query: "release practice" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/mental-models", method: "POST", body: { botId: "bot_1", name: "Deployments", query: "release practice" } });
+    await call("memory_mental_model_refresh", { botId: "bot_1", id: "mm_1" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/mental-models/mm_1/refresh", method: "POST", body: { botId: "bot_1" } });
+    await call("memory_mental_model_delete", { botId: "bot_1", id: "mm_1" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/mental-models/mm_1?botId=bot_1", method: "DELETE" });
+    await call("memory_reflect", { botId: "bot_1", query: "what changed" });
+    expect(invoke).toHaveBeenLastCalledWith({ path: "/api/memory/reflect", method: "POST", body: { botId: "bot_1", query: "what changed" } });
+  });
+
   it("rejects wrong primitive types and unknown tool arguments before route invocation", async () => {
     const invoke = vi.fn().mockResolvedValue({ status: 200, body: [] });
     const handler = createMcpHandler({ authorize: async () => true, invoke });

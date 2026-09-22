@@ -8,7 +8,7 @@ import worker, { Workspace } from "../apps/control-worker/src/index";
 const dbs: DatabaseSync[] = [];
 function fixture() {
   const db = new DatabaseSync(":memory:"); dbs.push(db); const alarms: number[] = [];
-  const storage: any = { sql: { exec(query: string, ...args: any[]) { const s = db.prepare(query); const rows = s.columns().length ? s.all(...args) : []; const changes = s.columns().length ? 0 : Number(s.run(...args).changes); return { toArray: () => rows, rowsWritten: changes }; } }, setAlarm: async (n: number) => alarms.push(n), deleteAlarm: async () => {} };
+  const storage: any = { transactionSync: (fn:()=>unknown)=>fn(), sql: { exec(query: string, ...args: any[]) { const s = db.prepare(query); const rows = s.columns().length ? s.all(...args) : []; const changes = s.columns().length ? 0 : Number(s.run(...args).changes); return { toArray: () => rows, rowsWritten: changes }; } }, setAlarm: async (n: number) => alarms.push(n), deleteAlarm: async () => {} };
   const deleted: string[] = []; const env: any = { APP_TOKEN: "owner", RUNNER_TOKEN: "runner", SANDBOX: {}, ARTIFACTS: { delete: async (key: string) => { deleted.push(key); }, get: async () => null, put: async () => {} } };
   const state: any = { storage, blockConcurrencyWhile: (fn: any) => fn(), waitUntil: () => {} }; const workspace = new Workspace(state, env);
   env.WORKSPACE = { idFromName: () => "owner", get: () => ({ fetch: (request: Request) => workspace.fetch(request) }) };

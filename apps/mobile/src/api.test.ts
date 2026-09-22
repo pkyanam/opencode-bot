@@ -77,6 +77,56 @@ describe("mobile API contract", () => {
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({ revision: 2, content: "Use warm dark mode" });
   });
 
+  it("supports the Hindsight engine lifecycle and scoped operations", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ provider: "hindsight", configured: false, enabled: false, status: "disabled", pending: false, failed: false, settings: { autoCapture: false }, capabilities: [] }))
+      .mockResolvedValueOnce(jsonResponse({ provider: "hindsight", configured: true, enabled: true, status: "starting", pending: true, failed: false, settings: { url: "https://hindsight", autoCapture: true }, capabilities: ["recall", "reflect"] }))
+      .mockResolvedValueOnce(jsonResponse({ provider: "hindsight", configured: true, enabled: true, status: "ready", pending: false, failed: false, settings: { url: "https://hindsight", autoCapture: true }, capabilities: ["retain", "recall", "reflect"] }))
+      .mockResolvedValueOnce(jsonResponse({ provider: "hindsight", text: "A useful memory." }))
+      .mockResolvedValueOnce(jsonResponse({ provider: "hindsight", text: "A considered reflection." }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = api("https://workspace.example");
+    await client.hindsightEngine();
+    await client.configureHindsight({ url: "https://hindsight", apiKey: "secret", enabled: true, autoCapture: true });
+    await client.syncHindsight();
+    await client.hindsightRecall({ botId: "bot/1", query: "favorite color", budget: "low" });
+    await client.hindsightReflect({ botId: "bot/1", query: "what changed", budget: "high" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://workspace.example/api/memory/engine",
+      "https://workspace.example/api/memory/engine",
+      "https://workspace.example/api/memory/engine/sync",
+      "https://workspace.example/api/memory/recall",
+      "https://workspace.example/api/memory/reflect",
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ url: "https://hindsight", apiKey: "secret", enabled: true, autoCapture: true });
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({ botId: "bot/1", query: "favorite color", budget: "low" });
+  });
+
+  it("normalizes Hindsight observations and mental model collections", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: "obs_1", text: "Likes tea" }] }))
+      .mockResolvedValueOnce(jsonResponse({ mental_models: [{ id: "model_1", name: "Preferences", content: "Tea" }] }))
+      .mockResolvedValueOnce(jsonResponse({ id: "model_2", name: "Plans" }))
+      .mockResolvedValueOnce(jsonResponse({ id: "model_1", name: "Preferences", content: "Coffee" }))
+      .mockResolvedValueOnce(jsonResponse(undefined, 204));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = api("https://workspace.example");
+    expect(await client.hindsightObservations("bot/1")).toEqual([{ id: "obs_1", text: "Likes tea" }]);
+    expect(await client.hindsightMentalModels("bot/1")).toEqual([{ id: "model_1", name: "Preferences", content: "Tea" }]);
+    await client.createHindsightMentalModel({ botId: "bot/1", name: "Plans", query: "What are the plans?" });
+    await client.refreshHindsightMentalModel("model/1", "bot/1");
+    await client.deleteHindsightMentalModel("model/1", "bot/1");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://workspace.example/api/memory/observations?botId=bot%2F1",
+      "https://workspace.example/api/memory/mental-models?botId=bot%2F1",
+      "https://workspace.example/api/memory/mental-models",
+      "https://workspace.example/api/memory/mental-models/model%2F1/refresh",
+      "https://workspace.example/api/memory/mental-models/model%2F1?botId=bot%2F1",
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ botId: "bot/1", name: "Plans", query: "What are the plans?" });
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({ botId: "bot/1" });
+  });
+
   it("returns empty catalogs and reads text file content without JSON parsing", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse([]))

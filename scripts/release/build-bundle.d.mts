@@ -19,6 +19,7 @@ export type ReleaseBundle = {
   commit: string;
   worker: {
     requiredBindings: Array<{ name: string; type: string }>;
+    optionalBindings?: Array<{ name: string; type: string }>;
     mainModule: string;
     modules: BundleModule[];
     compatibilityDate: string;

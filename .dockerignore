@@ -6,7 +6,6 @@
 .dev.vars*
 **/*.log
 research
-docs
 tests
 .tmp
 coverage

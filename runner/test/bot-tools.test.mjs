@@ -44,7 +44,13 @@ test('native MCP stdio handshake and tool call reach only bot capabilities', asy
   const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../bot-mcp.mjs',import.meta.url))],env:{BOT_TOOLS_URL:`http://127.0.0.1:${server.address().port}/bot-tools`,BOT_TOOLS_TOKEN:'limited'}});
   try {
     await client.connect(transport);
-    assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot','memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share']);
+    const tools = (await client.listTools()).tools;
+    assert.deepEqual(tools.map(tool=>tool.name),['list_bots','send_message','send_file','get_replies','create_bot','inspect_self','self_docs','memory_search','memory_read','memory_remember','memory_update','memory_forget','memory_share','memory_retain','memory_recall','memory_reflect','memory_observations','memory_mental_models','memory_mental_model_create','memory_mental_model_delete','memory_mental_model_refresh']);
+    const schemas = Object.fromEntries(tools.map(tool => [tool.name, tool.inputSchema]));
+    assert.deepEqual(schemas.memory_observations.properties, {});
+    assert.deepEqual(schemas.memory_mental_models.properties, {});
+    assert.deepEqual(schemas.memory_mental_model_delete.required, ['id']);
+    assert.deepEqual(schemas.memory_mental_model_refresh.required, ['id']);
     const result=await client.callTool({name:'send_message',arguments:{targetBotId:'scout',prompt:'Say hello'}});
     assert.equal(result.isError,undefined);
     assert.equal(JSON.parse(result.content[0].text).status,'queued');

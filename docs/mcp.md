@@ -238,4 +238,29 @@ can administer all bot memories; bot execution capabilities are separately scope
 Example prompt: “Find memories about our deployment, correct outdated details,
 and share the verified decision with Scout and Llama.”
 
+### Hindsight memory capabilities
+
+The authenticated workspace API also exposes the supported Hindsight capability
+surface. These routes preserve the same bot selector and ACL semantics as the
+registry; they do not grant a caller access to another bot's bank.
+
+- `GET /api/memory/engine` reports provider configuration and asynchronous
+  `ready`, `starting`, `unavailable`, or `disabled` status.
+- `PATCH /api/memory/engine` configures `enabled`, `autoCapture`, and an optional
+  external `url`; `apiKey` is accepted write-only and is never returned.
+- `POST /api/memory/engine/sync` starts provider synchronization.
+- `POST /api/memory/recall` and `POST /api/memory/reflect` accept
+  `{botId, query, budget}` where `budget` is `low`, `mid`, or `high`.
+- `GET /api/memory/observations?botId=...` returns bot-scoped observations.
+- `GET /api/memory/mental-models?botId=...` returns bot-scoped mental models.
+- `POST /api/memory/mental-models` creates a model from `{botId, name, query}`;
+  `POST /api/memory/mental-models/:id/refresh` refreshes it and
+  `DELETE /api/memory/mental-models/:id?botId=...` removes it.
+
+Hindsight is an optional semantic layer over the authoritative registry. Provider
+sync, external configuration, and cache rebuilds may be delayed or fail; callers
+should inspect engine status rather than assuming a successful write is ready.
+The supported integration covers retain, recall, reflect, observations, and
+mental models. It does not expose full upstream Hindsight knowledge pages.
+
 [Memory scopes, tools, and retention](memory.md).

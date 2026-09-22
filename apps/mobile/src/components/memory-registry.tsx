@@ -26,6 +26,8 @@ import { api } from "../api";
 import { colors, styles } from "../ui";
 import type { Bot, MemoryItem, MemoryVisibility } from "../types";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { HindsightPanel } from "./hindsight-panel";
+import { Markdown } from "../markdown";
 
 const visibilityOptions: MemoryVisibility[] = [
   "private",
@@ -202,6 +204,7 @@ export function MemoryRegistry({
     }));
   return (
     <View style={local.wrap}>
+      <HindsightPanel baseUrl={baseUrl} bots={bots} />
       <View style={local.headingRow}>
         <View style={{ flex: 1 }}>
           <Text style={local.title}>Memory</Text>
@@ -276,9 +279,9 @@ export function MemoryRegistry({
               </View>
               {item.pinned ? <Pin color={colors.text} size={16} /> : null}
             </View>
-            <Text style={local.content} numberOfLines={4}>
-              {item.content}
-            </Text>
+            <View style={local.content}>
+              <Markdown value={previewMarkdown(item.content)} compact />
+            </View>
             <View style={local.cardBottom}>
               <Text style={styles.subtitle}>
                 {item.tags.length
@@ -637,3 +640,8 @@ const local = StyleSheet.create({
   shareName: { color: colors.text },
   check: { color: colors.muted, fontSize: 13 },
 });
+
+function previewMarkdown(value: string): string {
+  const normalized = value.replace(/\r/g, "").trim();
+  return normalized.length > 900 ? `${normalized.slice(0, 900).trimEnd()}…` : normalized;
+}

@@ -16,9 +16,28 @@ ENV NODE_ENV=production \
     DISPLAY=:99
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git python3 ca-certificates curl xz-utils xvfb fluxbox x11-apps imagemagick ffmpeg xdotool xclip \
+  && apt-get install -y --no-install-recommends git python3 python3-pip libgssapi-krb5-2 ca-certificates curl xz-utils xvfb fluxbox x11-apps imagemagick ffmpeg xdotool xclip \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /workspace/state /workspace/shared /workspace/browser /opt/opencode-bot
+  && mkdir -p /workspace/state /workspace/shared /workspace/browser /opt/opencode-bot \
+  && useradd --create-home --home-dir /workspace/state/hindsight-home --shell /usr/sbin/nologin hindsight \
+  && chown -R hindsight:hindsight /workspace/state
+
+# Hindsight is the complete upstream memory engine.  Its embedded pg0 store is
+# intentionally only a disposable projection; the Worker registry remains the
+# authoritative source and can rebuild this instance after a replacement.
+# Keep the package and ML dependencies pinned so an image rebuild is reviewable.
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+      'hindsight-api-slim[embedded-db,local-onnx]==0.10.1' \
+      'flashrank==0.2.10'
+
+# Bake the exact default CPU models into the image so first memory use does
+# not depend on Hugging Face availability.  Hindsight's FlashRank provider
+# uses its own compact cross-encoder model; the embedder is 384-dimensional.
+ENV HF_HOME=/opt/huggingface
+ENV HINDSIGHT_RUN_AS_USER=hindsight
+ENV HINDSIGHT_PG0_LAUNCHER=/opt/opencode-bot/runner/hindsight-launcher.py
+RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='intfloat/multilingual-e5-small', local_dir='/opt/huggingface/intfloat-multilingual-e5-small', allow_patterns=['onnx/model.onnx', '*.json', 'tokenizer*', 'sentencepiece.bpe.model']); from flashrank import Ranker; Ranker(model_name='ms-marco-MiniLM-L-12-v2', cache_dir='/opt/flashrank')"
+RUN chown -R hindsight:hindsight /opt/huggingface /opt/flashrank
 
 # Sandbox 0.12.9 currently ships Node 22. Install the pinned Node 24 runtime
 # required by this image while preserving the Sandbox container entrypoint.
@@ -46,10 +65,16 @@ RUN cd runner && npm_config_ignore_scripts=false npm ci --omit=dev --include=opt
   && rm -rf /var/lib/apt/lists/* \
   && npm cache clean --force \
   && rm -rf /tmp/*
+RUN npm install --global wrangler@4.135.0 && npm cache clean --force
+COPY skills ./skills
+COPY docs ./docs
+COPY README.md SECURITY.md ./
 COPY runner ./runner
+RUN chmod 0755 /opt/opencode-bot/runner/hindsight-launcher.py
 COPY packages/runtime-opencode2 ./packages/runtime-opencode2
 COPY packages/browser ./packages/browser
 
 # 3000 belongs to the Sandbox container server. The application runner is
 # reached through startProcess/containerFetch on 8787.
 EXPOSE 8787
+EXPOSE 8790

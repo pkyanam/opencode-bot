@@ -42,6 +42,22 @@ describe("CloudflareUpdateApiClient", () => {
     expect(JSON.parse(String(multipart.get("metadata"))).assets).toEqual({ jwt: "assets-jwt", config: { not_found_handling: "single-page-application" } });
   });
 
+  it("carries an optional Workers AI binding into updates without replacing live bindings", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); calls.push({ url, init: init ?? {} });
+      if (url.endsWith("/settings")) return reply({ bindings: [{ name: "PUBLIC_MODE", type: "plain_text", text: "public" }] });
+      if (url.includes("/versions")) return reply({ id: "version-ai" });
+      return reply({});
+    }) as unknown as typeof fetch;
+    const client = new CloudflareUpdateApiClient(account, "worker", token, fetchImpl, "https://cf.test");
+    const bundle = { schemaVersion: 1 as const, version: "v1.2.3", commit: "b".repeat(40), bundleSha256: "c".repeat(64), worker: { mainModule: "worker.js", modules: [{ name: "worker.js", contentBase64: btoa("export default {}"), contentType: "application/javascript" }], compatibilityDate: "2026-09-20", optionalBindings: [{ name: "AI", type: "ai" }], metadata: {} }, assets: [], computerImage: { reference: `docker.io/preethamk/opencode-bot@sha256:${"d".repeat(64)}`, digest: `sha256:${"d".repeat(64)}` }, runtime: { opencodeVersion: "2.0.11", sandboxVersion: "0.12.9" } };
+    await client.uploadWorkerVersion({ bundle, assetsJwt: "assets-jwt" });
+    const versionCall = calls.find((call) => call.url.includes("/versions"));
+    const metadata = JSON.parse(String(await new Response(versionCall?.init.body).formData().then((form) => form.get("metadata"))));
+    expect(metadata.bindings).toEqual([{ name: "PUBLIC_MODE", type: "plain_text", text: "public" }, { name: "AI", type: "ai" }]);
+  });
+
   it("does not send server-managed container fields in patch or rollout requests", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

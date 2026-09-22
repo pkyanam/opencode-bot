@@ -19,6 +19,8 @@ export type ReleaseBundle = {
   bundleSha256: string;
   worker: {
     requiredBindings?: Array<{ name: string; type: string }>;
+    /** Bindings introduced by a release when the live Worker does not have them yet. */
+    optionalBindings?: Array<{ name: string; type: string }>;
     mainModule: string;
     modules: Array<{ name: string; contentBase64: string; contentType: string }>;
     compatibilityDate: string;

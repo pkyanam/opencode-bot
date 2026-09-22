@@ -4,7 +4,7 @@ type Props = { value: string; compact?: boolean };
 function Inline({ value, compact }: Props) {
   const pieces = value.split(/(https?:\/\/[^\s)]+|`[^`]+`|\*\*[^*]+\*\*)/g);
   return (
-    <Text style={{ color: colors.text, lineHeight: compact ? 18 : 21 }}>
+    <Text style={{ color: colors.text, lineHeight: compact ? 18 : 21, flexShrink: 1 }}>
       {pieces.map((piece, index) =>
         piece.startsWith("http") ? (
           <Text
@@ -56,6 +56,7 @@ export function Markdown({ value, compact = false }: Props) {
             fontFamily: "monospace",
             fontSize: 12,
             lineHeight: 18,
+            flexShrink: 1,
           }}
         >
           {code.join("\n")}

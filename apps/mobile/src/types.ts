@@ -95,3 +95,45 @@ export type MemoryItem = {
   createdAt?: string;
   updatedAt?: string;
 };
+export type HindsightEngineStatus = {
+  provider: "hindsight";
+  configured: boolean;
+  enabled: boolean;
+  status: "ready" | "starting" | "unavailable" | "disabled";
+  error?: string;
+  pending: number;
+  failed: number;
+  settings: { url?: string; model?: string; autoCapture: boolean };
+  capabilities: Array<"retain" | "recall" | "reflect" | "observations" | "mental_models">;
+};
+export type HindsightEvidence = { id?: string; text?: string; type?: string; [key: string]: unknown };
+export type HindsightResponse = {
+  provider: "hindsight";
+  text?: string;
+  results?: Array<Record<string, unknown>>;
+  sources?: Array<Record<string, unknown>>;
+  based_on?: {
+    memories?: HindsightEvidence[];
+    mental_models?: HindsightEvidence[];
+    directives?: string[];
+  };
+};
+export type HindsightObservation = { id?: string; text?: string; [key: string]: unknown };
+export type HindsightMentalModel = {
+  id: string;
+  name?: string;
+  source_query?: string;
+  sourceQuery?: string;
+  content?: string;
+  local_status?: "pending" | "creating" | "ready" | "failed" | string;
+  local_error?: string;
+  [key: string]: unknown;
+};
+export type HindsightSyncResponse = {
+  queued?: boolean;
+  status?: HindsightEngineStatus["status"];
+  provider?: "hindsight";
+  pending?: number;
+  error?: string;
+};
+export type HindsightOperation = { operation_id?: string; operationId?: string; queued?: boolean };

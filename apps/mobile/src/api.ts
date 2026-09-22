@@ -13,6 +13,12 @@ import type {
   FileArtifact,
   Skill,
   MemoryItem,
+  HindsightEngineStatus,
+  HindsightResponse,
+  HindsightObservation,
+  HindsightMentalModel,
+  HindsightSyncResponse,
+  HindsightOperation,
 } from "./types";
 
 export class ApiError extends Error {
@@ -210,6 +216,28 @@ export const api = (baseUrl: string) => ({
     request<MemoryItem>(baseUrl, `/api/memory/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteMemory: (id: string, revision: number) =>
     request<void>(baseUrl, `/api/memory/${encodeURIComponent(id)}?revision=${encodeURIComponent(String(revision))}`, { method: "DELETE" }),
+  hindsightEngine: () => request<HindsightEngineStatus>(baseUrl, "/api/memory/engine"),
+  configureHindsight: (payload: { url?: string; apiKey?: string; enabled?: boolean; autoCapture?: boolean }) =>
+    request<HindsightEngineStatus>(baseUrl, "/api/memory/engine", { method: "PATCH", body: JSON.stringify(payload) }),
+  syncHindsight: () => request<HindsightSyncResponse>(baseUrl, "/api/memory/engine/sync", { method: "POST", timeoutMs: 120_000 }),
+  hindsightRecall: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>
+    request<HindsightResponse>(baseUrl, "/api/memory/recall", { method: "POST", body: JSON.stringify(payload), timeoutMs: 120_000 }),
+  hindsightReflect: (payload: { botId: string; query: string; budget: "low" | "mid" | "high" }) =>
+    request<HindsightResponse>(baseUrl, "/api/memory/reflect", { method: "POST", body: JSON.stringify(payload), timeoutMs: 120_000 }),
+  hindsightObservations: async (botId: string) => {
+    const response = await request<{ items?: HindsightObservation[]; observations?: HindsightObservation[] } | HindsightObservation[]>(baseUrl, `/api/memory/observations?botId=${encodeURIComponent(botId)}`);
+    return Array.isArray(response) ? response : response.items ?? response.observations ?? [];
+  },
+  hindsightMentalModels: async (botId: string) => {
+    const response = await request<{ items?: HindsightMentalModel[]; mental_models?: HindsightMentalModel[] } | HindsightMentalModel[]>(baseUrl, `/api/memory/mental-models?botId=${encodeURIComponent(botId)}`);
+    return Array.isArray(response) ? response : response.items ?? response.mental_models ?? [];
+  },
+  createHindsightMentalModel: (payload: { botId: string; name: string; query: string }) =>
+    request<HindsightMentalModel>(baseUrl, "/api/memory/mental-models", { method: "POST", body: JSON.stringify(payload), timeoutMs: 120_000 }),
+  refreshHindsightMentalModel: (id: string, botId: string) =>
+    request<HindsightOperation>(baseUrl, `/api/memory/mental-models/${encodeURIComponent(id)}/refresh`, { method: "POST", body: JSON.stringify({ botId }), timeoutMs: 120_000 }),
+  deleteHindsightMentalModel: (id: string, botId: string) =>
+    request<void>(baseUrl, `/api/memory/mental-models/${encodeURIComponent(id)}?botId=${encodeURIComponent(botId)}`, { method: "DELETE" }),
   files: (path = ".") =>
     request<{ artifacts?: FileArtifact[] } | FileArtifact[]>(
       baseUrl,

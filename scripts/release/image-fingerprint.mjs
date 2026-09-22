@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const execFileAsync = promisify(execFile);
 
 async function trackedInputs(base) {
-  const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--", "runner", "packages/runtime-opencode2", "packages/browser", "images/computer/Dockerfile", ".dockerignore"], { cwd: base, encoding: "utf8" });
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--", "runner", "skills", "docs", "README.md", "SECURITY.md", "packages/runtime-opencode2", "packages/browser", "images/computer/Dockerfile", ".dockerignore"], { cwd: base, encoding: "utf8" });
   return stdout.split("\0").filter(Boolean);
 }
 

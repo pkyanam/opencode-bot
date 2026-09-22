@@ -101,6 +101,10 @@ export async function buildBundle({ output, workerDirectory, assetsDirectory, ve
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const deploymentConfig = JSON.parse(await readFile(join(root, "wrangler.jsonc"), "utf8"));
   const requiredBindings = [{ name: deploymentConfig.assets.binding, type: "assets" }, ...deploymentConfig.durable_objects.bindings.map(binding => ({name: binding.name, type: "durable_object_namespace"})), ...deploymentConfig.r2_buckets.map(binding => ({name: binding.binding, type: "r2_bucket"}))];
+  // Workers AI is an account-provided binding. Keep it optional for updates so
+  // older installations can be upgraded while still receiving the native
+  // binding when Cloudflare accepts it.
+  const optionalBindings = deploymentConfig.ai?.binding ? [{ name: deploymentConfig.ai.binding, type: "ai" }] : [];
   const runnerPackage = JSON.parse(await readFile(join(root, "runner/package.json"), "utf8"));
   const resolvedVersion = version ?? `v${packageJson.version}`;
   const resolvedCommit = commit ?? (await runCapture("git", ["rev-parse", "HEAD"]));
@@ -130,6 +134,7 @@ export async function buildBundle({ output, workerDirectory, assetsDirectory, ve
       compatibilityDate: "2026-09-20",
       compatibilityFlags: ["nodejs_compat"],
       requiredBindings,
+      optionalBindings,
       metadata: {
         assets: { config: ASSETS_ROUTING_CONFIG },
         // Worker versions must opt these classes into Containers on every upload.

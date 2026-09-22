@@ -88,7 +88,7 @@ export class OpenCode2Runtime {
       for (const configPath of [`${this.root}/config/opencode/opencode.json`, `${this.directory}/opencode.json`]) {
         const config = await readConfig(configPath);
         config.mcp ??= {}; config.mcp.servers ??= {};
-        config.mcp.servers.bots = { type: 'local', command: this.botTools.command, environment: this.botTools.env, codemode: false, timeout: { startup: 30000, catalog: 30000, execution: 15000 } };
+        config.mcp.servers.bots = { type: 'local', command: this.botTools.command, environment: this.botTools.env, codemode: false, timeout: { startup: 30000, catalog: 30000, execution: 120000 } };
         await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
       }
     }

@@ -21,6 +21,11 @@ docker run --rm --entrypoint /bin/sh "$image" -ceu '
   xvfb-run -a "$browser" --headless --no-sandbox --disable-dev-shm-usage --dump-dom about:blank >/dev/null
   stage "running headed desktop controls"
   node /opt/opencode-bot/runner/smoke-desktop.mjs
+  stage "checking bundled self-development tools"
+  command -v wrangler >/dev/null
+  test -f /opt/opencode-bot/skills/opencode-bot-self-development/SKILL.md
+  test -f /opt/opencode-bot/docs/self-development.md
+  test -f /opt/opencode-bot/runner/hindsight-launcher.py
   stage "checking workspace directories"
   test -d /workspace/state && test -d /workspace/shared && test -d /workspace/browser
   printf "node=%s opencode=%s sandbox=%s browser=%s\n" "$node_version" "$(opencode --version | head -n1)" "'"$expected_sandbox"'" "$browser"
