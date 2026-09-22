@@ -1,9 +1,12 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import { MemoryError } from "./memory-registry";
 
-const SANDBOX_RESET_MESSAGE = "Durable Object reset because its code was updated";
+const SANDBOX_RESET_MESSAGES = [
+  "Durable Object reset because its code was updated",
+  "Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.",
+];
 const isSandboxReset = (error: unknown) =>
-  error instanceof Error && error.message.includes(SANDBOX_RESET_MESSAGE);
+  error instanceof Error && SANDBOX_RESET_MESSAGES.some(message => error.message.includes(message));
 
 /** Dedicated memory compute, never the bot's Computer. Its PG database is a
  * rebuildable projection of committed registry records, not the durable source. */

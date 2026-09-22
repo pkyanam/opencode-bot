@@ -97,6 +97,29 @@ describe("native Hindsight readiness", () => {
     expect(mock.getSandbox).toHaveBeenCalledTimes(2);
   });
 
+  it("also refreshes after the known inactive-instance connection close", async () => {
+    const replacement = {
+      getProcess: vi.fn().mockResolvedValue({ status: "running", waitForPort: vi.fn() }),
+      startProcess: vi.fn(),
+      containerFetch: vi.fn(async (url: string) => url.endsWith("/health")
+        ? Response.json({ instanceId: "epoch-3", upstreamReady: true })
+        : Response.json({ ok: true })),
+    };
+    let first = true;
+    mock.sandbox.containerFetch.mockImplementation(async () => {
+      if (first) {
+        first = false;
+        throw new Error("Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.");
+      }
+      return Response.json({ ok: true });
+    });
+    mock.getSandbox.mockReturnValueOnce(mock.sandbox).mockReturnValueOnce(replacement);
+    const { service } = fixture();
+    await expect(service.fetch("/v1/default/banks/test")).rejects.toThrow("no longer active");
+    await expect(service.fetch("/v1/default/banks/test")).resolves.toMatchObject({ ok: true });
+    expect(mock.getSandbox).toHaveBeenCalledTimes(2);
+  });
+
   it("reuses the sandbox handle after an ordinary transport error", async () => {
     let first = true;
     mock.sandbox.containerFetch.mockImplementation(async (url: string) => {

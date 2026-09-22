@@ -503,7 +503,7 @@ export class CloudflareComputerProvider implements ComputerProvider {
   }
 
   private markSandboxError(managed: ManagedComputer, error: unknown): void {
-    if (/durable object reset because its code was updated|code was updated/i.test(error instanceof Error ? error.message : String(error))) {
+    if (/durable object reset because its code was updated|code was updated|connection closed: this durable object instance is no longer active\. reconnect or retry the request\./i.test(error instanceof Error ? error.message : String(error))) {
       managed.sandboxInvalid = true;
     }
   }

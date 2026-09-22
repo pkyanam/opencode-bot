@@ -87,7 +87,10 @@ it("ensures a runner once and scopes transport with bearer and generation", asyn
   assert.equal(await provider.inspect("c1").then((status) => status.generation), 1);
 });
 
-it("replaces a poisoned Sandbox proxy after a Durable Object reset without replaying the failed request", async () => {
+it.each([
+  "Durable Object reset because its code was updated.",
+  "Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.",
+])("replaces a poisoned Sandbox proxy without replaying the failed request: %s", async (message) => {
   const first = fakeSandbox();
   const second = fakeSandbox();
   let created = 0;
@@ -96,7 +99,7 @@ it("replaces a poisoned Sandbox proxy after a Durable Object reset without repla
   first.containerFetch = async (url: string, init: RequestInit) => {
     if (!failed && url.endsWith("/runs")) {
       failed = true;
-      throw new Error("Durable Object reset because its code was updated.");
+      throw new Error(message);
     }
     return originalFetch(url, init);
   };
@@ -106,7 +109,7 @@ it("replaces a poisoned Sandbox proxy after a Durable Object reset without repla
   });
   await provider.ensure({ computerId: "reset", runnerToken: "secret" });
   const transport = await provider.connect("reset", { computerId: "reset", generation: 1, token: "secret" });
-  await assert.rejects(() => transport.fetch("/runs", { method: "POST" }), /Durable Object reset/);
+  await assert.rejects(() => transport.fetch("/runs", { method: "POST" }), { message });
   const refreshed = await provider.ensure({ computerId: "reset", runnerToken: "secret" });
   assert.equal(refreshed.status.runner, "ready");
   assert.equal(created, 2);
