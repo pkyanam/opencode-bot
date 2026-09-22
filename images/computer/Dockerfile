@@ -26,9 +26,16 @@ RUN apt-get update \
 # intentionally only a disposable projection; the Worker registry remains the
 # authoritative source and can rebuild this instance after a replacement.
 # Keep the package and ML dependencies pinned so an image rebuild is reviewable.
-RUN python3 -m pip install --break-system-packages --no-cache-dir \
+# Sandbox is Ubuntu 22.04 with Python 3.10. Hindsight requires Python >=3.11;
+# isolate it from system Python instead of replacing Sandbox dependencies.
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+RUN python3 -m pip install --no-cache-dir 'uv==0.8.22' \
+  && uv python install 3.11.13 \
+  && uv venv --python 3.11.13 /opt/hindsight-venv \
+  && uv pip install --no-cache --python /opt/hindsight-venv/bin/python \
       'hindsight-api-slim[embedded-db,local-onnx]==0.10.1' \
       'flashrank==0.2.10'
+ENV PATH=/opt/hindsight-venv/bin:$PATH
 
 # Bake the exact default CPU models into the image so first memory use does
 # not depend on Hugging Face availability.  Hindsight's FlashRank provider
