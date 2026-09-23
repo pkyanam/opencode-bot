@@ -176,7 +176,7 @@ tty_available() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
 configure_cloudflare() {
   local config_file="${INSTALL_DIR}/.opencode-bot/deployment-config.json" state_file="${INSTALL_DIR}/.opencode-bot/deployment-state.json"
-  local name instance concurrency answer existing_name allow_rename=0
+  local name="" instance="" concurrency="" answer="" existing_name="" allow_rename=0
   [[ -f "scripts/setup/installer-config.mjs" ]] || die "published checkout is missing the Cloudflare installer config helper"
   mkdir -p "${INSTALL_DIR}/.opencode-bot"
   if [[ -s "$state_file" ]]; then
