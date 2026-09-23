@@ -21,6 +21,18 @@ describe("setup planner", () => {
     else expect(existsSync(state)).toBe(false);
   });
 
+  it("uses the saved installation identity for subsequent setup commands", () => {
+    const fixture = mkdtempSync(resolve(tmpdir(), "ocbot-saved-config-"));
+    cpSync(resolve(root, "scripts"), resolve(fixture, "scripts"), { recursive: true });
+    mkdirSync(resolve(fixture, "infra"));
+    mkdirSync(resolve(fixture, ".opencode-bot"));
+    const config = { name: "ocbot-custom", bucketName: "ocbot-custom-artifacts", instanceType: "standard-2", maxConcurrentRuns: 2 };
+    writeFileSync(resolve(fixture, "infra/deployment.json"), JSON.stringify({ ...config, name: "ocbot-personal", bucketName: "ocbot-personal-artifacts" }));
+    writeFileSync(resolve(fixture, ".opencode-bot/deployment-config.json"), JSON.stringify(config));
+    const output = execFileSync(process.execPath, [resolve(fixture, "scripts/setup.mjs"), "plan"], { cwd: fixture, encoding: "utf8" });
+    expect(JSON.parse(output).project).toBe("ocbot-custom");
+  });
+
   it("requires an explicit apply flag", () => {
     expect(() => execFileSync(process.execPath, [cli, "apply"], { cwd: root, encoding: "utf8", stdio: "pipe" })).toThrow();
   });

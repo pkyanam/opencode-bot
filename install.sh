@@ -180,7 +180,7 @@ configure_cloudflare() {
   [[ -f "scripts/setup/installer-config.mjs" ]] || die "published checkout is missing the Cloudflare installer config helper"
   mkdir -p "${INSTALL_DIR}/.opencode-bot"
   if [[ -s "$state_file" ]]; then
-    existing_name="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const s=JSON.parse(readFileSync(process.argv[1])); if (!s.uninstalledAt) process.stdout.write(s.workerName || ""); } catch {}' "$state_file" 2>/dev/null || true)"
+    existing_name="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const s=JSON.parse(readFileSync(process.argv[1])); if (!s.uninstalledAt) process.stdout.write(s.resources?.workerName || s.workerName || s.project || ""); } catch {}' "$state_file" 2>/dev/null || true)"
   fi
   if [[ -s "$config_file" ]]; then
     name="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const c=JSON.parse(readFileSync(process.argv[1])); process.stdout.write(c.name || ""); } catch {}' "$config_file" 2>/dev/null || true)"
@@ -198,7 +198,7 @@ configure_cloudflare() {
     printf '%s' "Compute size [${instance}]: " >/dev/tty; IFS= read -r answer </dev/tty || true; instance="${answer:-$instance}"
     printf '%s\n' '' "Review: Worker ${name}, ${instance} compute size." 'Proceed with Cloudflare provisioning? [y/N]: ' >&2
     IFS= read -r answer </dev/tty || answer=n
-    [[ -z "$answer" || "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || die 'Cloudflare provisioning cancelled'
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || die 'Cloudflare provisioning cancelled'
   fi
   if [[ -s "$state_file" ]] && node --input-type=module -e 'import { readFileSync } from "node:fs"; try { process.exit(JSON.parse(readFileSync(process.argv[1])).uninstalledAt ? 0 : 1); } catch { process.exit(1); }' "$state_file"; then allow_rename=1; fi
   node --input-type=module -e 'import { readInstallerConfig, writeInstallerConfig } from "./scripts/setup/installer-config.mjs"; const [file,name,instance,runs,allowRename,liveName]=process.argv.slice(1); let current; try { current=readInstallerConfig(file); } catch {} const owned=liveName || current?.name; if (owned && owned !== name && allowRename !== "1") throw new Error(`deployment name cannot change from ${owned} for this checkout`); writeInstallerConfig(file, {...(current || {}), name, instanceType:instance, maxConcurrentRuns:Number(runs), bucketName:`${name}-artifacts`});' "$config_file" "$name" "$instance" "$concurrency" "$allow_rename" "$existing_name" || die 'invalid Cloudflare setup choices'

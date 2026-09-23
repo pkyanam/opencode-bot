@@ -26,7 +26,8 @@ const positional = argv.find((arg, index) => !arg.startsWith("-") && !(index > 0
 const command = positional ?? (args.has("--apply") ? "apply" : args.has("--plan") ? "plan" : "doctor");
 const apply = args.has("--apply");
 const install = args.has("--install-missing") || args.has("--install");
-const configPath = valueAfter("--config") ?? resolve(root, "infra/deployment.json");
+const savedConfigPath = resolve(root, ".opencode-bot/deployment-config.json");
+const configPath = valueAfter("--config") ?? (existsSync(savedConfigPath) ? savedConfigPath : resolve(root, "infra/deployment.json"));
 const stateDir = resolve(root, ".opencode-bot");
 const statePath = resolve(stateDir, "deployment-state.json");
 const secretsPath = resolve(stateDir, "secrets.json");
