@@ -16,8 +16,17 @@ later).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \
-  | bash -s -- --boat --type default --ttl 3600 --open
+  | bash -s -- --boat --type default --no-auto-stop --open
 ```
+
+The installer defaults to a persistent sandbox and passes Boat's explicit
+`--no-auto-stop` setting when creating, resuming, or reconciling the owned VM.
+Boat's CLI default is a one-hour auto-stop timer, so a numeric `--ttl` must be
+chosen deliberately when bounded lifetime is wanted. Persistent sandboxes
+require a payment method; on the free trial Boat rejects the request with
+`trial_auto_stop_required`, which the installer reports without falling back to
+a one-hour sandbox. Rerun with `--ttl` on a trial account or complete Boat
+billing first.
 
 In an interactive run, the Boat installer asks for a VM size and recommends
 `default`. The supported values are `small` (2 vCPU, 4 GB), `default` (4 vCPU,
@@ -41,9 +50,13 @@ when every client supports that route. `--open` opens a local browser URL with
 the app token in its fragment; the token is not sent in HTTP requests or logs.
 
 The VM filesystem and app data survive `boat stop` and `boat resume`. The
-enabled systemd service starts the app after a resume. Hand-started processes
-do not survive a stop. Uninstall deletes the recorded sandbox and requires an
-explicit confirmation:
+enabled systemd service is reconciled automatically after a resume and should
+be active within about a minute as the restored unit arrives. A manual stop of
+the app service is respected until the next VM resume; automatic recovery does
+not defeat a deliberate service stop. Hand-started processes do not survive a
+stop. Persistent lifetime disables Boat's timer, but billing limits, account
+capacity, and provider operations can still stop or interrupt a sandbox.
+Uninstall deletes the recorded sandbox and requires an explicit confirmation:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh \

@@ -300,12 +300,11 @@ export async function createLocalControl(
     });
   env.COMPUTER_PROVIDER = localProvider;
   const hindsightToken = options.hindsightToken ?? options.env?.HINDSIGHT_TOKEN;
-  const localMemoryConfigured = Boolean(
-    (options.hindsightLlmBaseUrl ?? options.env?.HINDSIGHT_LLM_BASE_URL) &&
-    (options.hindsightLlmApiKey ?? options.env?.HINDSIGHT_LLM_API_KEY) &&
-    (options.hindsightLlmModel ?? options.env?.HINDSIGHT_LLM_MODEL),
-  );
-  if (hindsightToken && localMemoryConfigured)
+  // The supervisor may already have provider credentials from its own config
+  // file. Install the adapter whenever its access token is present; passing a
+  // partial provider configuration through lets LocalHindsight report the
+  // useful validation error instead of silently disabling local memory.
+  if (hindsightToken)
     env.HINDSIGHT_FACTORY = (instance: (id: string) => void) =>
       new LocalHindsight({
         token: String(hindsightToken),

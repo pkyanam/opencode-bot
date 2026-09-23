@@ -17,7 +17,11 @@ import { spawnSync } from "node:child_process";
 export const BOAT_API_URL = "https://boat.dev/api/v1";
 export const DEFAULT_PORT = 8789;
 export const DEFAULT_TYPE = "default";
-export const DEFAULT_TTL = 3600;
+// The app is a long-running service. Boat's CLI default is one hour, so make
+// the intended lifetime explicit instead of inheriting that surprising
+// default. Paid accounts can disable auto-stop; trial accounts receive Boat's
+// documented trial_auto_stop_required error and must opt into --ttl.
+export const DEFAULT_TTL = null;
 export const DEFAULT_HOST_ACCESS = "public";
 export const MAX_BOAT_EXEC_TIMEOUT_SECONDS = 600;
 export const VALID_TYPES = Object.freeze(["small", "default", "large", "xlarge"]);
@@ -60,6 +64,7 @@ export function commandRunner({ cwd = process.cwd(), env = process.env, runner =
 
 export function safeCommandFailure(name, result) {
   const text = `${result?.error?.message || ""} ${result?.stderr || ""} ${result?.stdout || ""}`.toLowerCase();
+  if (/trial_auto_stop_required|free trial.*auto.stop|payment method.*auto.stop/.test(text)) return `${name} requires a paid Boat plan for a persistent sandbox; rerun with --ttl or add a payment method`;
   if (/unknown option|unrecognized option|invalid option/.test(text)) return `${name} rejected an option; update the Boat CLI and retry`;
   if (result?.error?.code === "ETIMEDOUT" || result?.signal === "SIGTERM" || /timed[ -]+out|deadline exceeded|execution timeout|etimedout/.test(text)) return `${name} timed out; retry or inspect the Boat CLI connection`;
   if (/unauthori[sz]|forbidden|not logged|login required|api key/.test(text)) return `${name} authentication failed; run boat login or provide BOAT_API_KEY`;
@@ -130,6 +135,26 @@ function resumeSandbox(run, id, { ttl }) {
   if (ttl === null) args.push("--no-auto-stop"); else if (ttl !== undefined) args.push("--ttl", String(ttl));
   const result = run("boat", args, { timeout: 900000, sensitive: true });
   return { id, event: latestEvent(result) };
+}
+
+function extendSandbox(run, id, { ttl }) {
+  const args = ["extend", id, "--json", "--no-update"];
+  if (ttl === null) args.push("--no-auto-stop"); else args.push("--ttl", String(ttl));
+  const result = run("boat", args, { timeout: 120000, sensitive: true });
+  return { id, event: latestEvent(result) };
+}
+
+function verifyLifetime(run, id, ttl) {
+  if (ttl !== null) return;
+  let current;
+  try { current = info(run, id); } catch (error) {
+    throw new Error(`could not verify persistent Boat sandbox lifetime: ${error.message}`);
+  }
+  const source = current?.sandbox && typeof current.sandbox === "object" ? current.sandbox : current;
+  if (!Object.prototype.hasOwnProperty.call(source, "archiveAfter")) throw new Error("Boat persistent lifetime verification failed: info did not include archiveAfter");
+  if (source.archiveAfter !== null) throw new Error(`Boat persistent lifetime verification failed: archiveAfter is ${String(source.archiveAfter)}`);
+  if (["stopped", "archived"].includes(source.state)) throw new Error(`Boat persistent lifetime verification failed: sandbox is ${source.state}`);
+  return current;
 }
 
 function execRemote(run, id, command, options = {}) {
@@ -265,12 +290,14 @@ export function install({ run, stateDir = defaultStateDir(), bundle, bundleSha25
     try { current = info(execute, id); } catch { current = undefined; }
     const actualType = current?.type || current?.sandbox?.type || current?.machine?.type || state.type;
     if (!reuseStoredType && actualType && type !== actualType) throw new Error(`owned Boat sandbox ${id} is ${actualType}; changing to ${type} requires an explicit boat resume --type operation`);
+    if (current?.state === "error") throw new Error(`owned Boat sandbox ${id} is in error; inspect boat info ${id}`);
     if (current && ["stopped", "archived"].includes(current.state)) resumeSandbox(execute, id, { ttl });
-    else if (current?.state === "error") throw new Error(`owned Boat sandbox ${id} is in error; inspect boat info ${id}`);
+    else if (current) extendSandbox(execute, id, { ttl });
   } else {
     ({ id } = createSandbox(execute, { type, ttl }));
   }
   if (!id) throw new Error("Boat sandbox id is missing");
+  verifyLifetime(execute, id, ttl);
   if (state.remoteProcess?.pid) {
     report(progress, "recovering previous bootstrap");
     const pending = state.remoteProcess;
@@ -338,6 +365,12 @@ export function uninstall({ run, stateDir = defaultStateDir(), yes = false } = {
 }
 
 function argValue(argv, flag) { const i = argv.indexOf(flag); return i < 0 ? undefined : argv[i + 1]; }
+function lifetimeLabel(ttl) {
+  if (ttl === null) return "keep running (no auto-stop; billed while active)";
+  if (ttl % 3600 === 0) { const hours = ttl / 3600; return `${hours} hour${hours === 1 ? "" : "s"} auto-stop`; }
+  if (ttl % 60 === 0) { const minutes = ttl / 60; return `${minutes} minute${minutes === 1 ? "" : "s"} auto-stop`; }
+  return `${ttl} second${ttl === 1 ? "" : "s"} auto-stop`;
+}
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.includes("--uninstall") ? "uninstall" : (argv.find(value => !value.startsWith("-")) || "status");
   const env = process.env; const options = { env, stateDir: argValue(argv, "--state-dir"), run: commandRunner({ env }) };
@@ -360,7 +393,26 @@ export async function main(argv = process.argv.slice(2)) {
         { label: "xlarge — 16 vCPU, 32 GB (plan/allocation requirements)", value: "xlarge" },
       ], { defaultIndex: VALID_TYPES.indexOf(selectedType) });
       if (!argValue(argv, "--type") && ui?.interactive) choseTypeInteractively = true;
-      const result = install({ ...options, bundle: argValue(argv, "--bundle"), bundleSha256: argValue(argv, "--bundle-sha256"), type: selectedType, reuseStoredType: !argValue(argv, "--type") && !choseTypeInteractively, ttl: argv.includes("--no-auto-stop") ? null : (argValue(argv, "--ttl") || DEFAULT_TTL), port: argValue(argv, "--port") || DEFAULT_PORT, hostAccess: argv.includes("--private") ? "private" : DEFAULT_HOST_ACCESS, open: argv.includes("--open"), memoryProviderFile: argValue(argv, "--memory-provider-file"), progress: message => { if (ui) ui.progress(message); else console.error(`[boat] ${message}`); } });
+      const explicitTtl = argValue(argv, "--ttl");
+      let selectedTtl = argv.includes("--no-auto-stop") ? null : (explicitTtl || DEFAULT_TTL);
+      if (!argv.includes("--no-auto-stop") && explicitTtl === undefined && ui?.interactive) {
+        selectedTtl = await ui.select("Choose Boat sandbox lifetime", [
+          { label: "Keep running — no auto-stop (requires a paid plan)", value: null },
+          { label: "1 hour auto-stop", value: 3600 },
+          { label: "2 hours auto-stop", value: 7200 },
+        ], { defaultIndex: 0 });
+      }
+      const port = argValue(argv, "--port") || DEFAULT_PORT;
+      const hostAccess = argv.includes("--private") ? "private" : DEFAULT_HOST_ACCESS;
+      if (ui?.interactive) {
+        ui.step(`Review: ${selectedType} VM, ${lifetimeLabel(selectedTtl)}, port ${port}, ${hostAccess} hosting`);
+        const decision = await ui.select("Install Boat app?", [
+          { label: "Install", value: "install" },
+          { label: "Cancel", value: "cancel" },
+        ]);
+        if (decision === "cancel") throw new Error("Boat install cancelled");
+      }
+      const result = install({ ...options, bundle: argValue(argv, "--bundle"), bundleSha256: argValue(argv, "--bundle-sha256"), type: selectedType, reuseStoredType: !argValue(argv, "--type") && !choseTypeInteractively, ttl: selectedTtl, port, hostAccess, open: argv.includes("--open"), memoryProviderFile: argValue(argv, "--memory-provider-file"), progress: message => { if (ui) ui.progress(message); else console.error(`[boat] ${message}`); } });
       ui?.success("Boat app is ready"); result.url = redactUrl(result.url); return void console.log(JSON.stringify(result));
     } finally { removeCleanup?.(); ttyHandle?.close?.(); }
   }

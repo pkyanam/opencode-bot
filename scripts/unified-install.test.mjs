@@ -7,16 +7,37 @@ import { spawnSync } from "node:child_process";
 
 test("unified installer keeps Cloudflare default and routes --boat without checkout", () => {
   const script = readFileSync(new URL("../install.sh", import.meta.url), "utf8");
-  assert.match(script, /if \[\[ \"\$wants_boat\" -eq 1/);
+  assert.match(script, /\[\[ \"\$wants_boat\" -eq 1 \]\]/);
   assert.match(script, /OCBOT_PROVIDER/);
   assert.match(script, /\[\[ \"\$arg\" == \"--boat\" \]\]/);
   assert.match(script, /skip_picker=0/);
-  assert.match(script, /Cloudflare \(recommended\)/);
-  assert.match(script, /Boat \(no Cloudflare, preview\)/);
+  assert.match(script, /Cloudflare \(recommended;/);
+  assert.match(script, /Boat \(preview; persistent VM/);
   assert.match(script, /read -r choice <\/dev\/tty/);
   assert.match(script, /scripts\/boat-install\.sh/);
   assert.match(script, /ensure_node/);
   assert.match(script, /ensure_cloudflare_auth/);
+  assert.match(script, /--cloudflare/);
+  assert.match(script, /--non-interactive/);
+  assert.match(script, /provider flag conflicts/);
+});
+
+test("help is available before any network or prerequisite work", () => {
+  const result = spawnSync("bash", ["install.sh", "--help"], {
+    cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 5000,
+    env: { ...process.env, PATH: "/usr/bin:/bin" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--cloudflare\|--boat/);
+  assert.match(result.stdout, /OCBOT_NONINTERACTIVE=1/);
+});
+
+test("conflicting provider selectors fail before downloading anything", () => {
+  const result = spawnSync("bash", ["install.sh", "--boat", "--cloudflare"], {
+    cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 5000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /choose only one provider/);
 });
 
 test("--yes --boat bypasses the picker and forwards remaining flags", () => {

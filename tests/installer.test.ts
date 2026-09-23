@@ -33,6 +33,8 @@ function fixture() {
     printf 'git %s\\n' "$*" >> "\${OCBOT_TEST_LOG}"
     if [ "\${1-}" = "clone" ]; then
       mkdir -p "$7/.git"
+      mkdir -p "$7/scripts/setup"
+      cp "$OCBOT_CONFIG_HELPER" "$7/scripts/setup/installer-config.mjs"
       printf '#!/bin/sh\\nprintf "setup apply --apply --install-missing\\n" >> "\${OCBOT_TEST_LOG}"\\n' > "$7/setup.sh"
       chmod 755 "$7/setup.sh"
     elif [ "\${1-}" = "-C" ] && [ "\${3-}" = "remote" ]; then
@@ -45,11 +47,16 @@ function fixture() {
 }
 
 function runScript(f: ReturnType<typeof fixture>, extraEnv: Record<string, string> = {}) {
+  if (existsSync(join(f.install, ".git"))) {
+    mkdirSync(join(f.install, "scripts/setup"), { recursive: true });
+    writeFileSync(join(f.install, "scripts/setup/installer-config.mjs"), readFileSync(resolve(root, "scripts/setup/installer-config.mjs")));
+  }
   return execFileSync("bash", ["-s", "--", "--yes"], {
     cwd: f.dir,
     env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, HOME: f.home, TMPDIR: f.dir,
       OCBOT_INSTALL_DIR: f.install, OCBOT_NODE_ROOT: f.runtime, OCBOT_SKIP_HANDOFF_READY: "1",
-      OCBOT_REPO_URL: "https://github.com/pkyanam/opencode-bot.git", OCBOT_TEST_LOG: f.log, ...extraEnv },
+      OCBOT_REPO_URL: "https://github.com/pkyanam/opencode-bot.git", OCBOT_TEST_LOG: f.log,
+      OCBOT_CONFIG_HELPER: resolve(root, "scripts/setup/installer-config.mjs"), ...extraEnv },
     input: readFileSync(installer), encoding: "utf8",
   });
 }

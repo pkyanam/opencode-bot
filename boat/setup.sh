@@ -105,7 +105,7 @@ sudo sh -c "cd '$release/runner' && npm ci --workspaces=false --omit=dev --no-au
 sudo rm -f "$release/runner/.npmrc"
 [[ -x "$release/runner/node_modules/.bin/opencode2" ]] || fail 'runner dependency install did not provide the opencode2 executable'
 sudo -u opencode-bot env HOME="$DATA" PATH="$release/runner/node_modules/.bin:$ROOT/node/bin:$PATH" "$release/runner/node_modules/.bin/opencode2" --version >/dev/null || fail 'installed opencode2 executable failed its version check'
-sudo apt-get install -y --no-install-recommends x11-apps x11-xserver-utils xclip xdotool >/dev/null
+sudo apt-get install -y --no-install-recommends x11-apps x11-xserver-utils xclip xdotool cron >/dev/null
 sudo install -d -m 0755 "$ROOT/browsers"
 sudo PLAYWRIGHT_BROWSERS_PATH="$ROOT/browsers" "$release/runner/node_modules/.bin/playwright" install --with-deps chromium >/dev/null
 sudo install -d -m 0700 "$DATA" "$ETC"
@@ -131,6 +131,12 @@ sudo bash "$release/boat/hindsight-setup.sh"
 sudo systemctl daemon-reload
 sudo systemctl enable --now opencode-bot-updater.path
 sudo systemctl enable opencode-bot.service
+# A restored /etc can arrive after systemd has passed the enabled-service target.
+# Cron reloads restored entries; this helper exits after one successful recovery
+# per boot and does not restart a service deliberately stopped later.
+printf '%s\n' '* * * * * root /bin/bash /opt/opencode-bot/releases/current/boat/resume-service.sh' | sudo tee /etc/cron.d/opencode-bot-resume >/dev/null
+sudo chmod 0644 /etc/cron.d/opencode-bot-resume
+sudo systemctl enable --now cron
 sudo systemctl restart opencode-bot.service
 for attempt in $(seq 1 60); do
   auth="$(sudo cat "$ETC/app-token")"

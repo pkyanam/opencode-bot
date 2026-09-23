@@ -32,6 +32,16 @@ asks which to use. For unattended setup, supply `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` through your agent's secret environment. A recorded
 account cannot silently switch on a later run.
 
+In an interactive run, the installer also asks for the Worker name, compute
+size (`standard-1` through `standard-4`), and container instance limit (1–4), then shows
+a review before provisioning. These choices are saved in the private
+`.opencode-bot/deployment-config.json` file and reused on reruns. Set
+`OCBOT_DEPLOYMENT_NAME`, `OCBOT_INSTANCE_TYPE`, and
+`OCBOT_MAX_CONCURRENT_RUNS` for unattended customization; this controls the
+maximum number of Sandbox container instances, not application scheduler
+parallelism. The same values are
+validated before any Cloudflare resource is changed.
+
 If Wrangler is not authenticated, the installer starts its browser login flow.
 Because the command is piped through Bash, interactive login and ambiguous
 account selection require `/dev/tty`; a noninteractive run should provide

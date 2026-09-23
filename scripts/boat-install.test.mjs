@@ -63,6 +63,7 @@ test("Boat exec stays within the documented CLI timeout ceiling and errors stay 
   assert.match(safeCommandFailure("boat", { status: 1, stderr: "401 unauthorized secret-token" }), /authentication failed/);
   assert.doesNotMatch(safeCommandFailure("boat", { status: 1, stderr: "401 unauthorized secret-token" }), /secret-token/);
   assert.doesNotMatch(safeCommandFailure("boat", { status: 1, stderr: '{"timedOut":false,"exitCode":1}' }), /timed out/);
+  assert.match(safeCommandFailure("boat", { status: 1, stderr: "trial_auto_stop_required" }), /paid Boat plan/);
 });
 
 test("standalone shell defaults to trusted GitHub latest manifest discovery", () => {
@@ -115,6 +116,7 @@ test("Boat install uses no-env, public hosting by default, and writes redacted o
     calls.push([name, args]);
     if (name !== "boat") return { status: 0, stdout: "", stderr: "" };
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_test123","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_test123","state":"ready"}\n', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"sandboxId":"bx_test123","port":8789,"url":"https://app-8789.on.boat.dev","access":"public"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
@@ -124,6 +126,7 @@ test("Boat install uses no-env, public hosting by default, and writes redacted o
   assert.equal(result.url, "https://app-8789.on.boat.dev");
   const newCall = calls.find(([name, args]) => name === "boat" && args[0] === "new");
   assert.ok(newCall?.[1].includes("--no-env"));
+  assert.ok(newCall?.[1].includes("--no-auto-stop"));
   const hostCall = calls.find(([name, args]) => name === "boat" && args[0] === "host");
   assert.ok(hostCall?.[1].includes("--public"));
   const stateText = readFileSync(join(stateDir, "state.json"), "utf8");
@@ -137,12 +140,45 @@ test("Boat install uses no-env, public hosting by default, and writes redacted o
   assert.match(readFileSync(join(stateDir, "open.html"), "utf8"), /#connect=app-secret-test/);
 });
 
+test("persistent reruns reconcile an existing running sandbox with Boat's lifetime API", () => {
+  const fixture = bundleFixture(); const stateDir = join(fixture.dir, "state"); const calls = [];
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "state.json"), JSON.stringify({ schemaVersion: 1, provider: "boat", sandboxId: "bx_existing", journal: [] }));
+  const run = (name, args) => {
+    calls.push([name, args]);
+    const detached = detachedMock(name, args); if (detached) return detached;
+    if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_existing","state":"ready","archiveAfter":null}', stderr: "" };
+    if (args[0] === "host") return { status: 0, stdout: '{"url":"https://existing.on.boat.dev","access":"public"}', stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  install({ run, stateDir, bundle: fixture.file, bundleSha256: fixture.sha256 });
+  const extend = calls.find(([name, args]) => name === "boat" && args[0] === "extend");
+  assert.ok(extend?.[1].includes("--no-auto-stop"));
+  assert.equal(calls.some(([name, args]) => name === "boat" && args[0] === "resume"), false);
+});
+
+test("persistent setup refuses to claim success when Boat reports a deadline", () => {
+  const fixture = bundleFixture(); const stateDir = join(fixture.dir, "state"); const calls = [];
+  const run = (name, args) => {
+    calls.push([name, args]);
+    const detached = detachedMock(name, args); if (detached) return detached;
+    if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_deadline"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"sandbox":{"id":"bx_deadline","state":"ready","archiveAfter":"2099-01-01T00:00:00Z"}}', stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  assert.throws(() => install({ run, stateDir, bundle: fixture.file, bundleSha256: fixture.sha256 }), /archiveAfter/);
+  assert.equal(calls.some(([name, args]) => name === "boat" && args[0] === "host"), false);
+});
+
 test("private Boat hosting is opt-in", () => {
   const fixture = bundleFixture(); const stateDir = join(fixture.dir, "state"); const calls = [];
   const run = (name, args) => {
     calls.push([name, args]);
     const detached = detachedMock(name, args); if (detached) return detached;
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_private","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_private"}', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"url":"https://private.on.boat.dev?_token=t","access":"private"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
@@ -159,6 +195,7 @@ test("new Boat sandbox receives the selected shape and persists it", () => {
     calls.push([name, args]);
     const detached = detachedMock(name, args); if (detached) return detached;
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_large","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_large","type":"large"}', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"url":"https://large.on.boat.dev","access":"public"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
@@ -177,7 +214,7 @@ test("rerunning an existing sandbox reuses its recorded shape", () => {
     calls.push([name, args]);
     const detached = detachedMock(name, args); if (detached) return detached;
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
-    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_existing","state":"ready","type":"large"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_existing","state":"ready","type":"large","archiveAfter":null}', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"url":"https://existing.on.boat.dev","access":"public"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
   };
@@ -192,6 +229,7 @@ test("browser handoff carries the app token in a fragment only", () => {
     const detached = detachedMock(name, args); if (detached) return detached;
     calls.push([name, args]);
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_open","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_open"}', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"url":"https://open.on.boat.dev","access":"public"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
@@ -207,6 +245,7 @@ test("setup failure preserves a provisioning journal and never hosts or claims i
     calls.push([name, args]);
     const detached = detachedMock(name, args); if (detached) return detached;
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_failed","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_failed"}', stderr: "" };
     if (args[0] === "exec" && args.some(value => String(value).includes("APP_BUNDLE_DIR=") && String(value).includes("/boat/setup.sh"))) return { status: 0, stdout: '{"exitCode":17}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
@@ -234,6 +273,7 @@ test("status and uninstall are scoped to the recorded sandbox", () => {
   install({ run: (name, args) => {
     const detached = detachedMock(name, args); if (detached) return detached;
     if (args[0] === "status") return { status: 0, stdout: '{"status":"ok"}', stderr: "" };
+    if (args[0] === "info") return { status: 0, stdout: '{"id":"bx_owned","state":"ready","archiveAfter":null}', stderr: "" };
     if (args[0] === "new") return { status: 0, stdout: '{"event":"ready","id":"bx_owned"}', stderr: "" };
     if (args[0] === "host") return { status: 0, stdout: '{"url":"https://x.on.boat.dev","access":"private"}', stderr: "" };
     return { status: 0, stdout: "", stderr: "" };

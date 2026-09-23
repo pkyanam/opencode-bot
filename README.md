@@ -11,7 +11,7 @@
 
 # OpenCode Bot
 
-[Website](https://pkyanam.github.io/opencode-bot/) · [Setup guide](docs/getting-started.md) · [Releases](https://github.com/pkyanam/opencode-bot/releases)
+[Website](https://pkyanam.github.io/opencode-bot/) · [Setup guide](docs/getting-started.md) · [Hosting options](docs/hosting.md) · [Releases](https://github.com/pkyanam/opencode-bot/releases)
 
 Give your bots a name, a job, and a computer. Chat in the browser or Telegram,
 watch them work, and let them ask each other for help. Powered by
@@ -29,6 +29,13 @@ from the same installer, add `--boat`:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pkyanam/opencode-bot/main/install.sh | bash -s -- --boat
 ```
+
+For scripts, select the target explicitly with `--cloudflare` or `--boat` and
+add `--yes` (or `OCBOT_NONINTERACTIVE=1`) to disable prompts. Provider options
+such as Boat's `--type`, `--ttl`, and `--open` are passed through unchanged.
+Run `bash install.sh --help` for the complete list of installer environment
+variables. Credentials are read from the provider's login or secret
+environment and are never printed by the installer.
 
 When run from an interactive terminal without a provider flag, the installer
 opens a small provider picker on `/dev/tty` with Cloudflare preselected. Use
@@ -51,7 +58,7 @@ On macOS, existing Homebrew can install missing Git; elsewhere, install Git firs
 Cloudflare signup, billing activation, and login consent may need you.
 
 Your first computer can take a few minutes to start; explore the workspace while
-it boots. The default checkout is `~/.local/share/opencode-bot`. Rerun the command
+it boots. The default Cloudflare checkout is `~/.local/share/opencode-bot/cloudflare`; an existing legacy checkout at `~/.local/share/opencode-bot` is reused. Rerun the command
 to resume installation. Hosting and models are billed by their providers.
 [Setup details and troubleshooting →](docs/getting-started.md)
 

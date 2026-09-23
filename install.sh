@@ -6,13 +6,40 @@ set -Eeuo pipefail
 readonly REPO_URL="${OCBOT_REPO_URL:-https://github.com/pkyanam/opencode-bot.git}"
 readonly RELEASE_BASE="${OCBOT_RELEASE_BASE:-https://github.com/pkyanam/opencode-bot}"
 readonly NODE_VERSION="${OCBOT_NODE_VERSION:-24.14.0}"
-readonly INSTALL_DIR="${OCBOT_INSTALL_DIR:-${HOME}/.local/share/opencode-bot}"
+DEFAULT_INSTALL_DIR="${HOME}/.local/share/opencode-bot"
+if [[ -z "${OCBOT_INSTALL_DIR:-}" && ! -d "${DEFAULT_INSTALL_DIR}/.git" ]]; then
+  DEFAULT_INSTALL_DIR="${DEFAULT_INSTALL_DIR}/cloudflare"
+fi
+readonly INSTALL_DIR="${OCBOT_INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
 readonly NODE_ROOT="${OCBOT_NODE_ROOT:-${HOME}/.local/share/opencode-bot-runtime/node-v${NODE_VERSION}}"
 NODE_TMP=""
 
 say() { printf '%s\n' "[opencode-bot] $*"; }
 die() { printf '%s\n' "[opencode-bot] error: $*" >&2; exit 1; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<'EOF'
+OpenCode Bot installer
+
+Usage:
+  install.sh [--cloudflare|--boat] [--yes] [provider options]
+
+With no provider flag, an interactive terminal asks which hosting target to use.
+Cloudflare is the default for unattended runs. Boat options (for example
+--type, --ttl, and --open) are passed to the Boat setup after the target is
+chosen. Cloudflare account selection remains interactive when needed.
+
+Environment:
+  OCBOT_PROVIDER=cloudflare|boat  Select a provider without a prompt
+  OCBOT_NONINTERACTIVE=1          Disable all interactive login/selection
+  CLOUDFLARE_ACCOUNT_ID=...       Select a Cloudflare account in automation
+  BOAT_API_KEY=...                Authenticate Boat in automation
+
+Use --yes or OCBOT_NONINTERACTIVE=1 for automation. Secrets are read from
+their provider's credential store or environment and are never printed.
+EOF
+}
 
 download() {
   if command_exists curl; then curl -fsSL "$1" -o "$2"
@@ -147,10 +174,43 @@ checkout_repo() {
 
 tty_available() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
+configure_cloudflare() {
+  local config_file="${INSTALL_DIR}/.opencode-bot/deployment-config.json" state_file="${INSTALL_DIR}/.opencode-bot/deployment-state.json"
+  local name instance concurrency answer existing_name allow_rename=0
+  [[ -f "scripts/setup/installer-config.mjs" ]] || die "published checkout is missing the Cloudflare installer config helper"
+  mkdir -p "${INSTALL_DIR}/.opencode-bot"
+  if [[ -s "$state_file" ]]; then
+    existing_name="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const s=JSON.parse(readFileSync(process.argv[1])); if (!s.uninstalledAt) process.stdout.write(s.workerName || ""); } catch {}' "$state_file" 2>/dev/null || true)"
+  fi
+  if [[ -s "$config_file" ]]; then
+    name="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const c=JSON.parse(readFileSync(process.argv[1])); process.stdout.write(c.name || ""); } catch {}' "$config_file" 2>/dev/null || true)"
+    instance="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const c=JSON.parse(readFileSync(process.argv[1])); process.stdout.write(c.instanceType || ""); } catch {}' "$config_file" 2>/dev/null || true)"
+    concurrency="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; try { const c=JSON.parse(readFileSync(process.argv[1])); process.stdout.write(String(c.maxConcurrentRuns || "")); } catch {}' "$config_file" 2>/dev/null || true)"
+  fi
+  name="${OCBOT_DEPLOYMENT_NAME:-${name:-${existing_name:-ocbot-personal}}}"
+  instance="${OCBOT_INSTANCE_TYPE:-${instance:-standard-2}}"
+  concurrency="${OCBOT_MAX_CONCURRENT_RUNS:-${concurrency:-2}}"
+  if [[ "${OCBOT_NONINTERACTIVE:-0}" != 1 && "$skip_picker" -eq 0 ]] && tty_available; then
+    printf '%s\n' '' 'Cloudflare setup questions:' '  The Worker name becomes part of its public workers.dev URL.' >&2
+    printf '%s' "Worker name [${name}]: " >/dev/tty; IFS= read -r answer </dev/tty || true; name="${answer:-$name}"
+    printf '%s\n' 'Compute size: standard-1 (0.5 vCPU/4 GiB), standard-2 (1/6, recommended),' \
+      '  standard-3 (2/8), or standard-4 (4/12).' >&2
+    printf '%s' "Compute size [${instance}]: " >/dev/tty; IFS= read -r answer </dev/tty || true; instance="${answer:-$instance}"
+    printf '%s\n' '' "Review: Worker ${name}, ${instance} compute size." 'Proceed with Cloudflare provisioning? [y/N]: ' >&2
+    IFS= read -r answer </dev/tty || answer=n
+    [[ -z "$answer" || "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || die 'Cloudflare provisioning cancelled'
+  fi
+  if [[ -s "$state_file" ]] && node --input-type=module -e 'import { readFileSync } from "node:fs"; try { process.exit(JSON.parse(readFileSync(process.argv[1])).uninstalledAt ? 0 : 1); } catch { process.exit(1); }' "$state_file"; then allow_rename=1; fi
+  node --input-type=module -e 'import { readInstallerConfig, writeInstallerConfig } from "./scripts/setup/installer-config.mjs"; const [file,name,instance,runs,allowRename,liveName]=process.argv.slice(1); let current; try { current=readInstallerConfig(file); } catch {} const owned=liveName || current?.name; if (owned && owned !== name && allowRename !== "1") throw new Error(`deployment name cannot change from ${owned} for this checkout`); writeInstallerConfig(file, {...(current || {}), name, instanceType:instance, maxConcurrentRuns:Number(runs), bucketName:`${name}-artifacts`});' "$config_file" "$name" "$instance" "$concurrency" "$allow_rename" "$existing_name" || die 'invalid Cloudflare setup choices'
+  printf '%s\n' "$config_file"
+}
+
 choose_provider() {
   local choice
-  printf '%s\n' '' 'OpenCode Bot installer' '  1) Cloudflare (recommended)' '  2) Boat (no Cloudflare, preview)' >&2
-  printf '%s' 'Choose a hosting provider [1]: ' >/dev/tty
+  printf '%s\n' '' 'OpenCode Bot installer' 'Choose where to run your workspace:' \
+    '  1) Cloudflare (recommended; managed deployment)' \
+    '  2) Boat (preview; persistent VM, no Cloudflare account)' >&2
+  printf '%s' 'Hosting provider [1]: ' >/dev/tty
   IFS= read -r choice </dev/tty || choice=1
   case "$choice" in
     2) printf 'boat' ;;
@@ -292,14 +352,30 @@ run_boat_installer() {
 main() {
   # Supplying --yes is accepted for scripts that make authorization explicit;
   # running this installer already authorizes the declared deployment.
-  local wants_boat=0 skip_picker=0 arg provider="${OCBOT_PROVIDER:-}"
-  for arg in "$@"; do [[ "$arg" == "--boat" ]] && wants_boat=1; done
+  local wants_boat=0 wants_cloudflare=0 skip_picker=0 arg provider="${OCBOT_PROVIDER:-}"
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h) usage; return 0 ;;
+      --boat) wants_boat=1 ;;
+      --cloudflare) wants_cloudflare=1 ;;
+      --yes|--non-interactive) skip_picker=1 ;;
+    esac
+  done
+  [[ "$wants_boat" -eq 1 && "$wants_cloudflare" -eq 1 ]] && die 'choose only one provider: --cloudflare or --boat'
+  [[ "$wants_boat" -eq 1 ]] && provider=boat
+  [[ "$wants_cloudflare" -eq 1 ]] && provider=cloudflare
+  if [[ -n "${OCBOT_PROVIDER:-}" && ( "$wants_boat" -eq 1 || "$wants_cloudflare" -eq 1 ) && "$provider" != "${OCBOT_PROVIDER}" ]]; then
+    die "provider flag conflicts with OCBOT_PROVIDER=${OCBOT_PROVIDER}"
+  fi
   local -a filtered_args=()
   for arg in "$@"; do
-    if [[ "$arg" == "--yes" ]]; then skip_picker=1; [[ "$wants_boat" -eq 1 ]] && filtered_args+=("$arg"); else filtered_args+=("$arg"); fi
+    case "$arg" in
+      --boat|--cloudflare|--non-interactive) ;;
+      --yes) [[ "$wants_boat" -eq 1 ]] && filtered_args+=("$arg") ;;
+      *) filtered_args+=("$arg") ;;
+    esac
   done
   set -- ${filtered_args[@]+"${filtered_args[@]}"}
-  if [[ "$wants_boat" -eq 1 ]]; then provider=boat; fi
   case "$provider" in ""|cloudflare|boat) ;; *) die 'OCBOT_PROVIDER must be cloudflare or boat' ;; esac
   if [[ "$skip_picker" -eq 0 && -z "$provider" && "${OCBOT_NONINTERACTIVE:-0}" != 1 && "$wants_boat" -eq 0 ]] && tty_available; then provider="$(choose_provider)"; fi
   if [[ "$provider" == "boat" ]]; then
@@ -314,8 +390,9 @@ main() {
   npm ci
   ensure_cloudflare_auth
   choose_cloudflare_account
+  cloudflare_config="$(configure_cloudflare)"
   say "applying the deployment"
-  ./setup.sh apply --apply --install-missing
+  ./setup.sh apply --apply --install-missing --config "$cloudflare_config"
   open_onboarding
   say "installed successfully at ${INSTALL_DIR}"
 }

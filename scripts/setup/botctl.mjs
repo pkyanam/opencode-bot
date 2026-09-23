@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { validateManifest, verifyArchive, downloadReleaseArchive, assertSourceCommit, craneAsset } from "./release.mjs";
 import { readOwnership, uninstallPlan, uninstallResources } from "./uninstall.mjs";
 import { createInstallerUI, installCleanup } from "./installer-ui.mjs";
+import { validateInstallerConfig } from "./installer-config.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const argv = process.argv.slice(2);
@@ -72,6 +73,10 @@ function writeDeploymentConfig(config, image) {
   const source = jsonc(resolve(root, "wrangler.jsonc"));
   const absolute = (value) => typeof value === "string" ? resolve(root, value) : value;
   delete source.$schema;
+  source.name = config.name;
+  source.r2_buckets[0].bucket_name = config.bucketName;
+  source.containers[0].instance_type = config.instanceType;
+  source.containers[0].max_instances = config.maxConcurrentRuns;
   source.account_id = cloudflareAccount(config);
   source.vars = { ...source.vars, APP_ACCOUNT_ID: source.account_id, APP_WORKER_NAME: source.name };
   source.main = absolute(source.main);
@@ -92,11 +97,13 @@ function readConfig() {
 }
 
 function validateDeploymentConfig(config) {
-  const wrangler = readFileSync(resolve(root, "wrangler.jsonc"), "utf8");
-  const expectedWorker = config.name ?? "ocbot-personal";
-  const expectedBucket = config.bucketName ?? "ocbot-personal-artifacts";
-  if (!new RegExp(`"name"\\s*:\\s*"${expectedWorker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(wrangler)) throw new Error(`deployment name ${expectedWorker} does not match wrangler.jsonc`);
-  if (!new RegExp(`"bucket_name"\\s*:\\s*"${expectedBucket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(wrangler)) throw new Error(`bucketName ${expectedBucket} does not match wrangler.jsonc`);
+  const name = config.name ?? "ocbot-personal";
+  Object.assign(config, validateInstallerConfig({
+    ...config, name,
+    bucketName: config.bucketName ?? `${name}-artifacts`,
+    instanceType: config.instanceType ?? "standard-2",
+    maxConcurrentRuns: config.maxConcurrentRuns ?? 2,
+  }));
 }
 
 function plan(config) {
