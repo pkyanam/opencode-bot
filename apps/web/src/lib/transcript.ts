@@ -9,9 +9,9 @@ function redactText(value: string, limit = 16000): string {
 }
 /** Bounded readable tool details. Never render credential fields or binary payloads. */
 export function safeToolDetail(value: unknown, depth = 0): unknown {
-  if (depth > 4) return '[nested details omitted]';
   if (typeof value === 'string') return redactText(value, 4000);
   if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth > 4) return '[nested details omitted]';
   if (Array.isArray(value)) return value.slice(0, 30).map(item => safeToolDetail(item, depth + 1));
   if (typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 30).map(([key, item]) => [key, secretKey.test(key) ? '[redacted]' : safeToolDetail(item, depth + 1)]));
   return undefined;

@@ -244,7 +244,7 @@ async function executeRunner(job, config, onProgress) {
     return transferFile({ direction, baseUrl: controlRoot, token: transferToken, manifest, sourceRoot: workspace, destinationRoot: workspace, overwrite: payload.overwrite === true });
   }
   if (payload.kind === "runtime.operation") {
-    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
+    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "generate/text", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
     if (typeof payload.operation !== "string" || !allowed.has(payload.operation)) throw new Error("unsupported node runtime operation");
     if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runtime operations");
     const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
@@ -265,6 +265,23 @@ async function executeRunner(job, config, onProgress) {
     if (!runId) throw new Error("bot receipt command is missing runId");
     if (!payload.receipts || typeof payload.receipts !== "object" || Array.isArray(payload.receipts)) throw new Error("bot receipt command is missing receipts");
     return await jsonFetch(`${runner}/runs/${encodeURIComponent(runId)}/bot-receipts`, { method: "POST", token: config.runnerToken, body: payload.receipts });
+  }
+  if (payload.kind === "runner.questions" || payload.kind === "runner.question.reply" || payload.kind === "runner.question.reject") {
+    if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runner question commands");
+    const runner = String(config.runnerUrl || "http://127.0.0.1:8787").replace(/\/$/, "");
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(runner).hostname)) throw new Error("Local runner URL must use loopback");
+    const runId = String(payload.runId || payload.run?.runId || "");
+    if (!runId) throw new Error("runner question command is missing runId");
+    if (payload.kind === "runner.questions") {
+      const result = await jsonFetch(`${runner}/runs/${encodeURIComponent(runId)}/questions`, { method: "GET", token: config.runnerToken });
+      return { questions: Array.isArray(result.questions) ? result.questions : [] };
+    }
+    const requestId = String(payload.requestId || "");
+    if (!requestId) throw new Error("runner question command is missing requestId");
+    const suffix = payload.kind === "runner.question.reply" ? "reply" : "reject";
+    const body = suffix === "reply" ? { answers: payload.answers } : {};
+    const result = await jsonFetch(`${runner}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(requestId)}/${suffix}`, { method: "POST", token: config.runnerToken, body });
+    return result && typeof result === "object" ? result : { accepted: true };
   }
   if (payload.kind === "runner.cancel" || payload.kind === "runner.approval") {
     if (!config.runnerToken) throw new Error("NODE_RUNNER_TOKEN is required for runner commands");
@@ -352,7 +369,7 @@ async function run(options) {
   let heartbeatBusy = false;
   const isControlJob = (job) => {
     const kind = job?.payload?.kind;
-    return kind === "runner.cancel" || kind === "runner.approval" || kind === "runner.bot-receipts" || kind === "bot-receipts" || kind === "bot.receipts";
+    return kind === "runner.cancel" || kind === "runner.approval" || kind === "runner.questions" || kind === "runner.question.reply" || kind === "runner.question.reject" || kind === "runner.bot-receipts" || kind === "bot-receipts" || kind === "bot.receipts";
   };
   const postResult = async (job, body) => {
     await jsonFetch(`${base}/${encodeURIComponent(config.nodeId)}/jobs/${encodeURIComponent(job.id)}/result`, { method: "POST", token: config.nodeSecret, body });

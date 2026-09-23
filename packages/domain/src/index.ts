@@ -67,7 +67,7 @@ const transitions: Record<RunStatus, ReadonlySet<RunStatus>> = {
   provisioning: new Set(["running", "waiting_dependency", "recovering", "cancelling", "failed"]),
   running: new Set(["waiting_approval", "waiting_human", "waiting_dependency", "checkpointing", "recovering", "cancelling", "succeeded", "failed", "needs_review"]),
   waiting_approval: new Set(["running", "cancelling", "cancelled", "succeeded", "failed", "needs_review"]),
-  waiting_human: new Set(["running", "cancelling", "failed", "needs_review"]),
+  waiting_human: new Set(["running", "waiting_approval", "cancelling", "cancelled", "succeeded", "failed", "needs_review"]),
   waiting_dependency: new Set(["queued", "provisioning", "cancelling", "failed", "cancelled"]),
   checkpointing: new Set(["succeeded", "recovering", "failed", "cancelling"]),
   recovering: new Set(["provisioning", "running", "needs_review", "failed", "cancelling"]),

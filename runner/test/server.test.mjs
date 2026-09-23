@@ -9,6 +9,7 @@ class FakeRuntime {
   constructor() { this.next = 1; this.approvals = []; this.interrupts = []; }
   async createSession(input) { this.createCalls ??= []; this.createCalls.push(input); return input?.sessionId ?? `ses_${this.next++}`; }
   async prompt() { return { id: "in_1" }; }
+  async generateText(input) { this.generateTextCalls ??= []; this.generateTextCalls.push(input); return { text: "Generated title" }; }
   async command(session, name, text) { this.commandCall = { session, name, text }; return { id: "cmd_1" }; }
   async nativeAction(session, name, input) { this.actionCall = { session, name, input }; return { compacted: true }; }
   async removeSession(session) { this.removedSessions ??= []; this.removedSessions.push(session); }
@@ -17,8 +18,36 @@ class FakeRuntime {
   async configureProvider(input) { return { ok: true, integrationID: input.integrationID, key: input.key, apiKey: input.key }; }
   async interrupt(id) { this.interrupts.push(id); }
   async replyApproval(...args) { this.approvals.push(args); }
+  async questions(sessionID) { return (this.questionRequests ?? []).filter((question) => question.sessionID === sessionID); }
+  async questionReply(sessionID, requestID, answers) { this.questionReplies ??= []; this.questionReplies.push({ sessionID, requestID, answers }); this.questionRequests = (this.questionRequests ?? []).filter((question) => question.id !== requestID); }
+  async questionReject(sessionID, requestID) { this.questionRejects ??= []; this.questionRejects.push({ sessionID, requestID }); this.questionRequests = (this.questionRequests ?? []).filter((question) => question.id !== requestID); }
   async *events() { yield { type: "session.text.delta", properties: { sessionID: "ses_1", delta: "hello" } }; yield { type: "session.execution.succeeded", properties: { sessionID: "ses_1" } }; }
 }
+
+test("question list/reply/reject routes are authenticated and scoped to the run session", async () => {
+  const fake = new FakeRuntime();
+  fake.questionRequests = [{ id: "frm_q1", sessionID: "ses_q1", questions: [{ header: "Scope", question: "Choose", options: [{ label: "Read", value: "read" }] }] }];
+  const store = new RunStore(fake);
+  store.runs.set("question-run", { id: "question-run", sessionId: "ses_q1", status: "waiting_human", events: [], final: "" });
+  const server = createServer({ store, authToken: "secret" });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.equal((await fetch(`${base}/runs/question-run/questions`)).status, 401);
+    const headers = { authorization: "Bearer secret", "content-type": "application/json" };
+    const listed = await fetch(`${base}/runs/question-run/questions`, { headers }).then((response) => response.json());
+    assert.equal(listed.questions[0].id, "frm_q1");
+    const replied = await fetch(`${base}/runs/question-run/questions/frm_q1/reply`, { method: "POST", headers, body: JSON.stringify({ answers: [["Read"]] }) }).then((response) => response.json());
+    assert.equal(replied.status, "running");
+    assert.deepEqual(fake.questionReplies, [{ sessionID: "ses_q1", requestID: "frm_q1", answers: [["Read"]] }]);
+    fake.questionRequests = [{ id: "frm_q2", sessionID: "ses_q1", questions: [{ header: "Scope", question: "Choose", options: [] }] }];
+    const rejected = await fetch(`${base}/runs/question-run/questions/frm_q2/reject`, { method: "POST", headers, body: "{}" }).then((response) => response.json());
+    assert.equal(rejected.status, "running");
+    assert.deepEqual(fake.questionRejects, [{ sessionID: "ses_q1", requestID: "frm_q2" }]);
+    const forged = await fetch(`${base}/runs/question-run/questions/unknown/reject`, { method: "POST", headers, body: "{}" });
+    assert.equal(forged.status, 409);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
 
 test("runner authenticates and returns durable run events", async () => {
   const server = createServer({ store: new RunStore(new FakeRuntime()), authToken: "secret" });
@@ -34,6 +63,25 @@ test("runner authenticates and returns durable run events", async () => {
   assert.equal(result.final, "hello");
   assert.ok(result.events.every((event) => event.seq > 0));
   server.close();
+});
+
+test("bounded text generation is authenticated and does not create a run or session", async () => {
+  const fake = new FakeRuntime();
+  const store = new RunStore(fake);
+  const server = createServer({ store, authToken: "secret" });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.equal((await fetch(`${base}/generate/text`, { method: "POST", body: JSON.stringify({ prompt: "hello" }) })).status, 401);
+    const headers = { authorization: "Bearer secret", "content-type": "application/json" };
+    const response = await fetch(`${base}/generate/text`, { method: "POST", headers, body: JSON.stringify({ prompt: "Name this conversation", model: "opencode/mimo-v2.6-flash-free" }) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { text: "Generated title" });
+    assert.deepEqual(fake.generateTextCalls, [{ prompt: "Name this conversation", model: "opencode/mimo-v2.6-flash-free" }]);
+    assert.equal(store.runs.size, 0);
+    assert.equal(fake.createCalls, undefined);
+    assert.equal((await fetch(`${base}/generate/text`, { method: "POST", headers, body: JSON.stringify({ prompt: "" }) })).status, 400);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
 test("duplicate run admission is idempotent", async () => {
@@ -363,8 +411,30 @@ test('wait timeout reconnects remain alive while native execution awaits approva
   await store.start({ runId: 'approval-timeout', prompt: 'Continue' });
   await new Promise(resolve => setTimeout(resolve, 1_000));
   const run = store.public(store.get('approval-timeout'));
-  assert.equal(run.status, 'succeeded');
+  assert.equal(run.status, 'succeeded', JSON.stringify(run));
   assert.equal(run.final, 'approved');
+  assert.equal(waits, 4);
+});
+
+test('wait timeout reconnects remain alive while native execution awaits a question form', async () => {
+  const runtime = new FakeRuntime();
+  runtime.events = undefined;
+  runtime.prompt = async () => {};
+  let waits = 0;
+  runtime.questions = async (sessionID) => runtime.questionOpen ? [{ id: 'frm_wait', sessionID, questions: [{ header: 'Scope', question: 'Choose', options: [{ label: 'Read' }] }] }] : [];
+  runtime.messages = async () => runtime.finished ? [{ id: 'assistant-question', type: 'assistant', content: [{ type: 'text', text: 'answered' }] }] : [];
+  runtime.wait = async () => {
+    waits += 1;
+    if (waits < 4) { runtime.questionOpen = true; runtimeStore.get('question-timeout').status = 'waiting_human'; throw Object.assign(new Error('bounded wait elapsed'), { name: 'TimeoutError' }); }
+    runtime.questionOpen = false;
+    runtime.finished = true;
+  };
+  const runtimeStore = new RunStore(runtime, { nativeWaitTimeoutMs: 1 });
+  await runtimeStore.start({ runId: 'question-timeout', prompt: 'Continue' });
+  await new Promise(resolve => setTimeout(resolve, 1_000));
+  const run = runtimeStore.public(runtimeStore.get('question-timeout'));
+  assert.equal(run.status, 'succeeded', JSON.stringify(run));
+  assert.equal(run.final, 'answered');
   assert.equal(waits, 4);
 });
 

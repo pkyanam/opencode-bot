@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false, inFlight: 0, maxInFlight: 0, dispatchDelayMs: 0 }));
+const remote = vi.hoisted(() => ({ runs: new Map<string, any>(), submitted: [] as any[], calls: [] as string[], steerCalls: [] as any[], steerResponses: [] as any[], cancelResponses: [] as any[], questionCalls: [] as any[], generated: [] as any[], failApproval: false, cancelStatus: 200, deleteStatus: 200, deleteError: 'delete failed', messages: [] as any[], legacyMcp: false, inFlight: 0, maxInFlight: 0, dispatchDelayMs: 0, titleGate: undefined as Promise<void> | undefined }));
 vi.mock('../packages/computer-cloudflare/src/index', () => ({
   CloudflareComputerProvider: class {
     async isRunning() { return true; }
@@ -14,6 +14,7 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
         if (path === '/providers/oauth/start') return Response.json({ attempt: { attemptID: 'attempt-cf' } });
         if (path === '/mcps') return Response.json({ servers: [{ name: 'cloudflare', status: 'needs_auth', integrationID: 'integration-cf' }] });
         if (path === '/desktop/control' && init.method === 'POST') return Response.json({ active: true, token: 'lease-test', expiresAt: new Date(Date.now() + 60000).toISOString() });
+        if (path === '/generate/text' && init.method === 'POST') { const input = JSON.parse(String(init.body)); remote.generated.push(input); if (remote.titleGate) await remote.titleGate; return Response.json({ text: 'Launch planning' }); }
         if (path === '/runs' && init.method === 'POST') {
           const input = JSON.parse(String(init.body)); remote.inFlight += 1; remote.maxInFlight = Math.max(remote.maxInFlight, remote.inFlight);
           if (remote.dispatchDelayMs) await new Promise(resolve => setTimeout(resolve, remote.dispatchDelayMs));
@@ -34,6 +35,19 @@ vi.mock('../packages/computer-cloudflare/src/index', () => ({
           if (!run) return Response.json({error:'missing'}, {status:404});
           run.botReceipts = JSON.parse(String(init.body));
           return Response.json({ok:true});
+        }
+        const questions = path.match(/^\/runs\/([^/]+)\/questions$/);
+        if (questions && init.method === 'GET') {
+          const run = remote.runs.get(questions[1]);
+          if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
+          return Response.json({ questions: run.questions ?? [] });
+        }
+        const questionAction = path.match(/^\/runs\/([^/]+)\/questions\/([^/]+)\/(reply|reject)$/);
+        if (questionAction && init.method === 'POST') {
+          const run = remote.runs.get(questionAction[1]);
+          if (!run) return Response.json({ error: 'run not found' }, { status: 404 });
+          remote.questionCalls.push({ runId: questionAction[1], requestId: questionAction[2], action: questionAction[3], body: init.body ? JSON.parse(String(init.body)) : null });
+          return Response.json({ questions: [] });
         }
         if (/^\/sessions\/[^/]+\/messages$/.test(path)) return Response.json({messages:remote.messages});
         if (/^\/sessions\/[^/]+$/.test(path) && init.method === 'DELETE') return Response.json(remote.deleteStatus === 200 ? { deleted: true } : { error: remote.deleteError }, { status: remote.deleteStatus });
@@ -72,7 +86,7 @@ function fixture(withKv = false) {
   };
   if (withKv) Object.assign(storage, { get: async (key: string) => kv.get(key), put: async (key: string, value: unknown) => { kv.set(key, value); }, delete: async (key: string) => kv.delete(key) });
   const env: any = { APP_TOKEN: 'test-owner-token', RUNNER_TOKEN: 'test-runner-token', SANDBOX: {} };
-  const state: any = { storage, blockConcurrencyWhile: (fn: () => Promise<any>) => fn(), waitUntil: () => {} };
+  const state: any = { storage, blockConcurrencyWhile: (fn: () => Promise<any>) => fn(), waitUntil: (work: Promise<unknown>) => { if (work) void work.catch(() => undefined); } };
   let workspace = new Workspace(state, env);
   env.WORKSPACE = { idFromName: () => 'owner', get: () => ({ fetch: (req: Request) => workspace.fetch(req) }) };
   const request = async (path: string, method = 'GET', input?: unknown, token: string | null = env.APP_TOKEN) => {
@@ -88,9 +102,44 @@ function fixture(withKv = false) {
   };
   return { db, request, create, env, alarms, queries, kv, alarm: () => workspace.alarm(), restart: () => { workspace = new Workspace(state, env); } };
 }
-afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; remote.inFlight=0; remote.maxInFlight=0; remote.dispatchDelayMs=0; });
+afterEach(() => { for (const db of databases.splice(0)) db.close(); remote.runs.clear(); remote.submitted.length = 0; remote.calls.length = 0; remote.steerCalls.length = 0; remote.steerResponses.length = 0; remote.cancelResponses.length = 0; remote.questionCalls.length = 0; remote.generated.length = 0; remote.titleGate = undefined; remote.failApproval = false; remote.cancelStatus = 200; remote.deleteStatus = 200; remote.deleteError = 'delete failed'; remote.messages=[]; remote.legacyMcp=false; remote.inFlight=0; remote.maxInFlight=0; remote.dispatchDelayMs=0; });
 
 describe('durable control-plane integration with real SQLite', () => {
+  it('generates one first-prompt title, uses the bot model by default, and preserves a manual rename', async () => {
+    const f = fixture(true);
+    const bot = await f.request('/api/bots', 'POST', { name: 'Builder', instructions: '', model: 'test/title-model' });
+    const thread = await f.request('/api/threads', 'POST', { botId: bot.body.id, title: 'New conversation' });
+    const first = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Plan the launch', idempotencyKey: 'title-one' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(first.status).toBe(202);
+    expect(remote.generated).toHaveLength(1);
+    expect(remote.generated[0].model).toBe('test/title-model');
+    const renamed = await f.request(`/api/threads/${thread.body.id}`, 'PATCH', { title: 'My launch notes' });
+    expect(renamed.body.title).toBe('My launch notes');
+    await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Next message', idempotencyKey: 'title-two' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(remote.generated).toHaveLength(1);
+    expect((await f.request('/api/settings/utility-model', 'PATCH', { model: 'utility/small' })).body).toEqual({ model: 'utility/small' });
+    const secondThread = await f.request('/api/threads', 'POST', { botId: bot.body.id, title: 'New conversation' });
+    await f.request('/api/runs', 'POST', { threadId: secondThread.body.id, prompt: 'Summarize this', idempotencyKey: 'title-three' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(remote.generated).toHaveLength(2);
+    expect(remote.generated[1].model).toBe('utility/small');
+  });
+  it('preserves even an identical manual title while generation is pending', async () => {
+    const f = fixture(true);
+    let finish!: () => void;
+    remote.titleGate = new Promise<void>(resolve => { finish = resolve; });
+    const bot = await f.request('/api/bots', 'POST', { name: 'Builder', model: 'test/model' });
+    const thread = await f.request('/api/threads', 'POST', { botId: bot.body.id, title: 'New conversation' });
+    await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Plan the launch', idempotencyKey: 'title-race' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(remote.generated).toHaveLength(1);
+    await f.request(`/api/threads/${thread.body.id}`, 'PATCH', { title: 'New conversation' });
+    finish();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.db.prepare('SELECT title,title_revision FROM threads WHERE id=?').get(thread.body.id)).toMatchObject({ title: 'New conversation', title_revision: 1 });
+  });
   it('exposes the checkpoint and permits restore while runtime recovery is required', async () => {
     const pointer = { manifest: { id: 'saved-checkpoint', createdAt: '2026-09-21T12:00:00Z' }, computerId: 'shared', runnerInstanceId: 'old-instance' };
     const prepare = vi.spyOn(ComputerManager.prototype, 'prepare').mockResolvedValue({ handle: { status: { state: 'ready' } }, state: 'restore_required', committedCheckpoint: pointer } as any);
@@ -113,6 +162,48 @@ describe('durable control-plane integration with real SQLite', () => {
     expect((await f.request('/api/state')).status).toBe(200);
     f.env.APP_TOKEN = undefined;
     expect((await f.request('/api/state', 'GET', undefined, 'test-owner-token')).status).toBe(401);
+  });
+  it('forwards native questions and keeps question routes available to paired clients', async () => {
+    const f = fixture(); const { thread } = await f.create();
+    const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Question', idempotencyKey: 'question-default' });
+    await f.alarm();
+    const native = remote.runs.get(run.body.id);
+    native.questions = [{ id: 'q1', text: 'Which file?', options: ['a', 'b'] }];
+    const invite = await f.request('/api/pairing/invites', 'POST', { label: 'Question client' });
+    const paired = await f.request('/api/pairing/redeem', 'POST', { secret: invite.body.qrSecret, deviceName: 'Question client', clientType: 'web' }, null);
+    const listed = await f.request(`/api/runs/${run.body.id}/questions`, 'GET', undefined, paired.body.token);
+    expect(listed.status).toBe(200); expect(listed.body).toEqual({ questions: native.questions });
+    const replied = await f.request(`/api/runs/${run.body.id}/questions/q1/reply`, 'POST', { answers: [['a']] }, paired.body.token);
+    expect(replied.status).toBe(200); expect(remote.questionCalls).toEqual([{ runId: run.body.id, requestId: 'q1', action: 'reply', body: { answers: [['a']] } }]);
+    expect((await f.request(`/api/runs/${run.body.id}/questions/q1/reply`, 'POST', { answers: ['a'] }, paired.body.token)).status).toBe(400);
+    expect((await f.request('/api/runs/run_missing/questions', 'GET')).status).toBe(404);
+  });
+  it('forwards owned-node questions and answer bodies through the leased command receipt', async () => {
+    const f = fixture();
+    const pair = await f.request('/api/nodes/pairing', 'POST', {});
+    const registered = await f.request('/api/nodes/register', 'POST', { pairingToken: pair.body.token, name: 'Question node', platform: 'linux', arch: 'x64', capabilities: { runner: true } }, null);
+    const nodeId = registered.body.node.id; const nodeSecret = registered.body.nodeSecret;
+    await f.request(`/api/nodes/${nodeId}/heartbeat`, 'POST', {}, nodeSecret);
+    const bot = await f.request('/api/bots', 'POST', { name: 'Owned questions', model: 'test/model', nodeId });
+    const thread = await f.request('/api/threads', 'POST', { botId: bot.body.id, title: 'Owned questions' });
+    const run = await f.request('/api/runs', 'POST', { threadId: thread.body.id, prompt: 'Ask', idempotencyKey: 'question-owned' });
+    await f.alarm();
+    const initial = await f.request(`/api/nodes/${nodeId}/jobs/poll`, 'GET', undefined, nodeSecret);
+    expect(initial.body.job.payload.kind).toBe('runner.run');
+    await f.request(`/api/nodes/${nodeId}/jobs/${initial.body.job.id}/progress`, 'POST', { result: { status: 'waiting_human', runId: run.body.id, events: [] } }, nodeSecret);
+    const pending = f.request(`/api/runs/${run.body.id}/questions`, 'GET');
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const command = await f.request(`/api/nodes/${nodeId}/jobs/poll`, 'GET', undefined, nodeSecret);
+    expect(command.body.job.payload).toMatchObject({ kind: 'runner.questions', runId: run.body.id });
+    await f.request(`/api/nodes/${nodeId}/jobs/${command.body.job.id}/result`, 'POST', { ok: true, result: { questions: [{ id: 'q-owned' }] } }, nodeSecret);
+    expect((await pending).body).toEqual({ questions: [{ id: 'q-owned' }] });
+    const answer = f.request(`/api/runs/${run.body.id}/questions/q-owned/reply`, 'POST', { answers: [['yes']] });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const answerJob = await f.request(`/api/nodes/${nodeId}/jobs/poll`, 'GET', undefined, nodeSecret);
+    expect(answerJob.body.job.payload).toMatchObject({ kind: 'runner.question.reply', runId: run.body.id, requestId: 'q-owned', answers: [['yes']] });
+    await f.request(`/api/nodes/${nodeId}/jobs/${answerJob.body.job.id}/result`, 'POST', { ok: true, result: { accepted: true } }, nodeSecret);
+    expect((await answer).body).toMatchObject({ accepted: true });
+    expect((await f.request(`/api/runs/${run.body.id}/questions/q-owned/reply`, 'POST', { answers: [['yes']] }, null)).status).toBe(401);
   });
   it('persists admission across object recreation and rejects conflicting idempotency keys', async () => {
     const f = fixture(); const { thread } = await f.create();

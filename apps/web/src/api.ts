@@ -650,6 +650,9 @@ export const api = {
     request<void>(`/api/runs/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
     }),
+  questions: (id: string) => request<{questions: import('./components/questions').BotQuestion[]}>(`/api/runs/${encodeURIComponent(id)}/questions`),
+  answerQuestions: (id:string, requestId:string, answers:string[][]) => request<void>(`/api/runs/${encodeURIComponent(id)}/questions/${encodeURIComponent(requestId)}/reply`, {method:'POST',body:JSON.stringify({answers})}),
+  rejectQuestions: (id:string, requestId:string) => request<void>(`/api/runs/${encodeURIComponent(id)}/questions/${encodeURIComponent(requestId)}/reject`, {method:'POST',body:'{}'}),
   approval: (id: string, payload: { requestId: string; decision: string }) =>
     request<void>(`/api/runs/${encodeURIComponent(id)}/approval`, {
       method: "POST",

@@ -202,6 +202,47 @@ export class OpenCode2Runtime {
     return this.client.session.prompt(input);
   }
 
+  /**
+   * Generate a short piece of text without creating a session or exposing
+   * tools. This is intentionally bounded for utility work such as automatic
+   * conversation titles: callers cannot turn it into an unbounded agent run.
+   */
+  async generateText({ model, prompt } = {}) {
+    requireNonEmpty(prompt, "prompt");
+    if (prompt.length > 16_000) throw new Error("prompt is too long");
+    await this.start();
+    if (!this.client.generate?.text) throw new Error("OpenCode text generation API is unavailable");
+
+    const requestPrompt = [
+      "You are a utility title generator.",
+      "Return only one concise conversation title as plain text.",
+      "Do not use tools, markdown, quotes, prefixes, or explanations.",
+      "Keep it under 80 tokens.",
+      "\nConversation request:\n",
+      prompt,
+    ].join(" ");
+    const input = { prompt: requestPrompt, ...(model ? { model: normalizeModel(model) } : {}) };
+    const controller = new AbortController();
+    let timer;
+    try {
+      const request = this.client.generate.text(input, { signal: controller.signal });
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(Object.assign(new Error("text generation timed out"), { code: "GENERATION_TIMEOUT" }));
+        }, 15_000);
+      });
+      const result = await Promise.race([
+        request,
+        timeout,
+      ]);
+      const text = typeof result === "string" ? result : result?.text ?? result?.data?.text ?? "";
+      return { text: String(text).trim().slice(0, 320) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async instructions(sessionID, text) {
     await this.start();
     await this.client.session.instructions.entry.put({sessionID,key:'opencode-bot',value:String(text??'')});
@@ -695,6 +736,72 @@ export class OpenCode2Runtime {
     return this.client.permission.list({ sessionID }, signal ? { signal } : undefined);
   }
 
+  /**
+   * Return pending native question-tool requests for one session.
+   *
+   * OpenCode 2.0.11 represents interactive question-tool prompts as session
+   * forms. Questions are never answered here; callers must explicitly invoke
+   * questionReply or questionReject.
+   */
+  async questions(sessionID, directory = this.directory) {
+    if (!sessionID) throw new Error("sessionID is required");
+    await this.start();
+    const location = nativeLocation(directory);
+    // v2.0.11 represents interactive question-tool prompts as session forms.
+    // Keep the product's question contract stable while retaining the native
+    // form id and field metadata for the reply path.
+    if (this.client.session?.form?.list) {
+      const forms = await this.client.session.form.list({ sessionID });
+      return normalizeForms(forms?.data ?? forms);
+    }
+    const method = this.client.session?.question?.list ?? this.client.question?.list;
+    if (method) return normalizeQuestionList(await method.call(this.client.session?.question?.list ? this.client.session.question : this.client.question, { sessionID, ...location }));
+    throw new Error("OpenCode question API is unavailable");
+  }
+
+  async questionReply(sessionID, requestID, answers, directory = this.directory) {
+    if (!sessionID) throw new Error("sessionID is required");
+    if (!requestID) throw new Error("requestID is required");
+    if (!Array.isArray(answers) || !answers.every((answer) => Array.isArray(answer) && answer.every((value) => typeof value === "string"))) throw new Error("answers must be an array of string arrays");
+    await this.start();
+    const location = nativeLocation(directory);
+    if (this.client.session?.form?.list && this.client.session?.form?.reply) {
+      const forms = normalizeForms(await this.client.session.form.list({ sessionID }));
+      const form = forms.find((item) => item.id === requestID);
+      if (!form) throw Object.assign(new Error("question request is no longer pending"), { statusCode: 409 });
+      if (answers.length !== form.questions.length || answers.some((values) => values.length === 0)) throw new Error("answers must contain one non-empty answer array per question");
+      const answer = form.questions.reduce((result, question, index) => {
+        const values = Array.isArray(answers[index]) ? answers[index] : [];
+        const nativeValues = values.map((value) => question.options?.find((option) => option.label === value)?.value ?? value);
+        const field = form.fields?.[index];
+        if (field?.key) {
+          const raw = field.type === "multiselect" ? nativeValues : nativeValues[0] ?? "";
+          result[field.key] = field.type === "number" ? Number(raw) : field.type === "integer" ? Number.parseInt(raw, 10) : field.type === "boolean" ? raw === "true" : raw;
+        }
+        return result;
+      }, {});
+      return this.client.session.form.reply({ sessionID, formID: requestID, answer });
+    }
+    const method = this.client.session?.question?.reply ?? this.client.question?.reply;
+    if (method) return method.call(this.client.session?.question?.reply ? this.client.session.question : this.client.question, { sessionID, requestID, answers, ...location });
+    throw new Error("OpenCode question API is unavailable");
+  }
+
+  async questionReject(sessionID, requestID, directory = this.directory) {
+    if (!sessionID) throw new Error("sessionID is required");
+    if (!requestID) throw new Error("requestID is required");
+    await this.start();
+    const location = nativeLocation(directory);
+    if (this.client.session?.form?.list && this.client.session?.form?.cancel) {
+      const forms = normalizeForms(await this.client.session.form.list({ sessionID }));
+      if (!forms.some((item) => item.id === requestID)) throw Object.assign(new Error("question request is no longer pending"), { statusCode: 409 });
+      return this.client.session.form.cancel({ sessionID, formID: requestID });
+    }
+    const method = this.client.session?.question?.reject ?? this.client.question?.reject;
+    if (method) return method.call(this.client.session?.question?.reject ? this.client.session.question : this.client.question, { sessionID, requestID, ...location });
+    throw new Error("OpenCode question API is unavailable");
+  }
+
   async *log(sessionId, after = 0, follow = false) {
     await this.start();
     yield* this.client.session.log({ sessionID: sessionId, after, follow });
@@ -740,6 +847,28 @@ function parseLocalOAuthCallback(value) {
   if (!callbackCode) throw new Error("OAuth callback URL is missing code");
   if (!url.searchParams.get('state')) throw new Error("OAuth callback URL is missing state");
   return callbackCode;
+}
+
+function normalizeQuestionList(result) {
+  const value = result?.data ?? result;
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.questions)) return value.questions;
+  return [];
+}
+
+function normalizeForms(value) {
+  const forms = Array.isArray(value) ? value : [];
+  return forms.filter((form) => form && form.metadata?.kind === "question" && (!form.state || form.state.status === "pending")).map((form) => {
+    const fields = Array.isArray(form.fields) ? form.fields.filter((field) => !field.hidden && field.type !== "external") : [];
+    const questions = fields.map((field) => ({
+      header: field.title ?? field.key,
+      question: field.description ?? field.title ?? field.key,
+      options: Array.isArray(field.options) ? field.options.map((option) => ({ value: option.value, label: option.label ?? option.value, description: option.description ?? "" })) : [],
+      multiple: field.type === "multiselect",
+      custom: field.custom !== false,
+    }));
+    return { id: form.id, sessionID: form.sessionID, title: form.title, questions, fields };
+  });
 }
 
 function rememberOAuthCallback(integrationID, result) {

@@ -58,6 +58,60 @@ test("native session removal maps a missing session to an idempotent 404", async
   await assert.rejects(runtime.removeSession("ses_missing"), (error) => error.statusCode === 404);
 });
 
+test("generateText uses the native bounded utility endpoint without tools", async () => {
+  let call;
+  const runtime = new OpenCode2Runtime({ client: {
+    generate: { text: async (input, options) => { call = { input, options }; return { text: "  A useful title  " }; } },
+  } });
+  const result = await runtime.generateText({ model: "opencode/mimo-v2.6-flash-free", prompt: "Build a status page" });
+  assert.deepEqual(result, { text: "A useful title" });
+  assert.deepEqual(call.input.model, { providerID: "opencode", id: "mimo-v2.6-flash-free" });
+  assert.match(call.input.prompt, /under 80 tokens/);
+  assert.match(call.input.prompt, /Do not use tools/);
+  assert.ok(call.options.signal instanceof AbortSignal);
+});
+
+test("generateText rejects oversized prompts and times out", async () => {
+  const runtime = new OpenCode2Runtime({ client: {
+    generate: { text: async () => new Promise(() => {}) },
+  } });
+  await assert.rejects(runtime.generateText({ prompt: "x".repeat(16_001) }), /prompt is too long/);
+  // Keep this test short while still exercising the abort path by replacing
+  // the native timer only around the call.
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => originalSetTimeout(fn, Math.min(ms, 5), ...args);
+  try { await assert.rejects(runtime.generateText({ prompt: "hang" }), /timed out/); }
+  finally { globalThis.setTimeout = originalSetTimeout; }
+});
+
+test("native question prompts use OpenCode v2 session forms and preserve option values", async () => {
+  const calls = [];
+  const form = { id: "frm_question", sessionID: "ses_question", metadata: { kind: "question" }, title: "Cloudflare access scope", state: { status: "pending" }, fields: [{ key: "scope", type: "string", title: "Cloudflare access scope", description: "Choose a permission scope", options: [{ value: "full", label: "Full access", description: "All permissions" }, { value: "read", label: "Read only", description: "Read permissions" }], custom: true }] };
+  const runtime = new OpenCode2Runtime({ client: { session: { form: {
+    list: async input => { calls.push(["list", input]); return [form]; },
+    reply: async input => { calls.push(["reply", input]); },
+    cancel: async input => { calls.push(["cancel", input]); },
+  } } } });
+  const questions = await runtime.questions("ses_question");
+  assert.equal(questions[0].id, "frm_question");
+  assert.equal(questions[0].questions[0].options[0].label, "Full access");
+  assert.equal(questions[0].questions[0].options[0].value, "full");
+  await runtime.questionReply("ses_question", "frm_question", [["Full access"]]);
+  await runtime.questionReject("ses_question", "frm_question");
+  assert.deepEqual(calls, [
+    ["list", { sessionID: "ses_question" }],
+    ["list", { sessionID: "ses_question" }],
+    ["reply", { sessionID: "ses_question", formID: "frm_question", answer: { scope: "full" } }],
+    ["list", { sessionID: "ses_question" }],
+    ["cancel", { sessionID: "ses_question", formID: "frm_question" }],
+  ]);
+});
+
+test("non-question native forms stay out of the bot question surface", async () => {
+  const runtime = new OpenCode2Runtime({ client: { session: { form: { list: async () => [{ id: "frm_auth", metadata: { kind: "oauth" }, state: { status: "pending" }, fields: [{ key: "code", type: "string" }], title: "Sign in" }] } } } });
+  assert.deepEqual(await runtime.questions("ses_auth"), []);
+});
+
 test("native session removal preserves permission failures", async () => {
   const permissionError = { _tag: "UnauthorizedError" };
   const fakeClient = {

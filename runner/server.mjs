@@ -484,7 +484,6 @@ export class RunStore {
         if (!isTransientTransportError(error) && !timeout) throw error;
         lastTransportError = error;
         attempt += 1;
-        this.emit(run, 'connection.recovering', { attempt, message: errorMessage(error) });
         const approvalPending = await this.confirmPendingApproval(run);
         if (approvalPending) {
           // The native model is still alive and blocked on permission. Reopen
@@ -496,6 +495,16 @@ export class RunStore {
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
+        const questionPending = await this.confirmPendingQuestion(run);
+        if (questionPending) {
+          approvalReconnects += 1;
+          approvalCheckFailures = 0;
+          const delay = Math.min(5_000, 100 * 2 ** Math.min(approvalReconnects - 1, 5));
+          attempt = 0;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        this.emit(run, 'connection.recovering', { attempt, message: errorMessage(error) });
         approvalCheckFailures += 1;
         approvalReconnects = 0;
         if (attempt >= 3 || approvalCheckFailures >= 3) break;
@@ -524,17 +533,37 @@ export class RunStore {
     }
   }
 
+  async confirmPendingQuestion(run) {
+    if (isTerminal(run.status) || !run.sessionId || !this.runtime.questions) return false;
+    try {
+      const questions = await this.runtime.questions(run.sessionId);
+      if (!Array.isArray(questions) || questions.length === 0) return false;
+      run.status = 'waiting_human';
+      for (const question of questions) {
+        if (!question?.id || run.events.some(event => event.type === 'question.requested' && event.data.requestId === question.id)) continue;
+        this.emit(run, 'question.requested', { ...question, requestId: question.id });
+      }
+      return true;
+    } catch { return false; }
+  }
+
   async watch(run, iterable) {
     try {
       for await (const event of iterable) {
         const eventData = event?.properties ?? event?.data ?? {};
-        if (eventData.sessionID !== run.sessionId) continue;
+        if ((eventData.sessionID ?? eventData.form?.sessionID) !== run.sessionId) continue;
         const type = eventType(event);
         const text = eventText(event);
         if (text) run.final += text;
         if (type === 'permission.asked') {
           run.status = 'waiting_approval';
           this.emit(run, 'approval.requested', { ...eventData, requestId: eventData.id });
+        } else if (type === 'question.asked' || (type === 'form.created' && eventData.form?.metadata?.kind === 'question')) {
+          run.status = 'waiting_human';
+          this.emit(run, 'question.requested', { ...eventData, requestId: eventData.id ?? eventData.form?.id, ...(eventData.form ? eventData.form : {}) });
+        } else if (type === 'form.replied' || type === 'form.cancelled') {
+          if (run.status === 'waiting_human') run.status = 'running';
+          this.emit(run, type, eventData);
         } else this.emit(run, type, eventData);
         if (type === 'session.retry.scheduled' && /UNKNOWN_CERTIFICATE_VERIFICATION_ERROR|CERTIFICATE_VERIFY_FAILED/.test(eventData.error?.message ?? '')) {
           run.transportFailure = 'The computer could not establish a secure connection to the model provider. Provider retries were stopped. Check the computer’s network connection before retrying. (' + eventData.error.message + ')';
@@ -577,12 +606,46 @@ export class RunStore {
     return this.public(run);
   }
 
+  async questions(run) {
+    if (!run) throw httpError(404, 'run not found');
+    if (isTerminal(run.status)) return { questions: [] };
+    if (!run.sessionId || !this.runtime.questions) throw httpError(409, 'run has no native session for questions');
+    const questions = await this.runtime.questions(run.sessionId);
+    return { questions: Array.isArray(questions) ? questions : [] };
+  }
+
+  async questionAction(run, requestId, action, answers) {
+    if (!run) throw httpError(404, 'run not found');
+    if (isTerminal(run.status)) throw httpError(409, 'run is no longer active');
+    if (!run.sessionId || !this.runtime.questions) throw httpError(409, 'run has no native session for questions');
+    if (!requestId || !['reply', 'reject'].includes(action)) throw httpError(400, 'invalid question action');
+    const pending = await this.runtime.questions(run.sessionId);
+    const request = pending.find(question => question?.id === requestId);
+    if (!request) throw httpError(409, 'question request is no longer pending');
+    if (action === 'reply') {
+      if (!Array.isArray(answers) || answers.length !== request.questions.length || !answers.every(answer => Array.isArray(answer) && answer.length > 0 && answer.every(value => typeof value === 'string'))) throw httpError(400, 'answers must contain one non-empty string array per question');
+      await this.runtime.questionReply(run.sessionId, requestId, answers);
+    } else await this.runtime.questionReject(run.sessionId, requestId);
+    if (run.status === 'waiting_human') run.status = 'running';
+    this.emit(run, 'question.replied', { requestId, action, ...(action === 'reply' ? { answers } : {}) });
+    return this.public(run);
+  }
+
   async refresh(run) {
-    if (!run || isTerminal(run.status) || !run.sessionId || !this.runtime.permissions) return;
-    for (const permission of await this.runtime.permissions(run.sessionId)) {
-      if (run.events.some(event => event.type === 'approval.requested' && event.data.requestId === permission.id)) continue;
-      run.status = 'waiting_approval';
-      this.emit(run, 'approval.requested', { ...permission, requestId: permission.id });
+    if (!run || isTerminal(run.status) || !run.sessionId) return;
+    if (this.runtime.permissions) {
+      for (const permission of await this.runtime.permissions(run.sessionId)) {
+        if (run.events.some(event => event.type === 'approval.requested' && event.data.requestId === permission.id)) continue;
+        run.status = 'waiting_approval';
+        this.emit(run, 'approval.requested', { ...permission, requestId: permission.id });
+      }
+    }
+    if (this.runtime.questions) {
+      for (const question of await this.runtime.questions(run.sessionId)) {
+        if (!question?.id || run.events.some(event => event.type === 'question.requested' && event.data.requestId === question.id)) continue;
+        run.status = 'waiting_human';
+        this.emit(run, 'question.requested', { ...question, requestId: question.id });
+      }
     }
   }
 
@@ -788,7 +851,7 @@ export function createServer({ store, authToken = token, botToolToken, workspace
           "providers/credentials/activate": ["activateProviderCredential", false], "providers/credentials/label": ["updateProviderCredential", false], "providers/credentials/remove": ["removeProviderCredential", false],
           "providers/oauth/start": ["providerOAuthStart", false], "providers/oauth/status": ["providerOAuthStatus", true], "providers/oauth/complete": ["providerOAuthComplete", false], "providers/oauth/cancel": ["providerOAuthCancel", false],
           "providers/command/start": ["providerCommandStart", false], "providers/command/status": ["providerCommandStatus", true], "providers/command/cancel": ["providerCommandCancel", false],
-          mcps: ["mcpList", true], "mcps/add": ["mcpAdd", false], "mcps/remove": ["mcpRemove", false], "mcps/connect": ["mcpConnect", false], "mcps/disconnect": ["mcpDisconnect", false],
+          mcps: ["mcpList", true], "generate/text": ["generateText", true], "mcps/add": ["mcpAdd", false], "mcps/remove": ["mcpRemove", false], "mcps/connect": ["mcpConnect", false], "mcps/disconnect": ["mcpDisconnect", false],
           "mcps/oauth/start": ["providerOAuthStart", false], "mcps/oauth/status": ["providerOAuthStatus", true], "mcps/oauth/complete": ["providerOAuthComplete", false], "mcps/oauth/cancel": ["providerOAuthCancel", false],
         };
         const selected = methods[operation];
@@ -877,6 +940,14 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         if (!store.runtime.catalog) return json(res, 501, { error: "catalog is unavailable" });
         return json(res, 200, await store.withRuntime(() => store.runtime.catalog(new URL(req.url, 'http://runner').searchParams.get("directory") ?? workspace)));
       }
+      if (req.url === "/generate/text" && req.method === "POST") {
+        if (typeof store.runtime.generateText !== "function") return json(res, 501, { error: "text generation is unavailable" });
+        const input = await readJson(req);
+        if (typeof input?.prompt !== "string" || !input.prompt.trim()) return json(res, 400, { error: "prompt is required" });
+        if (input.prompt.length > 16_000) return json(res, 413, { error: "prompt is too long" });
+        const result = await store.withRuntime(() => store.runtime.generateText({ prompt: input.prompt, model: input.model }));
+        return json(res, 200, result);
+      }
       if (req.url === '/sessions' && req.method === 'POST') {
         if (store.paused || store.terminalRegistry?.active() || [...store.runs.values()].some(run => !isTerminal(run.status))) return json(res, 409, { error: 'computer is busy' });
         const input = await readJson(req);
@@ -902,7 +973,15 @@ export function createServer({ store, authToken = token, botToolToken, workspace
         });
         return json(res, 200, { deleted: true, sessionId: sessionRemove[1] });
       }
-      const match = new URL(req.url, "http://runner").pathname.match(/^\/runs(?:\/([^/]+)(?:\/(cancel|approval))?)?$/);
+      const runPath = new URL(req.url, "http://runner").pathname;
+      const questionListMatch = runPath.match(/^\/runs\/([A-Za-z0-9._:-]{1,160})\/questions$/);
+      if (questionListMatch && req.method === "GET") return json(res, 200, await store.withRuntime(() => store.questions(store.get(questionListMatch[1]))));
+      const questionActionMatch = runPath.match(/^\/runs\/([A-Za-z0-9._:-]{1,160})\/questions\/([^/]+)\/(reply|reject)$/);
+      if (questionActionMatch && req.method === "POST") {
+        const input = await readJson(req);
+        return json(res, 200, await store.withRuntime(() => store.questionAction(store.get(questionActionMatch[1]), decodeURIComponent(questionActionMatch[2]), questionActionMatch[3], input.answers)));
+      }
+      const match = runPath.match(/^\/runs(?:\/([^/]+)(?:\/(cancel|approval))?)?$/);
       const messageMatch = new URL(req.url, "http://runner").pathname.match(/^\/runs\/([A-Za-z0-9._:-]{1,160})\/messages$/);
       if (messageMatch && req.method === "POST") {
         const body = await readJson(req);

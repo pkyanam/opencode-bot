@@ -52,6 +52,7 @@ import { AutoSleepController } from "../../../packages/coordinator-cloudflare/sr
 import { PairingError, PairingService } from "./pairing";
 import { createMcpHandler } from "./mcp";
 import { verifyCheckpointObject } from "./checkpoint-verification";
+import { scheduleConversationTitle } from "./conversation-title";
 // Re-export the Cloudflare Sandbox Durable Object class for the `SANDBOX`
 // container binding declared in wrangler.jsonc.
 export { Sandbox } from "@cloudflare/sandbox";
@@ -568,6 +569,7 @@ export class Workspace {
     } catch {
       /* already exists */
     }
+    try { sql.exec("ALTER TABLE threads ADD COLUMN title_revision INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
     sql.exec(
       `CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)`,
     );
@@ -934,6 +936,15 @@ export class Workspace {
         );
       if (url.pathname === "/api/state" && request.method === "GET")
         return response(this.stateView());
+      if ((url.pathname === "/api/settings/utility-model" || url.pathname === "/api/settings/title-model") && request.method === "GET")
+        return response({ model: await this.titleModel() });
+      if ((url.pathname === "/api/settings/utility-model" || url.pathname === "/api/settings/title-model") && request.method === "PATCH") {
+        const input = await body<any>(request);
+        const model = typeof input.model === "string" ? input.model.trim() : "";
+        if (model.length > 240) throw new HttpError(400, "title model must contain at most 240 characters");
+        await this.state.storage.put("settings:title-model", model);
+        return response({ model });
+      }
       if (url.pathname === "/internal/sweep" && request.method === "POST") {
         await this.alarm();
         return response({ ok: true });
@@ -1079,7 +1090,7 @@ export class Workspace {
             "Conversation title must contain 1–160 characters",
           );
         const changed = this.state.storage.sql.exec(
-          "UPDATE threads SET title=?,updated_at=? WHERE id=?",
+          "UPDATE threads SET title=?,title_revision=title_revision+1,updated_at=? WHERE id=?",
           input.title.trim(),
           isoNow(),
           renameThread[1],
@@ -1111,6 +1122,12 @@ export class Workspace {
         if (!item) throw new HttpError(404, "run not found");
         return response(this.events(runEvents[1]));
       }
+      const runQuestions = url.pathname.match(/^\/api\/runs\/([^/]+)\/questions$/);
+      if (runQuestions && request.method === "GET")
+        return response(await this.runQuestions(runQuestions[1]));
+      const runQuestionReply = url.pathname.match(/^\/api\/runs\/([^/]+)\/questions\/([^/]+)\/(reply|reject)$/);
+      if (runQuestionReply && request.method === "POST")
+        return response(await this.runQuestionAction(runQuestionReply[1], decodeURIComponent(runQuestionReply[2]), runQuestionReply[3], await body(request)));
       if (url.pathname === "/api/runs" && request.method === "POST")
         return response(this.admitMessage(await body(request)), 202);
       const action = url.pathname.match(/^\/api\/threads\/([^/]+)\/action$/);
@@ -1202,6 +1219,38 @@ export class Workspace {
     const provider = this.env.HOSTING_PROVIDER === "boat" || this.env.HOSTING_PROVIDER === "local" ? this.env.HOSTING_PROVIDER : "cloudflare";
     const defaultComputerLabel = this.env.DEFAULT_COMPUTER_LABEL ?? (provider === "boat" ? "Boat computer" : provider === "local" ? "Local computer" : "Cloudflare computer");
     return { host: provider, computerLabel: defaultComputerLabel };
+  }
+  private async titleModel(): Promise<string> {
+    if (typeof this.state.storage.get !== "function") return "";
+    return (await this.state.storage.get<string>("settings:title-model")) ?? "";
+  }
+  private scheduleTitleGeneration(threadId: string, prompt: string, currentTitle: string): void {
+    if (currentTitle.trim().toLowerCase() !== "new conversation") return;
+    const thread = this.one<any>("SELECT t.node_id,t.title_revision,b.model FROM threads t JOIN bots b ON b.id=t.bot_id WHERE t.id=?", threadId);
+    const expectedRevision = Number(thread?.title_revision ?? 0);
+    scheduleConversationTitle({
+      threadId, prompt, currentTitle, model: undefined, store: {
+        getTitle: (id) => this.one<any>("SELECT title FROM threads WHERE id=?", id)?.title,
+        updateTitleIfUnchanged: (id, expected, next) => {
+          const changed = this.state.storage.sql.exec("UPDATE threads SET title=?,updated_at=? WHERE id=? AND title=? AND title_revision=?", next, isoNow(), id, expected, expectedRevision);
+          return Boolean(changed.rowsWritten);
+        },
+      },
+      generate: async ({ prompt: generationPrompt, model: requestedModel }) => {
+        const model = (await this.titleModel()) || requestedModel || thread?.model;
+        if (!model) return "";
+        if (thread?.node_id) {
+          const job = await this.nodes().enqueue(thread.node_id, { kind: "runtime.operation", nodeId: thread.node_id, operation: "generate/text", input: { model, prompt: generationPrompt } }, 90);
+          for (let i = 0; i < 30; i++) { const current = this.nodes().getJob(job.id); if (current?.status === "succeeded") return String((current.result as any)?.text ?? ""); if (current?.status === "failed" || current?.status === "needs_review") return ""; await new Promise((resolve) => setTimeout(resolve, 1000)); }
+          return "";
+        }
+        const result = await (await this.transport()).fetch("/generate/text", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, prompt: generationPrompt }) });
+        if (!result.ok) return "";
+        const value = await result.json() as any;
+        return String(value?.text ?? value?.result?.text ?? "");
+      },
+      schedule: (work) => this.state.waitUntil(work.catch(() => undefined)),
+    });
   }
   private routines(): any[] {
     return this.rows<any>("SELECT * FROM routines ORDER BY created_at").map(
@@ -1922,11 +1971,12 @@ export class Workspace {
       updatedAt: now,
     };
     this.state.storage.sql.exec(
-      "INSERT INTO threads (id,bot_id,title,node_id,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+      "INSERT INTO threads (id,bot_id,title,node_id,title_revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
       item.id,
       item.botId,
       item.title,
       nodeId,
+      0,
       now,
       now,
     );
@@ -2108,6 +2158,8 @@ export class Workspace {
       input.allowBotMessaging === false ? 0 : 1,
       input.attachments.length ? json(input.attachments) : null,
     );
+    if (recordUserMessage && input.allowBotMessaging !== false && !commandName && !input.sessionAction && Number(this.one<any>("SELECT COUNT(*) AS n FROM messages WHERE thread_id=? AND role='user'", input.threadId)?.n ?? 0) === 1)
+      this.scheduleTitleGeneration(input.threadId, String(input.prompt), this.one<any>("SELECT title FROM threads WHERE id=?", input.threadId)?.title ?? "");
     this.event(runId, "run.queued", { prompt: String(input.prompt) });
     this.state.storage.setAlarm(Date.now() + 100);
     return {
@@ -2148,6 +2200,87 @@ export class Workspace {
     const item = this.one("SELECT * FROM runs WHERE id = ?", runId);
     if (!item) throw new HttpError(404, "run not found");
     return { ...this.run(item), events: this.events(runId) };
+  }
+
+  /** Forward native OpenCode questions while keeping the run's execution
+   * affinity. Questions are deliberately separate from permission approvals. */
+  private async runQuestions(runId: string): Promise<any> {
+    const run = this.one<any>("SELECT * FROM runs WHERE id=?", runId);
+    if (!run) throw new HttpError(404, "run not found");
+    const affinity = this.one<any>("SELECT node_id FROM threads WHERE id=?", run.thread_id);
+    if (affinity?.node_id) {
+      const existing = this.existingQuestionCommand(run, affinity.node_id, "runner.questions", runId);
+      const jobId = existing ?? await this.enqueueOwnedCommand(run, { kind: "runner.questions", runId });
+      const result = await this.waitForOwnedQuestionCommand(jobId, affinity.node_id);
+      return result ?? { questions: [], pending: true, jobId };
+    }
+    const result = await (await this.transport()).fetch(`/runs/${encodeURIComponent(runId)}/questions`, { method: "GET" });
+    return this.nativeQuestionResponse(result);
+  }
+
+  private async runQuestionAction(runId: string, requestId: string, action: string, input: any): Promise<any> {
+    if (!requestId || !["reply", "reject"].includes(action)) throw new HttpError(400, "invalid question action");
+    const run = this.one<any>("SELECT * FROM runs WHERE id=?", runId);
+    if (!run) throw new HttpError(404, "run not found");
+    const answers = input?.answers;
+    if (action === "reply" && (!Array.isArray(answers) || !answers.every((answer: unknown) => Array.isArray(answer) && answer.every((value: unknown) => typeof value === "string"))))
+      throw new HttpError(400, "answers must be an array of string arrays");
+    const affinity = this.one<any>("SELECT node_id FROM threads WHERE id=?", run.thread_id);
+    if (affinity?.node_id) {
+      const payload = {
+        kind: action === "reply" ? "runner.question.reply" : "runner.question.reject",
+        runId,
+        requestId,
+        ...(action === "reply" ? { answers } : {}),
+      };
+      const prior = this.findQuestionCommand(run, affinity.node_id, payload.kind, runId, requestId);
+      if (prior?.status === "succeeded") return prior.result ?? { accepted: true };
+      const existing = prior?.status === "queued" || prior?.status === "leased" ? prior.id : undefined;
+      const jobId = existing ?? await this.enqueueOwnedCommand(run, payload);
+      const result = await this.waitForOwnedQuestionCommand(jobId, affinity.node_id);
+      if (!result) throw new HttpError(503, "The answer is still being delivered to the owned node; retry shortly.");
+      return result;
+    }
+    const result = await (await this.transport()).fetch(`/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(requestId)}/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(action === "reply" ? { answers } : {}),
+    });
+    return this.nativeQuestionResponse(result);
+  }
+
+  private async nativeQuestionResponse(result: Response): Promise<any> {
+    const text = await result.text();
+    let value: any;
+    try { value = text ? JSON.parse(text) : {}; } catch { value = { error: text || "invalid runner response" }; }
+    if (!result.ok) throw new HttpError(result.status >= 400 && result.status < 600 ? result.status : 502, String(value?.error ?? "runner question request failed"));
+    return value;
+  }
+
+  private findQuestionCommand(run: any, nodeId: string, kind: string, runId: string, requestId?: string): any | undefined {
+    const rows = this.rows<any>("SELECT * FROM node_jobs WHERE node_id=? AND json_extract(payload,'$.kind')=? AND json_extract(payload,'$.runId')=? ORDER BY created_at DESC", nodeId, kind, runId);
+    for (const row of rows) {
+      const payload = parseJson<any>(row.payload, {});
+      if (requestId !== undefined && String(payload.requestId ?? "") !== requestId) continue;
+      return this.nodes().getJob(String(row.id));
+    }
+    return undefined;
+  }
+  private existingQuestionCommand(run: any, nodeId: string, kind: string, runId: string): string | undefined {
+    const job = this.findQuestionCommand(run, nodeId, kind, runId);
+    return job && (job.status === "queued" || job.status === "leased") ? job.id : undefined;
+  }
+
+  private async waitForOwnedQuestionCommand(jobId: string, nodeId: string): Promise<any | undefined> {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const job = this.nodes().getJob(jobId);
+      if (!job || job.nodeId !== nodeId) throw new HttpError(502, "owned node question command receipt disappeared");
+      if (job.status === "succeeded") return job.result && typeof job.result === "object" ? job.result : {};
+      if (job.status === "failed" || job.status === "needs_review") throw new HttpError(502, job.error ?? "owned node did not complete the question request");
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return undefined;
   }
 
   private async runAction(runId: string, input: any): Promise<any> {
@@ -3558,7 +3691,7 @@ export class Workspace {
   private async enqueueOwnedCommand(
     run: any,
     payload: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<string> {
     const thread = this.one<any>(
       "SELECT node_id FROM threads WHERE id=?",
       run.thread_id,
@@ -3577,12 +3710,13 @@ export class Workspace {
       nodeCommandJobId: command.id,
       kind: payload.kind,
     });
+    return command.id;
   }
   private async enqueueNodeRuntimeOperation(nodeId: string, operation: string, method: string, input: any): Promise<any> {
     const node = this.nodes().get(nodeId);
     if (!node) throw new HttpError(404, "node not found");
     if (node.revokedAt || !node.online) throw new HttpError(409, "target node is offline; operation was not sent");
-    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
+    const allowed = new Set(["catalog", "providers", "providers/key", "providers/custom", "providers/credentials/activate", "providers/credentials/label", "providers/credentials/remove", "providers/oauth/start", "providers/oauth/status", "providers/oauth/complete", "providers/oauth/cancel", "providers/command/start", "providers/command/status", "providers/command/cancel", "mcps", "mcps/add", "mcps/remove", "mcps/connect", "mcps/disconnect", "mcps/oauth/start", "mcps/oauth/status", "mcps/oauth/complete", "mcps/oauth/cancel", "generate/text", "file_roots", "file_list", "file_read", "file_stat", "file_mkdir", "file_move", "file_delete", "file_export", "file_import"]);
     if (!allowed.has(operation)) throw new HttpError(400, "unsupported node runtime operation");
     const job = await this.nodes().enqueue(nodeId, { kind: "runtime.operation", nodeId, operation, method, input: input && typeof input === "object" ? input : {} }, 90);
     this.state.storage.setAlarm(Date.now() + 100);
@@ -4187,16 +4321,17 @@ export class Workspace {
       this.transition(run.id, current.status, "cancelled", {
         source: "runner",
       });
-    else if (
-      remoteStatus === "waiting_approval" &&
-      current.status === "running"
-    )
+    else if (remoteStatus === "waiting_approval" && ["running", "waiting_human"].includes(current.status))
       this.transition(run.id, current.status, "waiting_approval", {
         source: "runner",
       });
+    else if (remoteStatus === "waiting_human" && current.status === "running")
+      this.transition(run.id, current.status, "waiting_human", { source: "runner" });
+    else if (remoteStatus === "running" && current.status === "waiting_human")
+      this.transition(run.id, current.status, "running", { source: "runner" });
     else if (
       current.status === "cancelling" &&
-      ["running", "provisioning", "waiting_approval"].includes(remoteStatus)
+      ["running", "provisioning", "waiting_approval", "waiting_human"].includes(remoteStatus)
     ) {
       try {
         const transport = await this.transport();
@@ -4226,6 +4361,8 @@ const CLIENT_MCP_TOOLS = new Set([
 function clientRouteAllowed(request: Request, url: URL): boolean {
   if ((url.pathname === "/api/pairing/session" || url.pathname === "/api/pairing/session/me") && request.method === "GET") return true;
   if (url.pathname === "/api/state" && request.method === "GET") return true;
+  // Native question routes are explicitly part of the paired-client surface.
+  if (/^\/api\/runs\/[^/]+\/questions(?:\/[^/]+\/(?:reply|reject))?$/.test(url.pathname) && ["GET", "POST"].includes(request.method)) return true;
   if (/^\/api\/bots\/[^/]+\/telegram(?:\/|$)/.test(url.pathname)) return false;
   if (/^\/api\/(bots|threads|runs|routines)(?:\/|$)/.test(url.pathname) || url.pathname === "/api/bots" || url.pathname === "/api/threads" || url.pathname === "/api/runs" || url.pathname === "/api/routines") return true;
   if (/^\/api\/memory(?:\/|$)/.test(url.pathname) && url.pathname !== "/api/memory/tools") return true;

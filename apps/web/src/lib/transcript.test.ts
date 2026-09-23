@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeActivityMessages, normalizeNativeMessages } from "./transcript";
+import { mergeActivityMessages, normalizeNativeMessages, safeToolDetail } from "./transcript";
 
 describe("transcript normalization", () => {
   it("keeps duplicate attachment ids unique without quadratic scans", () => {
@@ -26,4 +26,9 @@ describe("transcript normalization", () => {
     );
     expect(result[0].parts?.[0]).toMatchObject({ status: "interrupted" });
   });
+});
+
+it('preserves nested question options while redacting credentials', () => {
+  const input={questions:[{header:'Access',question:'Choose scope',options:[{label:'Read only',description:'Read resources'}]}],token:'private'};
+  expect(safeToolDetail(input)).toEqual({...input,token:'[redacted]'});
 });

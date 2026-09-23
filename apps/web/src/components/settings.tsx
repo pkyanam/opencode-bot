@@ -30,6 +30,7 @@ import { OpenCodeProviders } from "./opencode-providers";
 import { AppUpdates } from "./app-updates";
 import { McpSettings } from "./mcp-settings";
 import { StorageSettings } from "./storage-settings";
+import { ConversationTitleSettings } from "./conversation-title-settings";
 import { computerLabelFromState } from "../hosting-ui";
 
 type Node = {
@@ -642,6 +643,7 @@ export function SettingsModal({
               )}
             </TabsContent>
             <TabsContent value="runtime">
+              {identity?.role === "owner" && <ConversationTitleSettings models={catalog?.models ?? []} />}
               <NodeTargetPicker nodes={nodes} value={selectedNodeId} onChange={setSelectedNodeId} computerLabel={computerLabel} />
               <div className="settings-section-head">
                 <h3>OpenCode</h3>
