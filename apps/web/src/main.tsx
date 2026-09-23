@@ -227,6 +227,14 @@ function App() {
     try {
       if (!quiet) setLoading(true);
       const next = await api.state();
+      // Older control servers omitted approval details from workspace snapshots.
+      // Fetch the authoritative request so a web-only update can unblock review
+      // without restarting the computer or interrupting its running tasks.
+      next.runs = await Promise.all(next.runs.map(async (run) => {
+        if (run.status !== "waiting_approval" || pendingApproval(run)) return run;
+        try { return await api.runDetail(run.id); }
+        catch { return run; }
+      }));
       setState(next);
       setError("");
       setConnected(true);

@@ -719,7 +719,12 @@ export class Workspace {
       const ahead = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM runs r WHERE r.status='queued' AND (r.created_at<? OR (r.created_at=? AND r.rowid<(SELECT rowid FROM runs WHERE id=?)))", row.created_at, row.created_at, row.id)?.n ?? 0;
       queue = { position: ahead + 1, ...(blockedBy ? { blockedBy } : {}), reconnecting: events.some(event => event.type === "runner.reconcile_error") };
     }
+    const pending = row.status === "waiting_approval" ? this.one<any>(
+      "SELECT request_id,payload,created_at FROM approvals WHERE run_id=? AND decision IS NULL ORDER BY created_at LIMIT 1",
+      row.id,
+    ) : undefined;
     return {
+      ...(pending ? { pendingApproval: { requestId: pending.request_id, payload: clientPayload(parseJson(pending.payload, null)), createdAt: pending.created_at } } : {}),
       id: row.id,
       threadId: row.thread_id,
       prompt: row.prompt,
@@ -2142,24 +2147,9 @@ export class Workspace {
   private runView(runId: string): any {
     const item = this.one("SELECT * FROM runs WHERE id = ?", runId);
     if (!item) throw new HttpError(404, "run not found");
-    const pending = this.one<any>(
-      "SELECT request_id,payload,created_at FROM approvals WHERE run_id=? AND decision IS NULL ORDER BY created_at LIMIT 1",
-      runId,
-    );
-    return {
-      ...this.run(item),
-      events: this.events(runId),
-      ...(pending && (item as any).status === "waiting_approval"
-        ? {
-            pendingApproval: {
-              requestId: pending.request_id,
-              payload: parseJson(pending.payload, null),
-              createdAt: pending.created_at,
-            },
-          }
-        : {}),
-    };
+    return { ...this.run(item), events: this.events(runId) };
   }
+
   private async runAction(runId: string, input: any): Promise<any> {
     if (input.action !== "cancel")
       throw new HttpError(400, "only cancel is supported");

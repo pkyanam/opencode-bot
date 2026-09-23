@@ -241,7 +241,12 @@ describe('durable control-plane integration with real SQLite', () => {
   it('exposes pending approval payload and enforces one-shot decisions', async () => {
     const f = fixture(); const { thread } = await f.create(); const run = await f.request('/api/runs', 'POST', { threadId: thread.id, prompt: 'Approve', idempotencyKey: 'approval-one' }); await f.alarm(); const remoteRun=remote.runs.get(run.body.id); remoteRun.status='waiting_approval'; remoteRun.events=[{seq:1,type:'permission.asked',data:{requestId:'req-1',title:'Run command'}}]; await f.alarm();
     expect((await f.request(`/api/runs/${run.body.id}`)).body.pendingApproval).toMatchObject({ requestId:'req-1', payload:{requestId:'req-1',title:'Run command'} });
+    // Workspace polling must include the request even after it leaves the event window.
+    for (let seq = 2; seq < 40; seq++) remoteRun.events.push({seq,type:'progress',data:{}});
+    await f.alarm();
+    expect((await f.request('/api/state')).body.runs.find((r:any) => r.id === run.body.id).pendingApproval).toMatchObject({requestId:'req-1'});
     expect((await f.request(`/api/runs/${run.body.id}/approval`, 'POST', { requestId:'req-1', decision:'approve' })).status).toBe(200);
+    expect((await f.request('/api/state')).body.runs.find((r:any) => r.id === run.body.id).pendingApproval).toBeUndefined();
     expect((await f.request(`/api/runs/${run.body.id}/approval`, 'POST', { requestId:'req-1', decision:'approve' })).status).toBe(409);
   });
   it('marks approval forwarding failure for review', async () => {
